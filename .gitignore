@@ -1,0 +1,9 @@
+target/
+.env
+*.log
+# k8s/ is tracked. CI preflight and kubectl apply read
+# k8s/staging/gateway-service.yaml from this repo. Keep k8s/ in
+# .dockerignore so manifests are not copied into the image.
+
+# Local-only build settings (shared target dir, path overrides)
+.cargo/config.toml

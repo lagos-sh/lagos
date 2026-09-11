@@ -1,0 +1,13 @@
+# Build artifacts. Without this the whole target/ tree (multiple GB) is uploaded
+# to the daemon as build context on every build.
+target/
+
+.git/
+.github/
+tests/
+docs/
+k8s/
+*.md
+.env
+.env.*
+!.env.example

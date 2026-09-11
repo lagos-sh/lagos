@@ -1,0 +1,169 @@
+# A complete gateway. Run it with:
+#
+#   lagos run gateway.yml
+#
+# Nothing else is required — no database, no control plane, and no environment
+# variables unless you ask for them with ${VAR}.
+
+upstreams:
+  # A bare URL is the short form. `${VAR}` reads the environment and is fatal
+  # if unset; `${VAR:-default}` falls back, so this file runs on a laptop and
+  # in a cluster without being two files.
+  users:  ${USERS_URL:-http://localhost:3000}
+  orders: ${ORDERS_URL:-http://localhost:3001}
+
+  # Several backends make it a pool. Balancing and health checking are
+  # Pingora's; an unhealthy member leaves the rotation and comes back on its
+  # own. Note a pool resolves DNS once at startup, while a single target above
+  # resolves per connection — so reach for a pool when you have real replicas.
+  #
+  # search:
+  #   targets:
+  #     - http://search-1:3000
+  #     - url: http://search-2:3000
+  #       weight: 3
+  #   balance: round_robin       # or `consistent` for cache affinity:
+  #   # balance: consistent
+  #   # hash_on: path             # path | identity | ip | header.<name>
+  #   health_check:
+  #     path: /health
+  #     interval: 10s
+  #   # Stops sending to a service that is *failing* rather than *down* —
+  #   # one that answers its health probe but returns 500s or hangs. Shed
+  #   # requests get a 503 with Retry-After.
+  #   circuit_breaker:
+  #     failures: 5
+  #     window: 30s
+  #     cooldown: 10s
+
+routes:
+  # A route's group decides how hard the gateway insists on knowing who the
+  # caller is. There is no `auth:` field on a route, so no route can be made
+  # public by accident.
+
+  # No token is read, even if one is sent.
+  public:
+    - prefix: /auth
+      upstream: users
+      methods: [POST]
+
+    # `host:` separates traffic between tenants or environments. It is routing,
+    # not a security boundary — the client picks its own Host header. Use the
+    # `machine` group or `internal:` for anything that must be unreachable.
+    #
+    # - host: api.example.com
+    #   prefix: /users
+    #   upstream: users
+
+  # Usable signed-out, better signed in: a catalogue that shows member pricing,
+  # a listing that marks favourites. A *missing* token is fine here; an expired
+  # one is still a 401, so a stale session surfaces instead of silently
+  # degrading to anonymous.
+  optional:
+    - prefix: /products
+      upstream: users
+      methods: [GET]
+
+  # A valid token is required. Omitting `methods` allows any method.
+  authenticated:
+    - prefix: /orders
+      upstream: orders
+
+    # `bind` proves the caller owns what they asked for. Without it, any
+    # authenticated tenant could read another's data by changing a number.
+    # Missing parameter, missing claim and mismatch are all one answer — 403 —
+    # so the response cannot be used to probe which accounts exist.
+    - prefix: /events
+      upstream: orders
+      bind:
+        query.accountId: identity.account_id
+
+    # Counted in this process — no Redis. Over the limit is a 429 with
+    # Retry-After. `key: ip` needs `trusted_proxies` set to the number of
+    # proxies actually in front, or every client behind an ingress shares one
+    # bucket; see the README, it is a security setting rather than a tuning one.
+    - prefix: /search
+      upstream: orders
+      rate_limit:
+        requests: 100
+        interval: 1m
+        key: identity
+        # counter: sketch   # fixed memory at any key cardinality, but it
+        #                   # over-counts on hash collision, so a caller can be
+        #                   # refused for someone else's traffic.
+      # A connect failure means nothing was delivered, so it is safe to repeat
+      # for any method — and with a pool the retry lands on another backend.
+      # An error *after* connecting only retries idempotent methods, because
+      # the upstream may already have acted on the request.
+      retry:
+        attempts: 2
+        on: [connection_failure]
+
+# Browsers enforce CORS, so a loose policy here is a real hole. `credentials:
+# true` alongside origin `*` is refused at startup; origins match whole, on
+# scheme, host and port. Preflights never reach an upstream.
+#
+# cors:
+#   origins: [https://app.example.com]
+#   methods: [GET, POST]
+#   credentials: true
+
+# Response cache. Opt in per route with `cache: true` — never inferred, because
+# serving one caller's response to another is a data leak rather than a slow
+# page. `private`, `no-store` and responses to authorized requests are refused
+# by RFC 9111, and caching an authenticated route needs an explicit
+# `cache_authenticated: true`.
+#
+# cache:
+#   max_size: 256MiB
+#   max_object_size: 8MiB
+#   default_ttl: 60s
+
+# Prometheus metrics, on a port of its own. Every label is bounded by this
+# file — route ids, methods, statuses — never by request content, so no client
+# can grow the process by inventing label values.
+#
+# observability:
+#   metrics:
+#     listen: 0.0.0.0:9090
+#
+#   # Makes the gateway a real hop in a distributed trace instead of a relay,
+#   # so its own latency stops being charged to the upstream. Omit `otlp` to
+#   # propagate context without exporting. A dead collector never affects
+#   # traffic: spans queue with a bounded, non-blocking send.
+#   tracing:
+#     sample_ratio: 0.1
+#     otlp:
+#       endpoint: http://otel-collector:4318/v1/traces
+
+# Verify tokens from any OIDC issuer. Public keys only, so no secret is stored
+# here. Several issuers can be listed and each token is routed by its `iss`.
+# `audience` is required: without it, a token the same issuer minted for a
+# different service would be accepted here.
+#
+# auth:
+#   jwt:
+#     - issuer: https://auth.example.com
+#       audience: [my-api]
+#
+#   # Firebase publishes certificates in its own format, so it has its own
+#   # block. Project IDs only — no service-account credentials needed.
+#   firebase:
+#     projects: [${FIREBASE_PROJECT_ID}]
+
+# Copy verified claims into headers, so upstreams need no identity SDK. Each is
+# stripped from the client request first, and a claim that is *absent* leaves
+# its header absent rather than empty — "unknown" and "empty" mean different
+# things to a service deciding what a caller may do.
+#
+# identity:
+#   claims:
+#     x-user-id:   sub
+#     x-user-type: user_type
+
+# Credentials the gateway owns. A client-supplied copy is stripped first, so
+# these can never be spoofed.
+#
+# inject:
+#   headers:
+#     x-api-key: ${API_KEY}

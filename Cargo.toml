@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lagos-core",
+    "crates/lagos",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# 1.85 for `Waker::noop`, used once to drive static backend discovery at
+# startup. Hand-rolling a no-op waker needs `unsafe`, which this workspace
+# forbids, and pulling in `futures` for one call is the worse trade.
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/lagos-sh/lagos"
+
+[workspace.dependencies]
+pingora = { version = "0.9", default-features = false, features = ["proxy", "lb", "rustls"] }
+# The Prometheus exposition service; split out of pingora-core in 0.9 so that
+# core no longer carries a prometheus dependency.
+pingora-prometheus = "0.9"
+# Count-min-sketch counters, an alternative rate-limiter backend. Standalone —
+# it does not depend on pingora-core, so it tracks its own version.
+pingora-limits = "0.9"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+http = "1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+serde_yaml_ng = "0.10"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonwebtoken = "9"
+x509-parser = "0.16"
+moka = { version = "0.12", features = ["future", "sync"] }
+humantime-serde = "1"
+uuid = { version = "1", features = ["v4"] }
+arc-swap = "1"
+# Must track the version `pingora-prometheus` uses. The registry is a process
+# global *per crate version*, so a mismatch means we register into one registry
+# while the exposition endpoint serves another — and /metrics comes back empty
+# with nothing failing anywhere. It did exactly that on the 0.8 -> 0.9 upgrade.
+prometheus = "0.14"
+# Tracing export. Optional: the default build carries none of it, so a
+# deployment that does not export traces pays nothing for the dependency tree.
+opentelemetry = { version = "0.32" }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+# `reqwest-client` is deliberately absent: it bundles its own reqwest (0.13),
+# which would put a second HTTP stack in the binary alongside the 0.12 already
+# here for JWKS fetching. We implement `HttpClient` over that one instead.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto"] }
+opentelemetry-http = { version = "0.32", default-features = false }
+anyhow = "1"
+
+# Lint policy lives here so it applies to every crate and every target.
+#
+# The request path must not panic: a reachable `unwrap` is a remote denial of
+# service, not a style question. These are warnings rather than errors because
+# test code legitimately unwraps; CI runs clippy with `-D warnings`, so on a
+# non-test path they still fail the build.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+# arithmetic_side_effects is deliberately absent: it fires on every
+# `String::with_capacity(len + 32)` and drowns the signal. Overflow-prone
+# arithmetic on request-derived numbers is caught in review instead.
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+todo = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,28 @@
+# Advisory check only. License/ban graphs are not gated.
+#
+# Pingora 0.8 pulls several crates we cannot bump independently. Those IDs are
+# ignored with a reason; a new advisory on a crate we own still fails CI.
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = [
+    { id = "RUSTSEC-2024-0437", reason = "protobuf 2.x via pingora 0.8 prometheus 0.13; no independent upgrade" },
+    { id = "RUSTSEC-2025-0069", reason = "daemonize is unmaintained; pulled only by pingora-core 0.8" },
+    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained; pulled only by pingora-core 0.8" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained; pulled only by pingora-rustls 0.8" },
+]
+
+[licenses]
+version = 2
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"

@@ -1,0 +1,126 @@
+server:
+  listen: 127.0.0.1:3311
+  mounts: ["/bff/v1", "/"]
+  health_path: /bff/health
+  internal_listen: 127.0.0.1:3313
+  service_name: e2e-gateway
+
+timeouts:
+  connect: 2s
+  default: 3s
+  sse: 30s
+
+limits:
+  max_body: 1KiB
+
+cors:
+  origins:
+    - https://app.example.com
+    - "https://*.preview.example.com"
+  methods: [GET, POST]
+  headers: [content-type, authorization]
+  expose: [x-request-id]
+  credentials: true
+  max_age: 600s
+
+observability:
+  # Propagation only — no OTLP endpoint, so nothing is exported but the gateway
+  # still participates in the trace.
+  tracing:
+    sample_ratio: 1.0
+  metrics:
+    listen: 127.0.0.1:9390
+    pool_sample_interval: 1s
+
+routes:
+  file: routes.yml
+  reload: 2s
+
+auth:
+  # A second, non-Firebase provider. Tokens are routed to one of these by their
+  # `iss` claim, so both are live at the same time.
+  jwt:
+    - issuer: https://issuer.test
+      audience: [e2e-api]
+      jwks_url: http://127.0.0.1:9405/jwks
+      algorithms: [RS256]
+      required_claims: [role]
+  firebase:
+    projects: [ "${FIREBASE_PROJECT_ID}" ]
+    certs_url: http://127.0.0.1:9402/
+  machine:
+    headers: [x-internal-api-key, x-api-key]
+    secret: ${INTERNAL_API_KEY}
+
+inject:
+  headers:
+    x-api-key: ${API_KEY}
+  machine:
+    x-internal-api-key: ${INTERNAL_API_KEY}
+
+reject:
+  client_headers:
+    - x-api-key
+    - x-auth-subject
+    - x-auth-issuer
+    - x-auth-claims
+    - x-auth-token
+    - x-internal-api-key
+
+forward:
+  mode: allowlist
+  headers: [user-agent, traceparent, tracestate]
+  authorization: false
+
+identity:
+  subject_header: x-auth-subject
+  issuer_header: x-auth-issuer
+  claims_header: x-auth-claims
+  claims:
+    x-user-type: user_type
+    x-user-role: role
+    x-company-id: company_id
+  token:
+    header: x-auth-token
+    secret: ${GATEWAY_IDENTITY_SECRET}
+    ttl: 60s
+    audience: internal
+
+cache:
+  max_size: 8MiB
+  max_object_size: 32KiB
+  default_ttl: 60s
+
+upstreams:
+  echo: ${UPSTREAM_ECHO_URL}
+  origin: http://127.0.0.1:9406
+  # Two members with active health checking, to prove rotation in and out.
+  pooled:
+    targets:
+      - http://127.0.0.1:9411
+      - http://127.0.0.1:9412
+    balance: round_robin
+    health_check:
+      path: /health
+      interval: 1s
+      timeout: 1s
+      healthy_after: 1
+      unhealthy_after: 1
+  sse: ${UPSTREAM_SSE_URL}
+  # Points at a closed port, to exercise the connect-failure path.
+  deadend: http://127.0.0.1:9499
+  # Same closed port, with a breaker: the first few attempts fail slowly, then
+  # the circuit opens and the rest are shed without dialling at all.
+  breaking:
+    url: http://127.0.0.1:9499
+    circuit_breaker:
+      failures: 3
+      window: 30s
+      cooldown: 30s
+  # One live member, one closed port and no health check, so roughly half of
+  # the attempts hit a connect failure and must be retried onto the live one.
+  halfdead:
+    targets:
+      - ${UPSTREAM_ECHO_URL}
+      - http://127.0.0.1:9499
+    balance: round_robin

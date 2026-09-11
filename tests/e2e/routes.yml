@@ -1,0 +1,97 @@
+internal:
+  - loyalty/wallets
+  - products/internal
+
+optional:
+  - id: browse
+    prefix: browse
+    upstream: echo
+    methods: [GET]
+
+authenticated:
+  - id: oidc
+    prefix: oidc
+    upstream: echo
+    methods: [GET]
+  - id: scoped
+    prefix: scoped
+    upstream: echo
+    methods: [GET]
+    bind:
+      query.merchantId: identity.company_id
+  - id: loyalty
+    prefix: loyalty
+    upstream: echo
+    methods: [GET]
+
+machine:
+  - id: sync
+    prefix: products/internal
+    upstream: echo
+    methods: [POST, GET]
+  - id: ops-internal
+    prefix: ops/internal
+    upstream: echo
+    methods: [GET]
+
+public:
+  - { id: c-cacheable, prefix: cacheable, upstream: origin, methods: [GET], cache: true }
+  - { id: c-private,   prefix: private,   upstream: origin, methods: [GET], cache: true }
+  - { id: c-nostore,   prefix: nostore,   upstream: origin, methods: [GET], cache: true }
+  - { id: c-uncached,  prefix: uncached,  upstream: origin, methods: [GET] }
+  - id: tenant-a
+    host: a.example.com
+    prefix: tenant
+    upstream: echo
+    methods: [GET]
+  # Points at a closed port, so "which route matched" is visible in the
+  # status code rather than having to be inferred from a body.
+  - id: tenant-any
+    prefix: tenant
+    upstream: deadend
+    methods: [GET]
+  - id: retried
+    prefix: retried
+    upstream: halfdead
+    methods: [GET, POST]
+    retry:
+      attempts: 3
+      on: [connection_failure]
+  - id: unretried
+    prefix: unretried
+    upstream: halfdead
+    methods: [GET]
+  - id: limited
+    prefix: limited
+    upstream: echo
+    methods: [GET]
+    rate_limit:
+      requests: 3
+      interval: 60s
+      key: ip
+      trusted_proxies: 1
+  - id: pooled
+    prefix: pooled
+    upstream: pooled
+    methods: [GET]
+  - id: products
+    prefix: products
+    upstream: echo
+    methods: [GET]
+  - id: sse
+    prefix: events
+    upstream: sse
+    methods: [GET]
+    sse: true
+  - id: blackhole
+    prefix: blackhole
+    upstream: sse
+    methods: [GET]
+  - id: deadend
+    prefix: deadend
+    upstream: deadend
+    methods: [GET]
+  - id: breaking
+    prefix: breaking
+    upstream: breaking
+    methods: [GET]
