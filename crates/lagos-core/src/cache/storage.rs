@@ -53,12 +53,15 @@ struct Entry {
 impl Entry {
     /// What this entry costs the cache. The metadata is counted too — a cache
     /// of many tiny bodies is mostly headers.
-    fn weight(&self) -> u32 {
+    fn weight(&self, key: &str) -> u32 {
         let total = self
             .body
             .len()
             .saturating_add(self.internal.len())
-            .saturating_add(self.header.len());
+            .saturating_add(self.header.len())
+            .saturating_add(key.len())
+            .saturating_add(std::mem::size_of::<Self>())
+            .saturating_add(std::mem::size_of::<String>());
         u32::try_from(total).unwrap_or(u32::MAX)
     }
 }
@@ -74,7 +77,7 @@ impl MemoryStorage {
             entries: moka::sync::Cache::builder()
                 // Weighted by bytes, so eviction happens on the bound that
                 // actually matters.
-                .weigher(|_k: &String, v: &Arc<Entry>| v.weight())
+                .weigher(|k: &String, v: &Arc<Entry>| v.weight(k))
                 .max_capacity(max_bytes)
                 .build(),
             max_object_bytes,
@@ -269,18 +272,22 @@ impl HandleMiss for Miss {
 
     async fn finish(self: Box<Self>) -> Result<MissFinishType> {
         if self.too_large {
-            // Nothing stored; the response was already streamed downstream.
-            return Ok(MissFinishType::Created(0));
+            // A successful finish admits an eviction record and releases the
+            // fill lock as populated. Neither is true for an abandoned fill.
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::Custom("cache object too large"),
+                "cache fill exceeded max_object_size",
+            ));
         }
-        let size = self.body.len();
-        self.storage.entries.insert(
-            self.key,
-            Arc::new(Entry {
-                internal: self.internal,
-                header: self.header,
-                body: self.body.freeze(),
-            }),
-        );
+        let entry = Arc::new(Entry {
+            internal: self.internal,
+            header: self.header,
+            body: self.body.freeze(),
+        });
+        // The eviction manager must count the same metadata and key costs as
+        // storage. Empty bodies still occupy memory and must have weight.
+        let size = entry.weight(&self.key) as usize;
+        self.storage.entries.insert(self.key, entry);
         Ok(MissFinishType::Created(size))
     }
 }
@@ -332,7 +339,7 @@ mod tests {
             );
         }
         assert!(miss.too_large);
-        Box::new(miss).finish().await.unwrap();
+        assert!(Box::new(miss).finish().await.is_err());
         assert_eq!(s.entry_count(), 0, "nothing should have been stored");
     }
 

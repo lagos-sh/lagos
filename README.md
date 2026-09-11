@@ -5,8 +5,8 @@ An identity-aware HTTP gateway built on [Pingora](https://github.com/cloudflare/
 > [!WARNING]
 > **Early development.** Lagos has never run in production and has had no load
 > or soak testing. The configuration format is not stable and will change
-> without a deprecation path until 1.0. It is tested — 229 unit tests and a
-> 129-case end-to-end suite covering the security surface — but tests are not
+> without a deprecation path until 1.0. It is tested — 239 unit tests, 129
+> end-to-end cases and 38 filter-interaction regression checks — but tests are not
 > the same as traffic. Try it, read it, tell me where it is wrong; do not put
 > customer traffic behind it yet.
 
@@ -52,9 +52,9 @@ stores no private key for any tenant.
 
 Two invariants make this auditable:
 
-1. **Every authorization decision happens in `request_filter`.** Nothing later
-   in the lifecycle may reject or elevate a request, so there is exactly one
-   place to read.
+1. **Every authorization decision happens in `request_filter`.** Route,
+   identity and ownership policy are decided there. Availability checks such
+   as circuit breaking run only when a request needs an upstream.
 2. **Refusals are always `404`, never `403`.** A distinguishable response would
    let a caller enumerate the deny-list and learn which internal services exist.
 3. **Client headers are dropped unless allowlisted.** An upstream can only
@@ -665,12 +665,15 @@ be served as a whole one.
 | `Cache-Control: private` | a shared cache must not store it |
 | `Cache-Control: no-store` | never stored |
 | a response to a request carrying `Authorization` | not stored unless the response explicitly allows it (RFC 9111) |
+| methods other than `GET` and `HEAD`, or an SSE route | always sent upstream |
+| `Vary: *` or a malformed `Vary` field | never reused |
 | anything on a route without `cache: true` | not stored |
 | 4xx and 5xx, absent explicit instruction | caching an error outlives its own cause |
 
-That `Authorization` rule is the one that matters most, and it is why the
-gateway carries the fact that the *client* was authorized even though it strips
-the header before proxying.
+The `Authorization` rule applies to cache hits as well as new responses. The
+gateway carries the fact that the *client* sent that header even when it strips
+the header before proxying. An authenticated caller cannot reuse an anonymous
+response unless that response explicitly permits sharing.
 
 `cache: true` on an `optional` or `authenticated` route **fails at startup**
 unless you also set `cache_authenticated: true`. Responses there are usually
@@ -678,9 +681,12 @@ personalised, and whether they are safe to share depends entirely on the
 upstream sending correct `Cache-Control` — a claim about that service, made
 deliberately or not at all.
 
-The cache key is host + method + path + query. The host is in it because this
-gateway routes on hosts: two tenants can share a path and serve different
-things.
+The cache key includes host, method, path, query, route, upstream and the route
+table generation. The host separates tenants that share a path. Reloading the
+route table starts a new cache namespace, so responses from the previous policy
+cannot be served by the new one. Old entries remain subject to normal eviction.
+`Vary` selects variants using the headers sent upstream, including injected
+identity headers.
 
 Outcomes are exported as `gateway_cache_total{route,outcome}`.
 
@@ -722,6 +728,9 @@ count against the circuit — a 4xx is the caller's problem and must never trip
 it. Half-open admits a bounded number of trials (`max_trials`, default 1) so a
 recovering upstream is not hit by the full load the instant the cooldown ends,
 and a single failed trial reopens immediately.
+
+Only requests that need an upstream consume circuit trials. Cache hits and
+local refusals such as rate limiting do not count as upstream recovery.
 
 State is exported as `gateway_circuit_state` (0 closed, 1 half-open, 2 open).
 
@@ -878,7 +887,8 @@ Early development, and pre-1.0 in the way that phrase is supposed to mean:
 the design is settled, the security surface is tested, and nothing about the
 configuration format is promised yet.
 
-**What exists:** 229 unit tests and a 129-case end-to-end suite covering path
+**What exists:** 239 unit tests, 129 end-to-end cases and 38 filter-interaction
+regression checks covering path
 traversal in five encodings, deny-list enumeration, credential injection, token
 forgery (expired, wrong audience, swapped payload, foreign key, `alg:none`),
 header leakage, CORS origin matching, rate-limit bypass via a forged

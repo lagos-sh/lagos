@@ -259,6 +259,9 @@ pub struct RouteGroups {
 
 #[derive(Debug, Default)]
 pub struct RouteTable {
+    /// Cache entries belong to this table snapshot. A reload must not reuse
+    /// responses admitted under a previous route or authorization policy.
+    cache_namespace: uuid::Uuid,
     deny_prefixes: Vec<String>,
     /// Sorted by prefix length descending so the most specific route wins.
     routes: Vec<RouteConfig>,
@@ -352,6 +355,7 @@ impl RouteTable {
             )
         });
         Self {
+            cache_namespace: uuid::Uuid::new_v4(),
             deny_prefixes,
             routes,
             errors,
@@ -409,6 +413,10 @@ impl RouteTable {
         &self.routes
     }
 
+    pub fn cache_namespace(&self) -> uuid::Uuid {
+        self.cache_namespace
+    }
+
     pub fn deny_prefixes(&self) -> &[String] {
         &self.deny_prefixes
     }
@@ -431,6 +439,7 @@ impl RouteTable {
             .partition(|r| r.auth == AuthTier::Machine);
         (
             RouteTable {
+                cache_namespace: self.cache_namespace,
                 deny_prefixes: self.deny_prefixes.clone(),
                 routes: public,
                 errors: self.errors.clone(),
@@ -438,6 +447,7 @@ impl RouteTable {
             // The deny-list guards the public surface; the internal listener is
             // where those paths are legitimately served.
             RouteTable {
+                cache_namespace: self.cache_namespace,
                 deny_prefixes: Vec::new(),
                 routes: machine,
                 errors: self.errors,
@@ -477,7 +487,8 @@ impl SharedRoutes {
         self.0.load()
     }
 
-    pub fn store(&self, table: RouteTable) {
+    pub fn store(&self, mut table: RouteTable) {
+        table.cache_namespace = uuid::Uuid::new_v4();
         self.0.store(Arc::new(table));
     }
 
@@ -500,6 +511,17 @@ mod tests {
 
     fn groups(yaml: &str) -> RouteGroups {
         serde_yaml_ng::from_str(yaml).expect("test fixture should parse")
+    }
+
+    #[test]
+    fn reloads_change_the_cache_namespace_without_changing_inflight_snapshots() {
+        let shared = SharedRoutes::new(table());
+        let old = shared.load();
+        shared.store(table());
+        assert_ne!(old.cache_namespace(), shared.load().cache_namespace());
+        let namespace = old.cache_namespace();
+        shared.store(table());
+        assert_eq!(old.cache_namespace(), namespace);
     }
 
     fn table() -> RouteTable {

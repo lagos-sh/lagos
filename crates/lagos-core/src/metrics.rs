@@ -31,10 +31,6 @@ const KNOWN_METHODS: &[&str] = &[
     "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT",
 ];
 
-/// Longest a `reason` label may be. Reasons are short slugs; a long one means
-/// a detail string leaked into it.
-const MAX_REASON_LEN: usize = 48;
-
 /// Label used when no route matched. A literal beats an empty string, which
 /// reads as a scrape bug.
 const NO_ROUTE: &str = "-";
@@ -198,18 +194,46 @@ pub fn normalize_method(method: &str) -> &'static str {
         .unwrap_or("OTHER")
 }
 
-/// Keep only the stable slug part of a rejection reason.
-///
-/// Reasons are short and config-bounded, but a few embed a detail after a
-/// colon (`identity_mint_failed: <error>`). That tail is unbounded, so it is
-/// dropped and the remainder capped.
+/// Map reasons to a finite vocabulary. Truncating arbitrary input still
+/// permits an unbounded number of distinct time series. Extension details
+/// remain available in logs and share the `other` metric label.
 pub fn normalize_reason(reason: &str) -> String {
     let slug = reason.split(':').next().unwrap_or(reason).trim();
-    let mut out: String = slug.chars().take(MAX_REASON_LEN).collect();
-    if out.is_empty() {
-        out.push_str(NO_ROUTE);
+    for prefix in [
+        "unknown_issuer",
+        "client_sent",
+        "no_upstream",
+        "missing_extension",
+    ] {
+        if slug == prefix
+            || slug
+                .strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with('_'))
+        {
+            return prefix.into();
+        }
     }
-    out
+    match slug {
+        "" => NO_ROUTE,
+        "deny_list"
+        | "outside_base_path"
+        | "unsafe_path"
+        | "not_allowlisted"
+        | "missing_bearer"
+        | "invalid_token"
+        | "no_verifier"
+        | "no_machine_secret"
+        | "bad_machine_credential"
+        | "rate_limited"
+        | "circuit_open"
+        | "binding_refused"
+        | "bind_without_identity"
+        | "identity_mint_failed"
+        | "upstream_timeout"
+        | "body_too_large" => slug,
+        _ => "other",
+    }
+    .into()
 }
 
 #[cfg(test)]
@@ -242,9 +266,18 @@ mod tests {
     }
 
     #[test]
-    fn a_long_reason_is_capped() {
-        let long = "x".repeat(500);
-        assert_eq!(normalize_reason(&long).len(), MAX_REASON_LEN);
+    fn request_derived_reasons_have_bounded_cardinality() {
+        for i in 0..1000 {
+            assert_eq!(
+                normalize_reason(&format!("unknown_issuer_attacker-{i}")),
+                "unknown_issuer"
+            );
+            assert_eq!(
+                normalize_reason(&format!("extension rejected user {i}")),
+                "other"
+            );
+        }
+        assert_eq!(normalize_reason(&"x".repeat(500)), "other");
     }
 
     #[test]

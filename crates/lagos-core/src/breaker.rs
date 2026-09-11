@@ -172,6 +172,15 @@ impl CircuitBreaker {
         self.record_success_at(Instant::now());
     }
 
+    /// Release a trial that produced no upstream outcome, without counting
+    /// it as evidence of either success or failure.
+    pub fn cancel(&self) {
+        let mut inner = self.lock();
+        if inner.state == State::HalfOpen {
+            inner.trials_in_flight = inner.trials_in_flight.saturating_sub(1);
+        }
+    }
+
     fn record_success_at(&self, _now: Instant) {
         let mut inner = self.lock();
         match inner.state {
@@ -242,6 +251,27 @@ mod tests {
 
     fn breaker() -> CircuitBreaker {
         CircuitBreaker::new(&cfg())
+    }
+
+    #[test]
+    fn a_cancelled_trial_releases_its_slot_without_closing_the_circuit() {
+        let b = breaker();
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.record_failure_at(now);
+        }
+        let trial_time = now + Duration::from_secs(11);
+        assert!(b.allow_at(trial_time));
+        assert!(!b.allow_at(trial_time));
+        b.cancel();
+        assert_eq!(b.state(), State::HalfOpen);
+        assert!(b.allow_at(trial_time));
+        b.record_success_at(trial_time);
+        assert_eq!(
+            b.state(),
+            State::HalfOpen,
+            "the cancelled trial was not a success"
+        );
     }
 
     #[test]

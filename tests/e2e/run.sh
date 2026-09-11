@@ -576,5 +576,12 @@ sleep 4
 expect "bad route file keeps the old table" 200 "$G/bff/v1/products/42"
 cp "$WORK/routes.backup" "$E2E/routes.yml"
 
+say "filter interaction regressions"
+if python3 "$E2E/regressions.py" "$BIN/lagos"; then
+  ok "filter interaction regression suite"
+else
+  bad "filter interaction regression suite"
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

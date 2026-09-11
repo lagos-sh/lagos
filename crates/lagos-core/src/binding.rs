@@ -144,17 +144,26 @@ fn scalar_to_string(value: &Value) -> Option<String> {
     }
 }
 
-/// Read one query parameter, percent-decoding the key and the value.
+/// Read exactly one query parameter, using form-query decoding.
+/// Duplicate names are ambiguous across upstream parsers, even when encoded
+/// differently or supplied without `=`. Never authorize just the first value.
 fn query_param(query: &str, name: &str) -> Option<String> {
-    query.split('&').find_map(|pair| {
-        let (k, v) = pair.split_once('=')?;
+    let mut value = None;
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(k)?;
-        if key == name { percent_decode(v) } else { None }
-    })
+        if key == name {
+            if value.is_some() {
+                return None;
+            }
+            value = Some(percent_decode(v)?);
+        }
+    }
+    value
 }
 
 fn percent_decode(s: &str) -> Option<String> {
-    percent_encoding::percent_decode_str(s)
+    percent_encoding::percent_decode_str(&s.replace('+', " "))
         .decode_utf8()
         .ok()
         .map(|c| c.into_owned())
@@ -164,6 +173,15 @@ fn percent_decode(s: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn duplicate_bound_parameters_are_refused_in_every_spelling() {
+        for query in ["m=11&m=12", "m=11&%6d=12", "m=11&m", "m&m=11", "m=11&m=11"] {
+            assert_eq!(query_param(query, "m"), None, "{query}");
+        }
+        assert_eq!(query_param("m=a+b", "m"), Some("a b".into()));
+        assert_eq!(query_param("m=a%2Bb", "m"), Some("a+b".into()));
+    }
 
     fn identity(claims: serde_json::Value) -> Identity {
         Identity {

@@ -178,7 +178,8 @@ fn health_check(
             check.peer_template.options.connection_timeout = Some(cfg.timeout);
             check.peer_template.options.read_timeout = Some(cfg.timeout);
             if let Ok(req) = pingora::http::RequestHeader::build("GET", path.as_bytes(), None) {
-                check.req = req;
+                // Keep the Host and framing headers initialized by Pingora.
+                check.req.set_uri(req.uri.clone());
             }
             Box::new(check)
         }

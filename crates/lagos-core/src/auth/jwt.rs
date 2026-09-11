@@ -121,6 +121,20 @@ impl TokenVerifier for JwtVerifier {
             .map_err(|e| AuthError::Invalid(e.to_string()))?;
         let claims = data.claims;
 
+        // jsonwebtoken's required_spec_claims does not implement `iat`.
+        // Check its type and timestamp explicitly, after signature validation.
+        let issued_at = claims
+            .get("iat")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| AuthError::Invalid("`iat` must be an unsigned timestamp".into()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if issued_at > now.saturating_add(self.clock_skew.as_secs()) {
+            return Err(AuthError::Invalid("`iat` is in the future".into()));
+        }
+
         // `required_spec_claims` only enforces presence for claims jsonwebtoken
         // knows; anything else the operator listed is checked here.
         for name in &self.required_claims {

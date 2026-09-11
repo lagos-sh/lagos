@@ -134,6 +134,8 @@ pub struct Ctx {
     pub cors: Option<crate::cors::Headers>,
     /// Whether the matched route may be served from cache.
     pub cacheable_route: bool,
+    /// The exact route snapshot that authorized this request.
+    pub cache_namespace: uuid::Uuid,
     /// Whether the *client* sent an Authorization header.
     ///
     /// RFC 9111 forbids storing a response to an authorized request unless the
@@ -604,7 +606,7 @@ impl ProxyHttp for Gateway {
             .map(str::to_string);
 
         ctx.request_id = request_id;
-        ctx.client_authorized = authorization.is_some();
+        ctx.client_authorized = session.req_header().headers.contains_key("authorization");
 
         // Resolved before any refusal can be issued, so *every* response to a
         // given origin carries the same cross-origin headers.
@@ -864,32 +866,6 @@ impl ProxyHttp for Gateway {
             .as_deref()
             .and_then(crate::headers::socket_peer_ip);
 
-        // --- circuit breaker -------------------------------------------------
-        // After authentication, so an anonymous caller cannot probe which
-        // upstreams are struggling; still long before anything is dialled.
-        if let Some(breaker) = self
-            .upstreams
-            .get(&route.upstream)
-            .and_then(|u| u.breaker())
-        {
-            if !breaker.allow() {
-                ctx.retry_after = Some(self.circuit_cooldown(&route.upstream));
-                if self.dev {
-                    ctx.circuit = Some(breaker.state());
-                }
-                return self
-                    .reject(
-                        session,
-                        ctx,
-                        Rejection::circuit_open(ctx.retry_after.unwrap_or(1)),
-                    )
-                    .await;
-            }
-            // The outcome has to be reported, or a half-open circuit never
-            // resolves. `logging` runs for every request, including failures.
-            ctx.breaker_upstream = Some(route.upstream.clone());
-        }
-
         // --- rate limiting ---------------------------------------------------
         // After authentication, so an `identity` key has a subject to use, and
         // before any upstream work is planned.
@@ -945,7 +921,9 @@ impl ProxyHttp for Gateway {
             let headers = &session.req_header().headers;
             for binding in &route.bindings {
                 let permitted = binding.permits(id, ctx.query.as_deref(), |name| {
-                    headers.get(name).and_then(|v| v.to_str().ok())
+                    let mut values = headers.get_all(name).iter();
+                    let value = values.next()?.to_str().ok()?;
+                    values.next().is_none().then_some(value)
                 });
                 if !permitted {
                     if self.dev {
@@ -1046,13 +1024,15 @@ impl ProxyHttp for Gateway {
         }
 
         ctx.plan = plan;
+        // Consistent hashing uses the subject in production too.
+        ctx.subject = identity.as_ref().map(|i| i.subject.clone());
         if self.dev {
             ctx.bindings_met = route.bindings.iter().map(Binding::describe).collect();
             ctx.tier = Some(route.auth);
             ctx.extensions_run = route.extensions.clone();
-            ctx.subject = identity.as_ref().map(|i| i.subject.clone());
         }
         ctx.cacheable_route = route.cache;
+        ctx.cache_namespace = table.cache_namespace();
         ctx.retry = route.retry_policy;
         ctx.route_id = route.id.clone();
         ctx.upstream_name = route.upstream.clone();
@@ -1066,6 +1046,34 @@ impl ProxyHttp for Gateway {
         };
 
         Ok(false)
+    }
+
+    /// Admit a circuit trial only after local policy and cache lookup have
+    /// finished. A refusal or cache hit tells us nothing about upstream health.
+    async fn proxy_upstream_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<bool> {
+        if let Some(breaker) = self
+            .upstreams
+            .get(&ctx.upstream_name)
+            .and_then(|u| u.breaker())
+        {
+            if !breaker.allow() {
+                ctx.retry_after = Some(self.circuit_cooldown(&ctx.upstream_name));
+                ctx.circuit = Some(breaker.state());
+                self.reject(
+                    session,
+                    ctx,
+                    Rejection::circuit_open(ctx.retry_after.unwrap_or(1)),
+                )
+                .await?;
+                return Ok(false);
+            }
+            ctx.breaker_upstream = Some(ctx.upstream_name.clone());
+        }
+        Ok(true)
     }
 
     async fn request_body_filter(
@@ -1109,6 +1117,7 @@ impl ProxyHttp for Gateway {
                     pingora::ErrorType::ConnectError,
                     "every backend in the pool is unhealthy",
                 )
+                .into_up()
             })?
             .clone();
 
@@ -1278,7 +1287,13 @@ impl ProxyHttp for Gateway {
         ctx.status = upstream_response.status.as_u16();
         if let Some(headers) = &ctx.cors {
             for (name, value) in headers {
-                upstream_response.insert_header(*name, value.as_str())?;
+                if *name == "vary" {
+                    // CORS adds another varying field; it must not erase the
+                    // origin's language, encoding, or authorization variance.
+                    upstream_response.append_header(*name, value.as_str())?;
+                } else {
+                    upstream_response.insert_header(*name, value.as_str())?;
+                }
             }
         }
         if ctx.sse {
@@ -1354,6 +1369,13 @@ impl ProxyHttp for Gateway {
         let (Some(cache), true) = (self.cache, ctx.cacheable_route) else {
             return Ok(());
         };
+        if !matches!(
+            session.req_header().method,
+            http::Method::GET | http::Method::HEAD
+        ) || ctx.sse
+        {
+            return Ok(());
+        }
         session.cache.enable(
             cache.storage,
             Some(cache.eviction),
@@ -1361,6 +1383,9 @@ impl ProxyHttp for Gateway {
             Some(cache.lock),
             None,
         );
+        session
+            .cache
+            .set_max_file_size_bytes(cache.max_object_bytes);
         Ok(())
     }
 
@@ -1374,9 +1399,8 @@ impl ProxyHttp for Gateway {
     /// different content. Leaving it out would let one tenant's response be
     /// served to another — the worst bug a cache can have.
     ///
-    /// The route id is the `user_tag`, which keeps entries attributable in
-    /// eviction accounting and stops two routes that happen to share a path
-    /// from colliding.
+    /// Route id, upstream and table generation are part of the primary key.
+    /// `user_tag` is only an accounting label; Pingora does not hash it.
     #[cfg(feature = "cache")]
     fn cache_key_callback(
         &self,
@@ -1388,7 +1412,6 @@ impl ProxyHttp for Gateway {
             .headers
             .get("host")
             .and_then(|v| v.to_str().ok())
-            .map(crate::routes::normalize_host)
             .unwrap_or_default()
             .to_ascii_lowercase();
         let uri = req
@@ -1397,10 +1420,44 @@ impl ProxyHttp for Gateway {
             .map(|p| p.as_str())
             .unwrap_or_else(|| req.uri.path());
 
-        Ok(pingora::cache::CacheKey::new(
-            format!("{host}\u{1}{}\u{1}{uri}", req.method),
-            ctx.route_id.clone(),
+        Ok(crate::cache::policy::key(
+            &[
+                &ctx.cache_namespace.to_string(),
+                &ctx.route_id,
+                &ctx.upstream_name,
+                &host,
+                req.method.as_str(),
+                uri,
+            ],
+            &ctx.route_id,
         ))
+    }
+
+    #[cfg(feature = "cache")]
+    fn cache_vary_filter(
+        &self,
+        meta: &pingora::cache::CacheMeta,
+        ctx: &mut Self::CTX,
+        req: &RequestHeader,
+    ) -> Option<pingora::cache::key::HashBinary> {
+        crate::cache::policy::variance(meta.response_header(), req, &ctx.plan, |name| {
+            self.cfg.raw.forward.mode == ForwardMode::Passthrough || self.is_forwardable(name)
+        })
+    }
+
+    #[cfg(feature = "cache")]
+    async fn cache_hit_filter(
+        &self,
+        _session: &mut Session,
+        meta: &pingora::cache::CacheMeta,
+        _hit_handler: &mut pingora::cache::storage::HitHandler,
+        _is_fresh: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<pingora::cache::ForcedFreshness>> {
+        Ok(
+            (!crate::cache::policy::eligible(meta.response_header(), ctx.client_authorized))
+                .then_some(pingora::cache::ForcedFreshness::ForceMiss),
+        )
     }
 
     /// Decide whether the upstream's response may be stored.
@@ -1422,6 +1479,11 @@ impl ProxyHttp for Gateway {
                 pingora::cache::NoCacheReason::Custom("cache not configured"),
             ));
         };
+        if !crate::cache::policy::eligible(resp, ctx.client_authorized) {
+            return Ok(pingora::cache::RespCacheable::Uncacheable(
+                pingora::cache::NoCacheReason::Custom("response cannot be shared"),
+            ));
+        }
         let cc = pingora::cache::cache_control::CacheControl::from_resp_headers(resp);
         Ok(pingora::cache::filters::resp_cacheable(
             cc.as_ref(),
@@ -1480,7 +1542,11 @@ impl ProxyHttp for Gateway {
         {
             // A 5xx counts against the upstream; a 4xx is the caller's
             // problem and must not trip the circuit.
-            if e.is_some() || status >= 500 {
+            if e.is_some_and(|e| *e.esource() != pingora::ErrorSource::Upstream) {
+                // A disconnected client or gateway-side failure is not a
+                // failed upstream trial, nor evidence of recovery.
+                breaker.cancel();
+            } else if e.is_some() || status >= 500 {
                 breaker.record_failure();
             } else {
                 breaker.record_success();
