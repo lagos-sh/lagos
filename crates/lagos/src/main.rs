@@ -4,5 +4,5 @@
 //! own extensions, and calls the same CLI.
 
 fn main() -> anyhow::Result<()> {
-    lagos_core::Cli::run(Vec::new())
+    lagos_core::Cli::run(|| Ok(Vec::new()))
 }

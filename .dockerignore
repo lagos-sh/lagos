@@ -11,3 +11,7 @@ k8s/
 .env
 .env.*
 !.env.example
+
+# Local-only cargo config: it redirects `target-dir` outside the repo, which
+# would break `COPY --from=build /src/target/...` in the runtime stage.
+.cargo/

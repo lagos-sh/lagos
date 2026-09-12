@@ -81,25 +81,52 @@ enum Command {
 }
 
 impl Cli {
-    /// Parse the command line and run it, with `extensions` available to any
-    /// route that names one.
+    /// Parse the command line and run it, with the extensions `make_extensions`
+    /// returns available to any route that names one.
     ///
     /// A deployment-specific binary registers its own extensions and calls
     /// this, so it gets the same tooling as the stock build.
-    pub fn run(extensions: Vec<Arc<dyn Extension>>) -> anyhow::Result<()> {
-        let mut registry = ExtensionRegistry::new();
-        for e in extensions {
-            registry.register(e);
+    ///
+    /// Extensions are built **after** the command line is parsed, and only for
+    /// the commands that can use them. An extension that reads configuration to
+    /// construct -- a credential, an upstream URL -- would otherwise make
+    /// `--help`, `--version` and `init` fail on a machine that has no
+    /// production environment set, which is every developer's machine. The
+    /// commands that do serve or validate traffic still build eagerly, so a
+    /// missing value is still a startup failure rather than a per-request one.
+    ///
+    /// ```no_run
+    /// # use lagos_core::Cli;
+    /// Cli::run(|| Ok(Vec::new()))
+    /// # ;
+    /// ```
+    pub fn run<F>(make_extensions: F) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> anyhow::Result<Vec<Arc<dyn Extension>>>,
+    {
+        // Deliberately not a closure over `registry`: `make_extensions` is
+        // FnOnce, so each arm may call it at most once, and the type checker
+        // enforces that rather than a convention.
+        fn registry_from(
+            make: impl FnOnce() -> anyhow::Result<Vec<Arc<dyn Extension>>>,
+        ) -> anyhow::Result<ExtensionRegistry> {
+            let mut registry = ExtensionRegistry::new();
+            for e in make()? {
+                registry.register(e);
+            }
+            Ok(registry)
         }
 
         match Cli::parse().command {
             // Bare `gateway` serves, so a container entrypoint needs no
             // argument and the common case stays the shortest.
-            None => serve(None, registry),
-            Some(Command::Run { path }) => serve(path, registry),
-            Some(Command::Dev { path }) => dev(path, registry),
+            None => serve(None, registry_from(make_extensions)?),
+            Some(Command::Run { path }) => serve(path, registry_from(make_extensions)?),
+            Some(Command::Dev { path }) => dev(path, registry_from(make_extensions)?),
+            Some(Command::Validate { path }) => validate(path, &registry_from(make_extensions)?),
+            // These three neither serve traffic nor resolve an extension name,
+            // so they must work with no environment at all.
             Some(Command::Init { path, force }) => init(&path, force),
-            Some(Command::Validate { path }) => validate(path, &registry),
             Some(Command::Routes { path }) => routes(path),
             Some(Command::Explain {
                 method,

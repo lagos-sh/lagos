@@ -1,5 +1,8 @@
 # Build
-FROM rust:1.85-slim-bookworm AS build
+# Must track rust-toolchain.toml. When it does not, the pinned channel is
+# still honoured -- rustup just downloads it on every build, so the mismatch
+# costs a toolchain download per layer miss and shows up as nothing but slow.
+FROM rust:1.98-slim-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config cmake perl make g++ clang libclang-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -12,12 +15,15 @@ COPY crates/lagos/Cargo.toml      crates/lagos/
 RUN mkdir -p crates/lagos-core/src crates/lagos/src \
     && echo ''            > crates/lagos-core/src/lib.rs \
     && echo 'fn main(){}' > crates/lagos/src/main.rs \
-    && cargo build --release --bin lagos \
+    && cargo build --release --locked --bin lagos \
     && rm -rf crates/lagos-core/src crates/lagos/src
 
 COPY crates crates
-RUN touch crates/lagos-core/src/lib.rs crates/lagos/src/main.rs \
-    && cargo build --release --bin lagos
+# Every source file, not just the two crate roots: COPY preserves mtimes, so
+# a module older than the stub build's artifacts is one Cargo will consider
+# fresh and skip -- shipping a binary built from the empty stubs.
+RUN find crates -name '*.rs' -exec touch {} + \
+    && cargo build --release --locked --bin lagos
 
 # Run
 FROM gcr.io/distroless/cc-debian12:nonroot
