@@ -12,6 +12,7 @@
 //! exactly one place to audit.
 
 use std::collections::HashMap;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1121,7 +1122,16 @@ impl ProxyHttp for Gateway {
             })?
             .clone();
 
-        let mut peer = HttpPeer::new(target.addr.as_str(), target.tls, target.sni.clone());
+        // Resolved here rather than inside `HttpPeer::new`, which takes anything
+        // `ToInetSocketAddrs` and unwraps it (pingora-core 0.9
+        // `upstreams/peer.rs:719`, carrying pingora's own `//TODO: handle
+        // error`). A name that stops resolving -- a DNS blip, a Service scaled
+        // to zero, a typo in an upstream URL -- would otherwise panic the proxy
+        // worker for every request instead of failing the one request. The
+        // lookup itself is the same blocking call pingora was already making;
+        // this moves it, it does not add one.
+        let addr = resolve_peer_addr(&target.addr)?;
+        let mut peer = HttpPeer::new(addr, target.tls, target.sni.clone());
         peer.options.connection_timeout = Some(self.cfg.raw.timeouts.connect);
         peer.options.total_connection_timeout = Some(self.cfg.raw.timeouts.connect * 2);
         peer.options.read_timeout = Some(ctx.timeout);
@@ -1637,8 +1647,59 @@ impl ProxyHttp for Gateway {
     }
 }
 
+/// Resolve an upstream `host:port` to a socket address.
+///
+/// Exists so that a resolution failure is a 502 like any other connect failure,
+/// rather than a panic inside pingora. Both failure modes are covered: the
+/// lookup erroring, and the lookup succeeding with no addresses.
+///
+/// The error text names only the configured upstream address, which is operator
+/// configuration rather than anything a client supplied, and it reaches logs
+/// rather than the response body.
+fn resolve_peer_addr(addr: &str) -> pingora::Result<SocketAddr> {
+    let mut iter = addr.to_socket_addrs().map_err(|e| {
+        pingora::Error::explain(
+            pingora::ErrorType::ConnectError,
+            format!("upstream address {addr} did not resolve: {e}"),
+        )
+        .into_up()
+    })?;
+
+    iter.next().ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::ConnectError,
+            format!("upstream address {addr} resolved to no addresses"),
+        )
+        .into_up()
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::resolve_peer_addr;
+
+    // pingora's HttpPeer::new unwraps the resolution, so before this helper the
+    // three cases below aborted the proxy worker rather than failing a request.
+    #[test]
+    fn unresolvable_host_is_an_error_not_a_panic() {
+        let err = resolve_peer_addr("no-such-host.invalid:3002")
+            .expect_err("a name that cannot resolve must not yield a peer");
+        assert_eq!(err.etype(), &pingora::ErrorType::ConnectError);
+    }
+
+    #[test]
+    fn malformed_address_is_an_error_not_a_panic() {
+        // No port: `to_socket_addrs` rejects this before any lookup happens.
+        assert!(resolve_peer_addr("products-service").is_err());
+        assert!(resolve_peer_addr("").is_err());
+    }
+
+    #[test]
+    fn resolvable_address_still_works() {
+        let addr = resolve_peer_addr("127.0.0.1:3002").expect("a literal must resolve");
+        assert_eq!(addr.port(), 3002);
+        assert!(addr.ip().is_loopback());
+    }
     use super::*;
     use crate::config::GatewayConfig;
 
