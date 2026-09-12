@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # 1.85 for `Waker::noop`, used once to drive static backend discovery at
 # startup. Hand-rolling a no-op waker needs `unsafe`, which this workspace

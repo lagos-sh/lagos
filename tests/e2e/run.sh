@@ -66,6 +66,46 @@ TARGET_DIR=$(cargo metadata --format-version 1 --no-deps \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 BIN="$TARGET_DIR/debug"
 
+say "program name"
+# The CLI is defined in lagos-core but linked into whatever binary a deployment
+# builds, so its name must come from argv[0]. A hard-coded one shipped hints
+# that could not be copy-pasted (`gateway validate ...` under a binary called
+# `lagos`) and made every extension build report itself as `lagos`. Renaming is
+# exactly what reintroduces this, so assert it against a renamed copy.
+NAMEDIR="$WORK/named"
+mkdir -p "$NAMEDIR"
+cp "$BIN/lagos" "$NAMEDIR/my-gateway"
+
+if [ "$("$NAMEDIR/my-gateway" --version)" = "my-gateway $("$BIN/lagos" --version | awk '{print $2}')" ]; then
+  ok "--version reports the invoked name"
+else
+  bad "--version reports the invoked name" "got: $("$NAMEDIR/my-gateway" --version)"
+fi
+
+if "$NAMEDIR/my-gateway" --help 2>&1 | grep -q "Usage: my-gateway"; then
+  ok "usage reports the invoked name"
+else
+  bad "usage reports the invoked name"
+fi
+
+# The hints init prints must be runnable as printed.
+( cd "$NAMEDIR" && ./my-gateway init >"$WORK/init.log" 2>&1 )
+if grep -q "^  my-gateway validate " "$WORK/init.log"; then
+  ok "init hints are copy-pasteable"
+else
+  bad "init hints are copy-pasteable" "$(grep -m1 'validate' "$WORK/init.log")"
+fi
+
+# The same name has to reach the error path, not just the happy path.
+# Captured rather than piped: this command is *meant* to exit non-zero, and
+# `set -o pipefail` would report the whole pipeline as failed even on a match.
+NOCFG=$( cd "$NAMEDIR" && rm -f gateway.yml && ./my-gateway run 2>&1 || true )
+if printf '%s' "$NOCFG" | grep -q '`my-gateway run '; then
+  ok "missing-config error names the binary"
+else
+  bad "missing-config error names the binary" "$(printf '%s' "$NOCFG" | tail -1)"
+fi
+
 say "checking ports"
 BUSY=()
 for port in 9401 9402 9403 9405 9411 9412 3311 3313; do

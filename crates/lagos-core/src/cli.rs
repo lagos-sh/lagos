@@ -1,14 +1,15 @@
-//! The `gateway` command line.
+//! The gateway command line.
 //!
 //! The commands exist so that gateway behaviour can be understood *before*
 //! traffic reaches it: `validate` proves a document is loadable, `routes`
 //! prints the table the way the matcher sees it, and `explain` answers "what
 //! would happen to this request" without a server running.
 
+use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::config::{GatewayConfig, ResolvedConfig};
 use crate::ext::{Extension, ExtensionRegistry};
@@ -19,13 +20,14 @@ use crate::routes::{
 
 const DEFAULT_CONFIG: &str = "gateway.yml";
 
-/// Candidate names tried when no path is given, so `gateway run` works in a
-/// directory that was set up by `gateway init`.
+/// Candidate names tried when no path is given, so `run` works in a directory
+/// that was set up by `init`.
 const CONFIG_CANDIDATES: &[&str] = &["gateway.yml", "gateway.yaml", "config/gateway.yml"];
 
 #[derive(Parser)]
+// `name` is deliberately absent: it is set at runtime from argv[0] in `run`,
+// because this CLI is linked into whatever binary a deployment builds.
 #[command(
-    name = "lagos",
     about = "An identity-aware API gateway built on Pingora",
     version,
     disable_help_subcommand = true
@@ -80,6 +82,32 @@ enum Command {
     },
 }
 
+/// The name this executable was invoked as.
+///
+/// The CLI lives in `lagos-core` but is linked into whatever binary a
+/// deployment builds, so a hard-coded name would make every extension build
+/// call itself `lagos` -- in `--version`, in usage, and in the commands `init`
+/// prints for the reader to copy. Falls back to the crate name when the
+/// executable path cannot be read, which is not worth failing a command over.
+fn bin_name() -> &'static str {
+    // `clap::builder::Str` takes a `&'static str`, and the name is also wanted
+    // on paths that run after startup. A `OnceLock` gives both without leaking
+    // and without recomputing.
+    static BIN_NAME: OnceLock<String> = OnceLock::new();
+    BIN_NAME
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok();
+            exe.as_deref()
+                .and_then(Path::file_stem)
+                .and_then(OsStr::to_str)
+                // Falls back to the project's own binary name rather than the
+                // crate name, which is the library `lagos-core`.
+                .unwrap_or("lagos")
+                .to_owned()
+        })
+        .as_str()
+}
+
 impl Cli {
     /// Parse the command line and run it, with the extensions `make_extensions`
     /// returns available to any route that names one.
@@ -117,7 +145,9 @@ impl Cli {
             Ok(registry)
         }
 
-        match Cli::parse().command {
+        let cli = Cli::from_arg_matches(&Cli::command().name(bin_name()).get_matches())?;
+
+        match cli.command {
             // Bare `gateway` serves, so a container entrypoint needs no
             // argument and the common case stays the shortest.
             None => serve(None, registry_from(make_extensions)?),
@@ -157,9 +187,10 @@ fn resolve_config_path(given: Option<String>) -> anyhow::Result<String> {
     anyhow::bail!(
         "no configuration file found.\n\
          Looked for {}.\n\
-         Pass one explicitly (`gateway run path/to/gateway.yml`), set GATEWAY_CONFIG, \
-         or create one with `gateway init`.",
-        CONFIG_CANDIDATES.join(", ")
+         Pass one explicitly (`{bin} run path/to/gateway.yml`), set GATEWAY_CONFIG, \
+         or create one with `{bin} init`.",
+        CONFIG_CANDIDATES.join(", "),
+        bin = bin_name()
     )
 }
 
@@ -554,14 +585,15 @@ fn init(path: &str, force: bool) -> anyhow::Result<()> {
         anyhow::bail!("{path} already exists. Pass --force to overwrite it.");
     }
     std::fs::write(path, STARTER)?;
+    let bin = bin_name();
     println!("Created {path}\n");
-    println!("  gateway validate {path}   check it");
-    println!("  gateway routes   {path}   see the route table");
-    println!("  gateway run      {path}   serve traffic");
+    println!("  {bin} validate {path}   check it");
+    println!("  {bin} routes   {path}   see the route table");
+    println!("  {bin} run      {path}   serve traffic");
     Ok(())
 }
 
-/// `gateway dev`: supervise a child gateway and restart it when the document
+/// `dev`: supervise a child gateway and restart it when the document
 /// changes.
 ///
 /// Routes already hot-reload in the running process, so only a change to the
