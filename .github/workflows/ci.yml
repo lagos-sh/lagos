@@ -24,3 +24,11 @@ jobs:
 
       - name: End-to-end suite
         run: ./tests/e2e/run.sh
+
+      # Advisories, licences and sources. Was configured but never run, so a
+      # licence the allow-list does not cover, or a new advisory, reached a
+      # release unnoticed.
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

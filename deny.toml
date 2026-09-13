@@ -1,6 +1,6 @@
-# Advisory check only. License/ban graphs are not gated.
+# Advisories, licences and sources are all gated; the ban graph is not.
 #
-# Pingora 0.8 pulls several crates we cannot bump independently. Those IDs are
+# Pingora pulls several crates we cannot bump independently. Those IDs are
 # ignored with a reason; a new advisory on a crate we own still fails CI.
 [graph]
 all-features = false
@@ -8,16 +8,39 @@ all-features = false
 [advisories]
 version = 2
 yanked = "warn"
+# Both entries dropped on the 0.9 upgrade were stale, and `cargo deny` reports
+# an ignore that matches nothing as a warning -- so a list that is not pruned
+# stops being a list of real exceptions.
 ignore = [
-    { id = "RUSTSEC-2024-0437", reason = "protobuf 2.x via pingora 0.8 prometheus 0.13; no independent upgrade" },
-    { id = "RUSTSEC-2025-0069", reason = "daemonize is unmaintained; pulled only by pingora-core 0.8" },
-    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained; pulled only by pingora-core 0.8" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained; pulled only by pingora-rustls 0.8" },
+    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained; pulled only by pingora-core" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained; pulled only by pingora-rustls" },
 ]
 
+# Every licence in the tree today, and nothing wider. A dependency arriving
+# under a licence not on this list fails the check rather than shipping quietly
+# inside a statically linked binary.
+#
+# LGPL-2.1-or-later is deliberately absent. It appears in the graph only via
+# `r-efi`, which is dual-licensed `MIT OR LGPL-2.1-or-later` -- cargo-deny takes
+# MIT from that expression. (It is also a UEFI-target crate that never links
+# into a Linux build.) If a crate ever arrives under LGPL *alone*, this check
+# must fail, and it will.
 [licenses]
 version = 2
 unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
 
 [bans]
 multiple-versions = "allow"

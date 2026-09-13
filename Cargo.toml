@@ -12,6 +12,10 @@ edition = "2024"
 # startup. Hand-rolling a no-op waker needs `unsafe`, which this workspace
 # forbids, and pulling in `futures` for one call is the worse trade.
 rust-version = "1.98"
+# The copyright holder, also declared in NOTICE. `authors` is what reaches
+# `cargo metadata` and a registry listing; NOTICE is what a redistributor is
+# required to reproduce.
+authors = ["ThinkGrid Labs"]
 license = "Apache-2.0"
 repository = "https://github.com/lagos-sh/lagos"
 

@@ -304,7 +304,7 @@ mod tests {
             &mut plan,
             &subject_issuer_cfg(),
             None,
-            &id_with("4821", "https://securetoken.google.com/petsocare"),
+            &id_with("4821", "https://securetoken.google.com/demo-project"),
         )
         .expect("a normal token must not be affected by the safety check");
         let adds: Vec<_> = plan.additions().cloned().collect();

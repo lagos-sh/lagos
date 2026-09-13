@@ -106,6 +106,135 @@ else
   bad "missing-config error names the binary" "$(printf '%s' "$NOCFG" | tail -1)"
 fi
 
+# --- the container convention: a config directory, and a build-time check ----
+#
+# The shape this supports is a three-line Dockerfile -- `FROM lagos`, copy a
+# directory in, `RUN ["lagos","validate","--allow-unset"]` -- so both halves are
+# asserted here: that the directory is found without an argument, and that the
+# check passes in a build, where none of the production environment exists.
+CONVDIR="$WORK/convention"
+mkdir -p "$CONVDIR/lagos"
+cp "$NAMEDIR/my-gateway" "$CONVDIR/"
+cat >"$CONVDIR/lagos/gateway.yml" <<'YAML'
+upstreams:
+  orders: ${ORDERS_URL}
+  carts:  ${CARTS_URL:-http://localhost:3001}
+routes:
+  file: routes.yml
+YAML
+cat >"$CONVDIR/lagos/routes.yml" <<'YAML'
+public:
+  - prefix: /orders
+    upstream: orders
+  - prefix: /carts
+    upstream: carts
+    host: ${PUBLIC_HOST}
+YAML
+
+# Without the flag an unset variable is still fatal. This is the property the
+# flag must not erode: every path that serves traffic keeps failing closed.
+STRICT=$( cd "$CONVDIR" && env -u ORDERS_URL -u CARTS_URL -u PUBLIC_HOST ./my-gateway validate 2>&1 || true )
+if printf '%s' "$STRICT" | grep -q 'lagos/gateway.yml: .*is not set'; then
+  ok "config is found in lagos/ and unset variables stay fatal"
+else
+  bad "config is found in lagos/ and unset variables stay fatal" "$(printf '%s' "$STRICT" | tail -1)"
+fi
+
+LOOSE=$( cd "$CONVDIR" && env -u ORDERS_URL -u CARTS_URL -u PUBLIC_HOST ./my-gateway validate --allow-unset 2>&1 )
+if printf '%s' "$LOOSE" | grep -q 'structurally valid'; then
+  ok "--allow-unset checks structure with no environment set"
+else
+  bad "--allow-unset checks structure with no environment set" "$(printf '%s' "$LOOSE" | tail -1)"
+fi
+
+# The report has to name variables from the route file as well as the main
+# document. They are expanded separately, and listing only half of them would
+# understate what the run did not check.
+if printf '%s' "$LOOSE" | grep -q 'NOT checked.*ORDERS_URL, PUBLIC_HOST'; then
+  ok "--allow-unset names unchecked variables from both documents"
+else
+  bad "--allow-unset names unchecked variables from both documents" "$(printf '%s' "$LOOSE" | grep -m1 'NOT checked' || true)"
+fi
+
+# A declared default must win over the placeholder, or the check would test a
+# configuration nobody runs.
+if printf '%s' "$LOOSE" | grep -q 'using defaults for: CARTS_URL'; then
+  ok "--allow-unset prefers a declared default to the placeholder"
+else
+  bad "--allow-unset prefers a declared default to the placeholder" "$(printf '%s' "$LOOSE" | tail -1)"
+fi
+
+# Each unset variable gets a distinct placeholder. Otherwise two routes on
+# one prefix but different environment-provided hosts acquire the same derived
+# id, and a perfectly valid document fails its build-time check.
+cat >"$CONVDIR/hosts.yml" <<'YAML'
+upstreams: {u: http://localhost:3000}
+routes:
+  public:
+    - {prefix: /api, host: "${LAGOS_E2E_HOST_A}", upstream: u}
+    - {prefix: /api, host: "${LAGOS_E2E_HOST_B}", upstream: u}
+YAML
+HOSTS=$( cd "$CONVDIR" && env -u LAGOS_E2E_HOST_A -u LAGOS_E2E_HOST_B ./my-gateway validate --allow-unset hosts.yml 2>&1 )
+if printf '%s' "$HOSTS" | grep -q 'structurally valid (2 unset)'; then
+  ok "different unset hosts do not create false route collisions"
+else
+  bad "different unset hosts do not create false route collisions" "$(printf '%s' "$HOSTS" | tail -1)"
+fi
+
+# An unknown route-file path cannot be loaded, so the error must explain what
+# needs a default instead of trying to open the generated hostname as a file.
+cat >"$CONVDIR/dynamic-routes.yml" <<'YAML'
+upstreams: {u: http://localhost:3000}
+routes: {file: "${LAGOS_E2E_ROUTES_FILE}"}
+YAML
+DYNAMIC=$( cd "$CONVDIR" && env -u LAGOS_E2E_ROUTES_FILE ./my-gateway validate --allow-unset dynamic-routes.yml 2>&1 || true )
+if printf '%s' "$DYNAMIC" | grep -q 'routes.file depends on an unset variable'; then
+  ok "unset route-file path gets an actionable error"
+else
+  bad "unset route-file path gets an actionable error" "$(printf '%s' "$DYNAMIC" | tail -1)"
+fi
+
+# A same-named route file in the working directory must not replace the one
+# shipped beside the discovered config, even though both files exist.
+cat >"$CONVDIR/routes.yml" <<'YAML'
+public:
+  - {prefix: /shadowed, upstream: orders}
+YAML
+ROUTE_ORDER=$( cd "$CONVDIR" && env ORDERS_URL=http://localhost:3000 PUBLIC_HOST=a.example.com ./my-gateway routes 2>&1 )
+if printf '%s' "$ROUTE_ORDER" | grep -q '/orders' && ! printf '%s' "$ROUTE_ORDER" | grep -q '/shadowed'; then
+  ok "route file is resolved beside its config, not from the working directory"
+else
+  bad "route file is resolved beside its config, not from the working directory" "$(printf '%s' "$ROUTE_ORDER" | head -5)"
+fi
+
+# The flag exists for `validate` alone. A gateway that starts with a placeholder
+# where a credential or an upstream belongs is worse than one that refuses to
+# start, so `run` must not accept it even by accident.
+RUNFLAG=$( cd "$CONVDIR" && ./my-gateway run --allow-unset 2>&1 || true )
+if printf '%s' "$RUNFLAG" | grep -qi 'unexpected argument\|error:'; then
+  ok "run refuses --allow-unset"
+else
+  bad "run refuses --allow-unset" "$(printf '%s' "$RUNFLAG" | tail -1)"
+fi
+
+# A file in the working directory outranks the convention directory, which is
+# what keeps `-v ./gateway.yml:/app/gateway.yml` able to override a config an
+# image baked in.
+cat >"$CONVDIR/gateway.yml" <<'YAML'
+upstreams:
+  orders: http://localhost:3000
+routes:
+  public:
+    - prefix: /orders
+      upstream: orders
+YAML
+OVERRIDE=$( cd "$CONVDIR" && ./my-gateway validate 2>&1 || true )
+if printf '%s' "$OVERRIDE" | grep -q '^gateway.yml is valid'; then
+  ok "a working-directory config outranks lagos/"
+else
+  bad "a working-directory config outranks lagos/" "$(printf '%s' "$OVERRIDE" | tail -1)"
+fi
+
 say "checking ports"
 BUSY=()
 for port in 9401 9402 9403 9405 9411 9412 3311 3313; do

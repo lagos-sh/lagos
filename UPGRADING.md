@@ -124,6 +124,21 @@ refused, answered with the right status. It matters because a `503` tells a
 client to retry the one thing that can never succeed, and pages an operator for
 a malformed credential.
 
+### 4. Route files stay beside their configuration, and ambiguous routes fail
+
+A relative `routes.file` path now resolves beside `gateway.yml` even if a file
+of the same name exists in the working directory. This prevents a working
+directory file from silently replacing the route and authentication policy in
+the configuration directory. If you intentionally keep the route file elsewhere,
+give `routes.file` an absolute path.
+
+Routes with the same prefix and overlapping host and method matchers now fail
+validation when they could depend on declaration order or cross authentication
+tiers. A public route at `/secret` could previously shadow an authenticated
+route at `/secret` if both had distinct ids. Give them distinct paths, hosts or
+methods, or remove the unintended route. A host-specific override of a
+catch-all on the same tier remains supported.
+
 ### Also in this release, with no configuration change
 
 - **`limits.max_token`** (default `8KiB`) caps the bearer token the gateway will

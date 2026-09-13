@@ -4,11 +4,30 @@ use super::{RouteGroups, RouteProvider, RouteTable};
 
 pub struct FileRouteProvider {
     path: String,
+    /// Substituted for `${VAR}`s the environment does not set, instead of
+    /// failing. Set only by `validate --allow-unset`; `None` everywhere a
+    /// server is actually started.
+    unset_fallback: Option<fn(&str) -> String>,
 }
 
 impl FileRouteProvider {
     pub fn new(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            unset_fallback: None,
+        }
+    }
+
+    /// Expand unset, defaultless variables to `placeholder` rather than
+    /// failing.
+    ///
+    /// The route file gets the same treatment as the main document: a check
+    /// that tolerated an unset variable in one and not the other would still
+    /// fail a container build, which is the whole case for the flag.
+    #[must_use]
+    pub fn allowing_unset(mut self, fallback: fn(&str) -> String) -> Self {
+        self.unset_fallback = Some(fallback);
+        self
     }
 
     pub fn path(&self) -> &str {
@@ -25,8 +44,13 @@ impl RouteProvider for FileRouteProvider {
 
         // The route file gets the same `${VAR}` expansion as the main document,
         // so a rollout switch or a per-environment prefix works in either place.
-        let expanded = crate::config::interpolate::interpolate_env(&text)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", self.path))?;
+        let expanded = crate::config::interpolate::interpolate_env_with_fallback(
+            &text,
+            self.unset_fallback
+                .as_ref()
+                .map(|f| f as &dyn Fn(&str) -> String),
+        )
+        .map_err(|e| anyhow::anyhow!("{}: {e}", self.path))?;
 
         let groups: RouteGroups = serde_yaml_ng::from_str(&expanded.text).map_err(|e| {
             let at = e

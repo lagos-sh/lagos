@@ -47,6 +47,14 @@ jobs:
       - name: End-to-end suite
         run: ./tests/e2e/run.sh
 
+      # Advisories, licences and sources. Was configured but never run, so a
+      # licence the allow-list does not cover, or a new advisory, reached a
+      # release unnoticed.
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
       # The image is tagged from the git tag, but `lagos --version` reports the
       # crate version. If they disagree, :0.2.0 ships a binary that calls itself
       # 0.1.0 and every bug report cites the wrong version. Cheap to check here,

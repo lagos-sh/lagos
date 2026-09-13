@@ -1564,6 +1564,10 @@ pub struct ResolvedConfig {
     /// Those that fell back to a default — the ones that differ between a
     /// laptop and a cluster.
     pub defaulted_env: Vec<String>,
+    /// Those filled with a placeholder under `validate --allow-unset`. Non-empty
+    /// means part of this document was checked against a value nobody will ever
+    /// run with, so `validate` says so rather than reporting a clean pass.
+    pub placeheld_env: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1655,35 +1659,42 @@ fn suggestion<'a>(name: &str, known: impl IntoIterator<Item = &'a str>) -> Strin
 impl GatewayConfig {
     /// Read, expand `${VAR}`, and parse a configuration file.
     pub fn load(path: &str) -> Result<(Self, Interpolated), ConfigError> {
+        Self::load_with_fallback(path, None)
+    }
+
+    /// As [`Self::load`], but a variable that is unset and has no default is
+    /// filled with `fallback` instead of failing.
+    ///
+    /// Only `validate --allow-unset` passes a value here. Serving paths pass
+    /// `None` so an unset credential or upstream stays a startup failure.
+    pub fn load_with_fallback(
+        path: &str,
+        fallback: Option<&dyn Fn(&str) -> String>,
+    ) -> Result<(Self, Interpolated), ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_string(),
             source,
         })?;
-        let (mut cfg, expanded) = Self::parse(path, &text)?;
+        let (mut cfg, expanded) = Self::parse_with_fallback(path, &text, fallback)?;
         cfg.resolve_route_file_against(path);
         Ok((cfg, expanded))
     }
 
-    /// Let `routes.file` be written relative to the document that names it.
-    ///
-    /// Tried as given first, so an absolute path or one relative to the working
-    /// directory keeps working; only then relative to the config file. Without
-    /// this, moving `gateway.yml` into a subdirectory silently breaks its route
-    /// file, and the failure looks like a missing file rather than a wrong CWD.
+    /// Resolve a relative route file against the document that names it.
+    /// Looking in the working directory first could silently load a different
+    /// route table (and therefore a different authentication policy).
     fn resolve_route_file_against(&mut self, config_path: &str) {
         let Some(file) = self.routes.file.as_ref() else {
             return;
         };
-        if Path::new(file).exists() {
+        if Path::new(file).is_absolute() {
             return;
         }
         let Some(dir) = Path::new(config_path).parent() else {
             return;
         };
         let candidate = dir.join(file);
-        if candidate.exists()
-            && let Some(p) = candidate.to_str()
-        {
+        if let Some(p) = candidate.to_str() {
             self.routes.file = Some(p.to_string());
         }
     }
@@ -1713,7 +1724,35 @@ impl GatewayConfig {
                 path: path.to_string(),
                 error,
             })?;
+        Self::from_expanded(path, expanded)
+    }
 
+    /// As [`Self::parse`], but a variable that is unset and has no default is
+    /// filled with `fallback` rather than being an error. See
+    /// [`interpolate::interpolate_with_fallback`] for why this is offered to
+    /// `validate` alone.
+    pub fn parse_with_fallback(
+        path: &str,
+        text: &str,
+        fallback: Option<&dyn Fn(&str) -> String>,
+    ) -> Result<(Self, Interpolated), ConfigError> {
+        let expanded =
+            interpolate::interpolate_env_with_fallback(text, fallback).map_err(|error| {
+                ConfigError::Interpolate {
+                    path: path.to_string(),
+                    error,
+                }
+            })?;
+        Self::from_expanded(path, expanded)
+    }
+
+    /// Parse an already-expanded document. The expansion strategy is the only
+    /// thing that differs between the entry points above; everything from the
+    /// YAML parse onward is shared.
+    fn from_expanded(
+        path: &str,
+        expanded: Interpolated,
+    ) -> Result<(Self, Interpolated), ConfigError> {
         let cfg: Self = serde_yaml_ng::from_str(&expanded.text).map_err(|e| {
             // serde_yaml reports a location against the *expanded* text. Line
             // numbers survive expansion because a substituted value may not
@@ -1913,6 +1952,7 @@ impl GatewayConfig {
             base_paths,
             referenced_env: expanded.referenced.clone(),
             defaulted_env: expanded.defaulted.clone(),
+            placeheld_env: expanded.placeheld.clone(),
         })
     }
 }
@@ -1952,6 +1992,27 @@ fn lower_pairs(map: &BTreeMap<String, String>) -> Vec<(String, String)> {
     map.iter()
         .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
         .collect()
+}
+
+/// Routes with the same prefix cannot depend on declaration order for a
+/// security decision. A host-specific route and a catch-all on the same tier
+/// are the deliberate exception: host specificity decides which one wins.
+fn conflicting_routes(a: &RouteConfig, b: &RouteConfig) -> bool {
+    if a.prefix != b.prefix || a.auth.is_machine() != b.auth.is_machine() {
+        return false;
+    }
+    if a.auth == b.auth && a.hosts.is_empty() != b.hosts.is_empty() {
+        return false;
+    }
+    let methods_overlap = a.methods.is_empty()
+        || b.methods.is_empty()
+        || a.methods.iter().any(|method| b.methods.contains(method));
+    let hosts_overlap = a.hosts.is_empty()
+        || b.hosts.is_empty()
+        || a.hosts
+            .iter()
+            .any(|host| b.hosts.iter().any(|other| host.overlaps(other)));
+    methods_overlap && hosts_overlap
 }
 
 impl ResolvedConfig {
@@ -2023,6 +2084,23 @@ impl ResolvedConfig {
                      Ids name the route in logs and metrics, so they must be unique.",
                     r.id, prev, r.prefix,
                 )));
+            }
+        }
+
+        for (index, route) in routes.iter().enumerate() {
+            for other in routes.iter().skip(index + 1) {
+                if conflicting_routes(route, other) {
+                    return Err(ConfigError::invalid(format!(
+                        "routes `{}` ({}) and `{}` ({}) both match prefix `{}` for at least one \
+                         host and method. Routes on the same listener must not depend on \
+                         declaration order for authorization.",
+                        route.id,
+                        route.auth.group(),
+                        other.id,
+                        other.auth.group(),
+                        route.prefix,
+                    )));
+                }
             }
         }
 
@@ -2331,6 +2409,47 @@ routes:
         let table = crate::routes::RouteTable::build(resolved.raw.routes.groups());
         resolved.validate_table(&table)?;
         Ok(table)
+    }
+
+    #[test]
+    fn a_relative_route_file_stays_with_its_config_directory() {
+        let (mut cfg, _) = GatewayConfig::parse(
+            "test.yml",
+            "upstreams: {u: http://u:1}\nroutes: {file: routes.yml}\n",
+        )
+        .expect("config parses");
+        cfg.resolve_route_file_against("/etc/lagos/gateway.yml");
+        assert_eq!(cfg.routes.file.as_deref(), Some("/etc/lagos/routes.yml"));
+
+        cfg.routes.file = Some("/custom/routes.yml".into());
+        cfg.resolve_route_file_against("/etc/lagos/gateway.yml");
+        assert_eq!(cfg.routes.file.as_deref(), Some("/custom/routes.yml"));
+    }
+
+    #[test]
+    fn same_prefix_on_public_and_authenticated_tiers_is_refused() {
+        let err = table(
+            "upstreams: {u: http://u:1}\nroutes:\n  public:\n    - {id: open, prefix: /secret, upstream: u}\n  authenticated:\n    - {id: protected, prefix: /secret, upstream: u}\n",
+        )
+        .expect_err("public route would shadow authentication");
+        assert!(err.to_string().contains("both match prefix"), "{err}");
+    }
+
+    #[test]
+    fn overlapping_host_patterns_at_one_prefix_are_refused() {
+        let err = table(
+            "upstreams: {u: http://u:1}\nroutes:\n  public:\n    - {id: wildcard, host: '*.example.com', prefix: /api, upstream: u}\n    - {id: exact, host: foo.example.com, prefix: /api, upstream: u}\n",
+        )
+        .expect_err("both routes match foo.example.com");
+        assert!(err.to_string().contains("both match prefix"), "{err}");
+    }
+
+    #[test]
+    fn host_specific_override_and_disjoint_methods_remain_valid() {
+        table(
+            "upstreams: {u: http://u:1}\nroutes:\n  public:\n    - {id: any, prefix: /api, upstream: u, methods: [GET]}\n    - {id: specific, host: api.example.com, prefix: /api, upstream: u, methods: [GET]}\n    - {id: posting, prefix: /api, upstream: u, methods: [POST]}\n",
+        )
+        .expect("specific host overrides catch-all; methods do not overlap");
     }
 
     #[test]

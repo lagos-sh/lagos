@@ -1,0 +1,18 @@
+Lagos
+Copyright 2026 ThinkGrid Labs
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this software except in compliance with the License. A copy of the License
+is in the LICENSE file at the root of this repository, and at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+---
+
+This product includes software developed by Cloudflare, Inc.
+
+Pingora (https://github.com/cloudflare/pingora) is licensed under the Apache
+License, Version 2.0, and is linked into the `lagos` binary. Pingora ships no
+NOTICE file of its own, so nothing further is required to be reproduced here;
+the attribution above is given because the binary is distributed in object
+form and Pingora is the largest part of what it contains.

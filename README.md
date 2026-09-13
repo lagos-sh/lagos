@@ -6,15 +6,20 @@
 [![CI](https://github.com/lagos-sh/lagos/actions/workflows/ci.yml/badge.svg)](https://github.com/lagos-sh/lagos/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
-Pingora handles the transport — sockets, connection pools, HTTP, TLS. Lagos
-handles everything above it: who the caller is, which routes they may reach,
-what the upstream is told about them, and what happens when a backend is slow,
-unhealthy or gone.
+Pingora handles the transport — sockets, connection pools, HTTP/1 and HTTP/2,
+upstream TLS. Lagos handles everything above it: who the caller is, which routes
+they may reach, what the upstream is told about them, and what happens when a
+backend is slow, unhealthy or gone.
 
-It is an open-source API gateway and HTTP reverse proxy written in Rust. It
-verifies JWT and Firebase ID tokens, routes declaratively on host, path and
-method, and hands upstreams a verified identity as headers or a signed token —
-so a service behind it never needs an identity-provider SDK of its own.
+It is an open-source API gateway written in Rust. It verifies JWT and Firebase
+ID tokens, routes declaratively on host, path and method, and hands upstreams a
+verified identity as headers or a signed token — so a service behind it never
+needs an identity-provider SDK of its own.
+
+It is **not** a web server or an edge proxy, and does not try to become one.
+Lagos terminates no public TLS, serves no files and manages no certificates. It
+runs behind whatever already faces the internet and takes over the decisions
+that should not be living in that layer's annotations.
 
 **One binary and one YAML file is a complete deployment.** No database, no
 Redis, no control plane, no sidecar, no operator:
@@ -28,6 +33,35 @@ lagos run gateway.yml
 > validated through load or soak testing. Configuration may change without a
 > deprecation period before 1.0. Evaluate it in development and test environments;
 > it is not yet recommended for production traffic. See [Project status](#project-status).
+
+## Where Lagos sits
+
+Lagos is one layer in a chain, not the whole edge:
+
+```mermaid
+flowchart LR
+    C["Client"] --> E["Edge proxy or ingress<br/>TLS termination · certificates<br/>static assets · connection floods"]
+    E --> L["Lagos<br/>routing · authentication · identity<br/>rate limits · retries · circuit breaking · cache"]
+    L --> S["Your services<br/>business logic · application permissions"]
+```
+
+The boundaries are deliberate, and they hold in both directions:
+
+| Left of Lagos — an edge proxy's job | Lagos owns | Right of Lagos — your services' job |
+|---|---|---|
+| Public TLS termination, ACME, certificate rotation | Who the caller is and which routes they may reach | Application permissions and business rules |
+| Static files, document roots, rewrite engines | What the upstream is told about that caller | Response shape and content |
+| L4/stream proxying, connection flood handling | What happens when a backend is slow, unhealthy or gone | Persistence, transactions, side effects |
+
+Anything that has to hold a certificate or serve content belongs on the left.
+Anything that encodes what your product *means* belongs on the right. Lagos
+keeps the middle, and keeping that middle small is the point: the entire policy
+surface is one YAML file you can read in a sitting.
+
+In practice: terminate TLS at nginx, Caddy, an ingress controller or a cloud
+load balancer, and point it at Lagos. Lagos is ingress-agnostic — it watches no
+Kubernetes resources and assumes no particular edge, so adopting it does not
+mean replacing the one you have.
 
 ## Know what it will do before traffic arrives
 
@@ -116,6 +150,7 @@ metrics; sampled requests also produce trace data.
 
 ## Contents
 
+- [Where Lagos sits](#where-lagos-sits)
 - [Know what it will do before traffic arrives](#know-what-it-will-do-before-traffic-arrives)
 - [How Lagos handles a request](#how-lagos-handles-a-request)
 - [Features](#features)
@@ -165,15 +200,20 @@ about:
 | Pingora owns | Lagos owns |
 |---|---|
 | Sockets, connections, connection pooling | The routing model and how a request finds an upstream |
-| HTTP/1 and HTTP/2, TLS plumbing | Authentication tiers, identity forwarding, ownership bindings |
+| HTTP/1 and HTTP/2, upstream TLS | Authentication tiers, identity forwarding, ownership bindings |
 | Upstream communication, load-balancing primitives | Rate limits, retries, circuit breaking, caching policy |
 | Proxy lifecycle hooks | Configuration lifecycle, validation and developer tooling |
 
-Lagos is **not** a service mesh, a WAF, a CDN, an identity provider, a developer
-portal, or a Kubernetes ingress controller. It decides *who may reach a route*
-and *what the upstream is told about them* — not what may be sent through it.
-There is no request-body inspection and no schema validation today; see
-[SECURITY.md](SECURITY.md) for the full list of what is and is not enforced.
+Lagos is **not** a web server, an edge or TLS-terminating proxy, a service mesh,
+a WAF, a CDN, an identity provider, a developer portal, or a Kubernetes ingress
+controller. Nor is it an API composition layer: it does not merge, aggregate or
+rewrite response bodies, and there is no transformation language — a gateway
+that reshapes payloads has started holding business logic.
+
+It decides *who may reach a route* and *what the upstream is told about them* —
+not what may be sent through it. There is no request-body inspection and no
+schema validation today; see [SECURITY.md](SECURITY.md) for the full list of
+what is and is not enforced.
 
 Extensions are Rust, compiled in. A WASM policy runtime is a plausible later
 direction, but it is not implemented and the extension API is not stable enough
@@ -878,6 +918,7 @@ logs and emits its own contextual failure records.
 |---|---|
 | `lagos init [PATH]` | Generate a starter configuration; defaults to `gateway.yml` |
 | `lagos validate [CONFIG]` | Validate configuration, routes, and extension references |
+| `lagos validate --allow-unset` | The same checks where `${VAR}`s are not set, as in a container build |
 | `lagos routes [CONFIG]` | Display routes and upstreams |
 | `lagos explain --path PATH [--method METHOD] [--host HOST] [--config CONFIG]` | Explain routing and configured policy without serving traffic |
 | `lagos dev [CONFIG]` | Serve with request narration and validated configuration reloads |
@@ -891,6 +932,61 @@ lagos explain --method GET --host api.example.com --path /users/42
 
 Use `lagos --help` or `lagos <command> --help` for command options. Running
 `lagos` without a subcommand starts serving with the discovered configuration.
+
+### Where the configuration is found
+
+With no path argument, these are tried in order, and `GATEWAY_CONFIG` overrides
+all of them:
+
+```
+gateway.yml · gateway.yaml · config/gateway.yml · lagos/gateway.yml
+deploy/gateway.yml · /etc/lagos/gateway.yml
+```
+
+Relative `routes.file` paths are resolved beside the document that names them,
+so a configuration directory moves as a unit. Use an absolute path for a route
+file elsewhere. `/etc/lagos` is last, which lets a `gateway.yml` mounted over
+the working directory override one baked into an image.
+
+### Validating without an environment
+
+`validate` treats an unset `${VAR}` that has no default as fatal, the same way
+`run` does. That is the right default everywhere traffic is served, and the
+wrong one inside `docker build`, where none of the production environment
+exists yet.
+
+`--allow-unset` expands those variables to distinct placeholders and checks
+everything that does not depend on their values — syntax, route ids and tiers,
+ambiguous same-prefix matchers and cross-tier overlaps, upstream references,
+and the CORS and cache startup refusals — then lists what it could not check:
+
+```console
+$ lagos validate --allow-unset
+✓ syntax
+✓ routes      2  (2 public)
+✓ environment ORDERS_URL, CARTS_URL
+
+  using defaults for: CARTS_URL
+
+  NOT checked, unset and left as a placeholder: ORDERS_URL, PUBLIC_HOST
+  Structure was checked; the values these feed were not. Give one a
+  default (`${NAME:-value}`) to have it checked here too.
+
+lagos/gateway.yml is structurally valid (2 unset).
+```
+
+A declared default always wins over the placeholder, so `${PORT:-8080}` is
+checked as `8080` rather than skipped. Variables that land in numeric or boolean
+fields still fail to parse — the fix is to give them a default, which makes the
+field checkable at build time.
+
+The route file must have a known path at build time. If `routes.file` uses an
+unset variable, give it a default such as `${ROUTES_FILE:-routes.yml}` so
+`validate` can read and check the file.
+
+The flag is offered to `validate` alone. A gateway that started with a
+placeholder where a credential or an upstream belongs would be worse than one
+that refused to start, so `run` and `dev` do not accept it.
 
 ## Deployment
 
@@ -912,15 +1008,47 @@ docker run --rm -p 8080:8080 \
   lagos:local
 ```
 
+### Building your own image
+
+Extend the published image and copy a configuration directory into
+`/etc/lagos`, which is one of the locations searched when no path is given:
+
+```
+myapp/
+├── Dockerfile
+└── lagos/
+    ├── gateway.yml
+    └── routes.yml
+```
+
+```dockerfile
+FROM ghcr.io/lagos-sh/lagos:0.1.3
+COPY lagos/ /etc/lagos/
+RUN ["lagos", "validate", "--allow-unset"]
+```
+
+Use `lagos:local` in place of the published image to build against the one you
+built above.
+
+The `RUN` line makes a broken configuration fail `docker build` rather than the
+deploy. It must be in exec form: the runtime image is distroless and has no
+shell for the usual `RUN lagos ...`.
+
+This path covers a deployment whose policy is entirely declarative. Compiled-in
+[extensions](#extensions) cannot be added this way — the image holds a built
+binary and no toolchain — so a deployment that needs one builds its own binary
+against `lagos-core` and ships that instead.
+
 The image uses a distroless Debian runtime and runs as a nonroot user. Pass any
 required configuration environment variables to the container. Mount separate
 route files at their configured paths when using file-based routes.
 
 ### Listeners and graceful shutdown
 
-The stock binary exposes HTTP listeners. Terminate public TLS at an ingress or
-another proxy and restrict direct access to upstreams that trust injected
-identity. HTTPS upstream targets are supported.
+The stock binary exposes HTTP listeners only. Terminate public TLS at an ingress
+or another proxy — see [Where Lagos sits](#where-lagos-sits) — and restrict
+direct access to upstreams that trust injected identity. HTTPS upstream targets
+are supported.
 
 `server.graceful_shutdown` defaults to `25s`. Configure the surrounding process
 manager or Kubernetes termination grace period to allow that drain to finish.
@@ -1098,4 +1226,6 @@ is supported.
 
 ## License
 
-Lagos is licensed under the [Apache License 2.0](LICENSE).
+Copyright 2026 ThinkGrid Labs. Lagos is licensed under the
+[Apache License 2.0](LICENSE); see [NOTICE](NOTICE) for the attributions a
+redistribution must carry.

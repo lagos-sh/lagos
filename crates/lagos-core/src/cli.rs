@@ -20,9 +20,51 @@ use crate::routes::{
 
 const DEFAULT_CONFIG: &str = "gateway.yml";
 
-/// Candidate names tried when no path is given, so `run` works in a directory
-/// that was set up by `init`.
-const CONFIG_CANDIDATES: &[&str] = &["gateway.yml", "gateway.yaml", "config/gateway.yml"];
+/// Candidate locations tried when no path is given, so `run` works in a
+/// directory that was set up by `init` and in an image that simply copied a
+/// configuration directory in.
+///
+/// Order is most specific first, and `/etc/lagos` is last so a file in the
+/// working directory always wins over one baked into an image — that is what
+/// makes `-v ./gateway.yml:/app/gateway.yml` still override a config the
+/// Dockerfile copied. It is also the only absolute entry, so it resolves the
+/// same whatever the working directory is.
+const CONFIG_CANDIDATES: &[&str] = &[
+    "gateway.yml",
+    "gateway.yaml",
+    "config/gateway.yml",
+    "lagos/gateway.yml",
+    "deploy/gateway.yml",
+    "/etc/lagos/gateway.yml",
+];
+
+/// Substituted for an unset variable by `validate --allow-unset`.
+///
+/// A bare hostname, which is the one shape that satisfies every string field a
+/// variable commonly feeds: an upstream parses it (the scheme defaults to
+/// `http`), a route `host:` accepts it (a host must *not* carry a scheme, so a
+/// URL is refused there), and issuers, JWKS URLs and audiences are checked for
+/// emptiness rather than syntax. A URL-shaped placeholder passes the first and
+/// fails the second.
+///
+/// The `.invalid` TLD is reserved by RFC 2606 and can never resolve, so if one
+/// of these ever escaped into a running configuration it would fail closed
+/// rather than reach a host someone else controls.
+///
+/// A variable landing in a numeric or boolean field still fails to parse. That
+/// is deliberate: the fix is a default in the document (`${PORT:-8080}`), which
+/// makes the field checkable at build time and is better configuration anyway.
+/// Encode the variable name so different unset hosts cannot collapse into the
+/// same derived route id. Hex preserves case and underscores while keeping the
+/// value usable as a bare host in every field that accepts one.
+fn unset_placeholder(name: &str) -> String {
+    let encoded = name
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("");
+    format!("unset-{encoded}.lagos.invalid")
+}
 
 #[derive(Parser)]
 // `name` is deliberately absent: it is set at runtime from argv[0] in `run`,
@@ -62,6 +104,12 @@ enum Command {
     Validate {
         #[arg(value_name = "CONFIG")]
         path: Option<String>,
+        /// Check structure where `${VAR}`s are not set, as in a container build
+        ///
+        /// Unset variables with no default expand to a placeholder instead of
+        /// failing, and are listed in the output as unchecked.
+        #[arg(long)]
+        allow_unset: bool,
     },
     /// Print the route table as the matcher sees it
     Routes {
@@ -153,7 +201,9 @@ impl Cli {
             None => serve(None, registry_from(make_extensions)?),
             Some(Command::Run { path }) => serve(path, registry_from(make_extensions)?),
             Some(Command::Dev { path }) => dev(path, registry_from(make_extensions)?),
-            Some(Command::Validate { path }) => validate(path, &registry_from(make_extensions)?),
+            Some(Command::Validate { path, allow_unset }) => {
+                validate(path, &registry_from(make_extensions)?, allow_unset)
+            }
             // These three neither serve traffic nor resolve an extension name,
             // so they must work with no environment at all.
             Some(Command::Init { path, force }) => init(&path, force),
@@ -200,11 +250,42 @@ fn serve(path: Option<String>, registry: ExtensionRegistry) -> anyhow::Result<()
 
 /// Load a document and its route table without binding a socket.
 fn load(path: &str) -> anyhow::Result<(Arc<ResolvedConfig>, RouteTable)> {
-    let (raw, expanded) = GatewayConfig::load(path)?;
+    load_with_fallback(path, None)
+}
+
+/// As [`load`], but `fallback` fills any `${VAR}` the environment does not set
+/// and the document does not default. Reaches both the main document and the
+/// route file, which are expanded separately.
+fn load_with_fallback(
+    path: &str,
+    fallback: Option<fn(&str) -> String>,
+) -> anyhow::Result<(Arc<ResolvedConfig>, RouteTable)> {
+    let (raw, expanded) = GatewayConfig::load_with_fallback(
+        path,
+        fallback.as_ref().map(|f| f as &dyn Fn(&str) -> String),
+    )?;
+    if let Some(file) = raw.routes.file.as_deref()
+        && expanded
+            .placeheld
+            .iter()
+            .any(|name| file.contains(&unset_placeholder(name)))
+    {
+        anyhow::bail!(
+            "routes.file depends on an unset variable, so its route table cannot be checked. \
+             Use a fixed path or give the variable a default (for example, \
+             `${{ROUTES_FILE:-routes.yml}}`)."
+        );
+    }
     let cfg = Arc::new(raw.resolve(&expanded)?);
 
     let provider: Box<dyn RouteProvider> = match &cfg.raw.routes.file {
-        Some(f) => Box::new(FileRouteProvider::new(f.clone())),
+        Some(f) => {
+            let p = FileRouteProvider::new(f.clone());
+            Box::new(match fallback {
+                Some(f) => p.allowing_unset(f),
+                None => p,
+            })
+        }
         None => Box::new(InlineRouteProvider::new(cfg.raw.routes.groups())),
     };
     let table = tokio::runtime::Builder::new_current_thread()
@@ -216,9 +297,54 @@ fn load(path: &str) -> anyhow::Result<(Arc<ResolvedConfig>, RouteTable)> {
     Ok((cfg, table))
 }
 
-fn validate(path: Option<String>, registry: &ExtensionRegistry) -> anyhow::Result<()> {
+/// Every name left as a placeholder, across both documents.
+///
+/// The route file is expanded by its provider, separately from the main
+/// document, so its unset variables never reach `cfg.placeheld_env`. Listing
+/// only half of them would understate what went unchecked — which is the one
+/// thing this report exists to prevent — so the route file is re-expanded here
+/// to collect the rest.
+fn placeheld_in_both(cfg: &ResolvedConfig, fallback: Option<fn(&str) -> String>) -> Vec<String> {
+    let mut names = cfg.placeheld_env.clone();
+    let (Some(file), Some(fallback)) = (&cfg.raw.routes.file, fallback) else {
+        return names;
+    };
+    // The provider has already read and expanded this file successfully, so a
+    // failure here means it changed underneath us. Not worth failing a check
+    // that has otherwise passed -- but not worth hiding either, because the
+    // list below would then be short without saying so.
+    match std::fs::read_to_string(file)
+        .map_err(|e| e.to_string())
+        .and_then(|text| {
+            crate::config::interpolate::interpolate_env_with_fallback(
+                &text,
+                Some(&fallback as &dyn Fn(&str) -> String),
+            )
+            .map_err(|e| e.to_string())
+        }) {
+        Ok(expanded) => {
+            for name in expanded.placeheld {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        Err(e) => println!(
+            "\n  note: {file} could not be re-read ({e}); variables it sets are \n  \
+             missing from the list below."
+        ),
+    }
+    names
+}
+
+fn validate(
+    path: Option<String>,
+    registry: &ExtensionRegistry,
+    allow_unset: bool,
+) -> anyhow::Result<()> {
     let path = resolve_config_path(path)?;
-    let (cfg, table) = load(&path)?;
+    let fallback = allow_unset.then_some(unset_placeholder as fn(&str) -> String);
+    let (cfg, table) = load_with_fallback(&path, fallback)?;
 
     let missing = registry.missing(table.extension_names());
     if !missing.is_empty() {
@@ -313,7 +439,29 @@ fn validate(path: Option<String>, registry: &ExtensionRegistry) -> anyhow::Resul
         // between a laptop and a cluster.
         println!("\n  using defaults for: {}", cfg.defaulted_env.join(", "));
     }
-    println!("\n{path} is valid.");
+    // Never a silent pass. Whatever these variables feed was checked against a
+    // placeholder, so the reader has to know which parts of the document this
+    // run did not actually prove anything about.
+    let placeheld = placeheld_in_both(&cfg, fallback);
+    if placeheld.is_empty() {
+        println!("\n{path} is valid.");
+    } else {
+        // Never a silent pass. Whatever these variables feed was checked
+        // against a placeholder, so the reader has to know which parts of the
+        // document this run proved nothing about.
+        println!(
+            "\n  NOT checked, unset and left as a placeholder: {}",
+            placeheld.join(", ")
+        );
+        println!(
+            "  Structure was checked; the values these feed were not. Give one a\n  \
+             default (`${{NAME:-value}}`) to have it checked here too."
+        );
+        println!(
+            "\n{path} is structurally valid ({} unset).",
+            placeheld.len()
+        );
+    }
     Ok(())
 }
 
@@ -700,5 +848,62 @@ fn dev(path: Option<String>, registry: ExtensionRegistry) -> anyhow::Result<()> 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Deliberately asserted as data rather than by creating files and changing
+    // directory: the working directory is process-global, so a test that moved
+    // it would race every other test in the binary. The behaviour that depends
+    // on a real filesystem is covered in tests/e2e/run.sh.
+    #[test]
+    fn a_working_directory_config_outranks_the_image_one() {
+        let etc = CONFIG_CANDIDATES
+            .iter()
+            .position(|c| *c == "/etc/lagos/gateway.yml")
+            .expect("the image location is a candidate");
+        assert_eq!(
+            etc,
+            CONFIG_CANDIDATES.len() - 1,
+            "/etc/lagos must be tried last, so a file mounted over the working \
+             directory still overrides a config an image baked in"
+        );
+        assert_eq!(
+            CONFIG_CANDIDATES.first().copied(),
+            Some(DEFAULT_CONFIG),
+            "the file `init` writes must be found first"
+        );
+    }
+
+    #[test]
+    fn only_the_image_candidate_is_absolute() {
+        for candidate in CONFIG_CANDIDATES {
+            assert_eq!(
+                Path::new(candidate).is_absolute(),
+                *candidate == "/etc/lagos/gateway.yml",
+                "{candidate} is relative to the working directory or is the image path"
+            );
+        }
+    }
+
+    // A URL-shaped placeholder passes upstream parsing and then fails on any
+    // route `host:`, which is where the first version of this went wrong.
+    #[test]
+    fn the_placeholder_is_a_bare_host() {
+        let placeholder = unset_placeholder("PUBLIC_HOST");
+        assert!(
+            !placeholder.contains("://"),
+            "a scheme makes the placeholder invalid in a route `host:`"
+        );
+        assert!(
+            placeholder.ends_with(".invalid"),
+            "RFC 2606 reserves .invalid, so a placeholder that escaped into a \
+             running config cannot reach a host someone else controls"
+        );
+        assert_ne!(unset_placeholder("HOST_A"), unset_placeholder("HOST_B"));
+        assert_ne!(unset_placeholder("host"), unset_placeholder("HOST"));
     }
 }

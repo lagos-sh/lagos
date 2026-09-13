@@ -100,6 +100,22 @@ impl HostPattern {
             }
         }
     }
+
+    /// Whether one Host value can satisfy both patterns.
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Exact(a), Self::Exact(b)) => a == b,
+            (Self::Exact(a), b) => b.matches(a),
+            (a, Self::Exact(b)) => a.matches(b),
+            (Self::Suffix(a), Self::Suffix(b)) => {
+                a == b
+                    || a.strip_suffix(b)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+                    || b.strip_suffix(a)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+        }
+    }
 }
 
 /// Normalize an incoming `Host` header for matching: lower-cased, port removed.

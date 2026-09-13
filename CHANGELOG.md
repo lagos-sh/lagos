@@ -5,7 +5,41 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## 0.1.3 — request-path hardening
 
+### Added
+
+- Configuration is discovered in `lagos/gateway.yml`, `deploy/gateway.yml` and
+  `/etc/lagos/gateway.yml` as well as the previous locations, so an image can
+  copy a configuration directory in and run with no arguments and no
+  `GATEWAY_CONFIG`. `/etc/lagos` is tried last, so a file mounted over the
+  working directory still overrides one an image baked in. Relative `routes.file`
+  paths are always resolved beside their configuration document.
+- `lagos validate --allow-unset` checks a document in an environment that does
+  not hold production values — a container build, typically. An unset `${VAR}`
+  with no default expands to a placeholder rather than failing, and every name
+  treated that way is listed as unchecked. A declared default still wins over
+  the placeholder, so `${PORT:-8080}` is checked as `8080`. Distinct unset names
+  get distinct placeholders, avoiding false collisions in host-based routes.
+  An environment-based `routes.file` path needs a default so the file can be
+  checked at build time.
+
+  Offered to `validate` alone. `run` and `dev` reject the flag: a gateway that
+  started with a placeholder where a credential or an upstream belongs would be
+  worse than one that refused to start.
+
+  This makes a build-time check possible, which is the point:
+
+  ```dockerfile
+  FROM ghcr.io/lagos-sh/lagos:0.1.3
+  COPY lagos/ /etc/lagos/
+  RUN ["lagos", "validate", "--allow-unset"]
+  ```
+
 ### Security
+
+- Routes on the same prefix whose host and method matchers overlap are rejected
+  when they could depend on declaration order or cross authentication tiers.
+  A public route can no longer silently shadow an authenticated route with the
+  same matcher.
 
 - Client-supplied `X-Forwarded-For` is no longer trusted by default. `X-Real-IP`
   was derived from the leftmost entry, so any caller could forge its own source
@@ -63,6 +97,21 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 - `headers::forwarded_for` takes a trusted-hop count.
 - `identity::apply` returns `IdentityError` instead of `String`.
 - `ratelimit::client_address` re-exported from `headers`.
+- `Interpolated` gains a `placeheld` field; `interpolate_with_fallback`,
+  `interpolate_env_with_fallback`, `GatewayConfig::load_with_fallback`,
+  `GatewayConfig::parse_with_fallback` and `FileRouteProvider::allowing_unset`
+  are new. Existing entry points are unchanged and keep failing on an unset
+  variable.
+- `ResolvedConfig` gains `placeheld_env`.
+
+### Project
+
+- Copyright is declared: ThinkGrid Labs, in a new `NOTICE` file and in the
+  package `authors`. The LICENSE text stays verbatim — its appendix is a
+  template to copy into source files, not a field to fill in.
+- `cargo deny` now runs in CI and on release. Its licence check had no allow
+  list, so it had never passed; every licence in the tree is now enumerated and
+  anything new fails the build.
 
 ## 0.1.2
 

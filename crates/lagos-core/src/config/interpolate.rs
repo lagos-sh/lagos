@@ -82,6 +82,12 @@ pub struct Interpolated {
     /// Names that fell back to their default because the environment did not
     /// set them. These are the ones that differ between a laptop and a cluster.
     pub defaulted: Vec<String>,
+    /// Names that were unset, had no default, and were filled with the caller's
+    /// placeholder instead of failing. Only ever non-empty when a fallback was
+    /// supplied — that is, under `validate --allow-unset`. Whatever they feed
+    /// is **unchecked**, so every caller reports them rather than passing them
+    /// over in silence.
+    pub placeheld: Vec<String>,
 }
 
 /// Where a YAML comment starts on this line, if anywhere.
@@ -132,6 +138,26 @@ fn opens_block_scalar(code: &str) -> bool {
     }
 }
 
+/// What a document referenced, carried across lines so one record covers the
+/// whole file. Grouped into a struct rather than passed as four out-parameters
+/// because `expand_into` is called per line and per fragment.
+struct Expansion<'a> {
+    /// Substituted for a variable that is unset and has no default, instead of
+    /// failing. `None` is the ordinary case: unset with no default is fatal.
+    fallback: Option<&'a dyn Fn(&str) -> String>,
+    referenced: Vec<String>,
+    defaulted: Vec<String>,
+    placeheld: Vec<String>,
+}
+
+impl Expansion<'_> {
+    fn note(list: &mut Vec<String>, name: &str) {
+        if !list.iter().any(|n| n == name) {
+            list.push(name.to_string());
+        }
+    }
+}
+
 /// Expand `${VAR}` and `${VAR:-default}` in `text`, reading values through
 /// `lookup`.
 ///
@@ -141,9 +167,33 @@ pub fn interpolate<F>(text: &str, lookup: F) -> Result<Interpolated, Interpolate
 where
     F: Fn(&str) -> Option<String>,
 {
+    interpolate_with_fallback(text, lookup, None)
+}
+
+/// As [`interpolate`], but a variable that is unset *and* has no default is
+/// filled with `fallback` instead of being an error.
+///
+/// This exists for `validate --allow-unset`, which checks the structure of a
+/// document in an environment that deliberately does not hold production
+/// values — a container build, most often. It is not offered to `run` or
+/// `dev`: a gateway that starts with a placeholder where a credential or an
+/// upstream belongs is worse than one that refuses to start, so the fatal path
+/// stays fatal everywhere traffic is served.
+pub fn interpolate_with_fallback<F>(
+    text: &str,
+    lookup: F,
+    fallback: Option<&dyn Fn(&str) -> String>,
+) -> Result<Interpolated, InterpolateError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut out = String::with_capacity(text.len());
-    let mut referenced: Vec<String> = Vec::new();
-    let mut defaulted: Vec<String> = Vec::new();
+    let mut exp = Expansion {
+        fallback,
+        referenced: Vec::new(),
+        defaulted: Vec::new(),
+        placeheld: Vec::new(),
+    };
     // Indentation of the block scalar we are inside, if any. Its body is
     // literal, so `#` there is content and gets expanded like any other text.
     let mut block: Option<usize> = None;
@@ -175,14 +225,7 @@ where
             block = Some(indent_of(raw_line));
         }
 
-        expand_into(
-            code,
-            line_no,
-            &lookup,
-            &mut out,
-            &mut referenced,
-            &mut defaulted,
-        )?;
+        expand_into(code, line_no, &lookup, &mut out, &mut exp)?;
         out.push_str(comment);
         if idx != last || ends_with_newline {
             out.push('\n');
@@ -197,8 +240,9 @@ where
 
     Ok(Interpolated {
         text: out,
-        referenced,
-        defaulted,
+        referenced: exp.referenced,
+        defaulted: exp.defaulted,
+        placeheld: exp.placeheld,
     })
 }
 
@@ -208,8 +252,7 @@ fn expand_into<F>(
     line: usize,
     lookup: &F,
     out: &mut String,
-    referenced: &mut Vec<String>,
-    defaulted: &mut Vec<String>,
+    exp: &mut Expansion<'_>,
 ) -> Result<(), InterpolateError>
 where
     F: Fn(&str) -> Option<String>,
@@ -257,9 +300,7 @@ where
                         line,
                     });
                 }
-                if !referenced.iter().any(|n| n == name) {
-                    referenced.push(name.to_string());
-                }
+                Expansion::note(&mut exp.referenced, name);
 
                 // Empty or whitespace-only is treated as unset, so a blank
                 // value in a manifest falls to the default or fails loudly
@@ -268,20 +309,28 @@ where
                     .map(|v| v.trim().to_string())
                     .filter(|v| !v.is_empty());
 
+                // A declared default always wins over the fallback: the
+                // document said what it wants when the variable is absent, and
+                // `${PORT:-8080}` must still expand to 8080 under
+                // `--allow-unset` or the check would test a config nobody runs.
                 let value = match (resolved, default) {
                     (Some(v), _) => v,
                     (None, Some(d)) => {
-                        if !defaulted.iter().any(|n| n == name) {
-                            defaulted.push(name.to_string());
-                        }
+                        Expansion::note(&mut exp.defaulted, name);
                         d.to_string()
                     }
-                    (None, None) => {
-                        return Err(InterpolateError::Unset {
-                            name: name.to_string(),
-                            line,
-                        });
-                    }
+                    (None, None) => match exp.fallback {
+                        Some(f) => {
+                            Expansion::note(&mut exp.placeheld, name);
+                            f(name)
+                        }
+                        None => {
+                            return Err(InterpolateError::Unset {
+                                name: name.to_string(),
+                                line,
+                            });
+                        }
+                    },
                 };
 
                 if !is_structurally_safe(&value) {
@@ -301,7 +350,17 @@ where
 
 /// Expand against the process environment.
 pub fn interpolate_env(text: &str) -> Result<Interpolated, InterpolateError> {
-    interpolate(text, |name| std::env::var(name).ok())
+    interpolate_env_with_fallback(text, None)
+}
+
+/// Expand against the process environment, filling anything unset and
+/// defaultless with `fallback` rather than failing. See
+/// [`interpolate_with_fallback`].
+pub fn interpolate_env_with_fallback(
+    text: &str,
+    fallback: Option<&dyn Fn(&str) -> String>,
+) -> Result<Interpolated, InterpolateError> {
+    interpolate_with_fallback(text, |name| std::env::var(name).ok(), fallback)
 }
 
 #[cfg(test)]
@@ -516,6 +575,76 @@ mod tests {
         assert!(matches!(
             run("a: ${UP\n  }", &[("UP", "x")]),
             Err(InterpolateError::Unterminated { .. })
+        ));
+    }
+
+    fn run_allowing_unset(
+        text: &str,
+        pairs: &[(&str, &str)],
+    ) -> Result<Interpolated, InterpolateError> {
+        let map = env(pairs);
+        interpolate_with_fallback(
+            text,
+            |n| map.get(n).cloned(),
+            Some(&|_| "PLACEHOLDER".into()),
+        )
+    }
+
+    #[test]
+    fn a_fallback_fills_an_unset_variable_and_records_it() {
+        let r = run_allowing_unset("url: ${UP}", &[]).expect("fallback should apply");
+        assert_eq!(r.text, "url: PLACEHOLDER");
+        assert_eq!(r.placeheld, vec!["UP"]);
+        assert_eq!(r.referenced, vec!["UP"]);
+        assert!(r.defaulted.is_empty());
+    }
+
+    #[test]
+    fn a_declared_default_wins_over_the_fallback() {
+        // The document already said what it wants when the variable is absent.
+        // Taking the placeholder instead would check a config nobody runs --
+        // and would break every numeric field that carries a sensible default.
+        let r = run_allowing_unset("port: ${PORT:-8080}", &[]).expect("default should apply");
+        assert_eq!(r.text, "port: 8080");
+        assert_eq!(r.defaulted, vec!["PORT"]);
+        assert!(r.placeheld.is_empty());
+    }
+
+    #[test]
+    fn a_set_variable_wins_over_the_fallback() {
+        let r = run_allowing_unset("url: ${UP}", &[("UP", "http://real:1")]).expect("set");
+        assert_eq!(r.text, "url: http://real:1");
+        assert!(r.placeheld.is_empty());
+    }
+
+    #[test]
+    fn a_blank_variable_takes_the_fallback_like_an_unset_one() {
+        // Blank counts as unset everywhere else; the fallback path must agree,
+        // or `API_KEY=` would validate as an empty credential.
+        let r = run_allowing_unset("key: ${API_KEY}", &[("API_KEY", "   ")]).expect("blank");
+        assert_eq!(r.text, "key: PLACEHOLDER");
+        assert_eq!(r.placeheld, vec!["API_KEY"]);
+    }
+
+    #[test]
+    fn without_a_fallback_an_unset_variable_is_still_fatal() {
+        assert!(matches!(
+            run("url: ${UP}", &[]),
+            Err(InterpolateError::Unset { .. })
+        ));
+        assert!(run("url: ${UP}", &[]).is_err());
+    }
+
+    #[test]
+    fn a_fallback_is_still_refused_if_it_would_change_the_structure() {
+        let map = env(&[]);
+        assert!(matches!(
+            interpolate_with_fallback(
+                "url: ${UP}",
+                |n| map.get(n).cloned(),
+                Some(&|_| "a\nb: c".into())
+            ),
+            Err(InterpolateError::ControlCharacter { .. })
         ));
     }
 }
