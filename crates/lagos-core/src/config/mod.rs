@@ -59,6 +59,9 @@ pub struct GatewayConfig {
     pub routes: RoutesConfig,
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    /// How upstream names are resolved.
+    #[serde(default)]
+    pub dns: DnsConfig,
     /// Cross-origin policy, applied to every route.
     #[serde(default)]
     pub cors: Option<CorsConfig>,
@@ -397,6 +400,22 @@ pub struct ServerConfig {
     pub service_name: String,
     #[serde(default = "default_threads")]
     pub threads: usize,
+    /// Kernel-level keepalive on accepted connections, so a peer that vanished
+    /// without closing — a yanked cable, a NAT table entry that expired — is
+    /// detected and its socket released instead of being held until an
+    /// application timeout notices. It cannot close a connection whose peer is
+    /// still answering.
+    #[serde(default)]
+    pub tcp_keepalive: Option<TcpKeepaliveConfig>,
+    /// How long to wait after SIGTERM before starting to drain.
+    ///
+    /// Unset by default. The window exists so a load balancer notices this
+    /// instance going away and stops sending it new connections *before* the
+    /// ones in flight are cut. Whatever is set here is spent before
+    /// `graceful_shutdown` begins, so the two together must still fit inside
+    /// the process manager's own kill deadline.
+    #[serde(default, with = "humantime_serde::option")]
+    pub shutdown_grace: Option<Duration>,
     /// How long to drain in-flight requests on SIGTERM.
     ///
     /// Pingora's own default is 300s. Kubernetes SIGKILLs a pod at
@@ -423,6 +442,25 @@ fn default_threads() -> usize {
     2
 }
 
+/// TCP keepalive probing on accepted connections.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpKeepaliveConfig {
+    /// Idle time before the first probe.
+    #[serde(with = "humantime_serde", default = "d60")]
+    pub idle: Duration,
+    /// Gap between probes.
+    #[serde(with = "humantime_serde", default = "d10")]
+    pub interval: Duration,
+    /// Unanswered probes before the connection is dropped.
+    #[serde(default = "default_keepalive_count")]
+    pub count: usize,
+}
+
+fn default_keepalive_count() -> usize {
+    6
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -432,6 +470,8 @@ impl Default for ServerConfig {
             health_path: default_health_path(),
             service_name: default_service_name(),
             threads: default_threads(),
+            tcp_keepalive: None,
+            shutdown_grace: None,
             graceful_shutdown: d25(),
         }
     }
@@ -562,6 +602,19 @@ pub struct Limits {
     /// held-open connection is a cheap way to keep one.
     #[serde(default = "default_keepalive_requests")]
     pub keepalive_requests: u32,
+    /// Refuse connections from an address that opens them too quickly.
+    ///
+    /// Off by default, and deliberately so: an address is not a caller. Behind
+    /// an ingress controller *every* connection arrives from one address, and
+    /// turning this on there would throttle the whole gateway. It is the right
+    /// control only where Lagos is genuinely the edge.
+    #[serde(default)]
+    pub connections_per_ip: Option<ConnectionLimitConfig>,
+    /// Idle upstream connections kept for reuse, per upstream. Pingora's own
+    /// default is 128; it is exposed here because it is the main thing
+    /// determining the gateway's steady-state memory once it is busy.
+    #[serde(default = "default_upstream_pool")]
+    pub upstream_pool: usize,
     /// Minimum rate, in bytes per second, at which a client must accept a
     /// response body. Off by default.
     ///
@@ -581,6 +634,8 @@ impl Default for Limits {
             max_token: default_max_token(),
             keepalive_requests: default_keepalive_requests(),
             min_send_rate: None,
+            connections_per_ip: None,
+            upstream_pool: default_upstream_pool(),
         }
     }
 }
@@ -589,8 +644,98 @@ fn default_max_token() -> u64 {
     8 * 1024
 }
 
+// ---------------------------------------------------------------------- dns
+
+/// Upstream name resolution.
+///
+/// A single-target upstream keeps its hostname so that a record change is
+/// picked up without a restart. That means a name is resolved on the way to
+/// choosing a peer, and the only question is how often and on which thread.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsConfig {
+    /// How long a resolved name is reused. `0s` resolves on every request.
+    ///
+    /// This is the delay before a record change is noticed, traded against a
+    /// resolver round trip per request. 30s is what a proxy usually settles on
+    /// and is far shorter than the time a rolling deployment takes anyway.
+    ///
+    /// Failures are never cached: one bad lookup must not become a TTL-long
+    /// outage for that upstream after the resolver has recovered.
+    #[serde(with = "humantime_serde", default = "d30")]
+    pub cache_ttl: Duration,
+    /// Maximum names held. Upstream names come from configuration rather than
+    /// from requests, so this cannot be flooded by a caller; it is here because
+    /// an unbounded map in a long-lived process is worth avoiding regardless.
+    #[serde(default = "default_dns_max_entries")]
+    pub max_entries: u64,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl: d30(),
+            max_entries: default_dns_max_entries(),
+        }
+    }
+}
+
+fn default_dns_max_entries() -> u64 {
+    1024
+}
+
 fn default_keepalive_requests() -> u32 {
     1000
+}
+
+fn default_upstream_pool() -> usize {
+    128
+}
+
+/// How fast one address may open new connections.
+///
+/// This counts *accepts*, not live connections: the accept hook is never told
+/// about a close, so a population count kept from there would drift upward
+/// until it refused everyone. Bounding the rate still bounds the population,
+/// because `timeouts.downstream_read` closes a connection that never sends a
+/// request — at 100/s with a 30s read timeout, one address tops out near 3000.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionLimitConfig {
+    /// New connections allowed per `interval` from one address.
+    pub connections: u64,
+    #[serde(with = "humantime_serde", default = "d1")]
+    pub interval: Duration,
+    /// Addresses tracked at once. The store is bounded because its keys come
+    /// from the network: without a cap, the memory-exhaustion bug this setting
+    /// exists to prevent would simply move into the limiter.
+    #[serde(default = "default_max_tracked")]
+    pub max_tracked: u64,
+}
+
+impl ConnectionLimitConfig {
+    /// Reuse the request limiter rather than growing a second counter with its
+    /// own sliding-window bugs. The key is always the socket peer — at accept
+    /// time nothing has been parsed, so there is no header to trust and no
+    /// forwarded chain to count back through.
+    pub fn as_rate_limit(&self) -> RateLimitConfig {
+        RateLimitConfig {
+            requests: self.connections,
+            interval: self.interval,
+            key: RateLimitKey::Ip,
+            trusted_proxies: 0,
+            max_keys: self.max_tracked,
+            counter: Counter::Exact,
+        }
+    }
+}
+
+fn default_max_tracked() -> u64 {
+    100_000
+}
+
+fn d1() -> Duration {
+    Duration::from_secs(1)
 }
 
 fn default_max_body() -> u64 {

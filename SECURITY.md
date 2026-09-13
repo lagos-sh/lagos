@@ -110,6 +110,9 @@ reviewer knows what is already covered.
   count, for both the limiter key and what upstreams are told
 - Downstream read, write, drain and keepalive budgets set, plus a per-connection
   request limit — Pingora leaves most of these unbounded
+- Optional per-address connection rate limit at accept time, before a connection
+  costs a task or a handshake
+- Optional TCP keepalive, so a vanished peer releases its socket
 - Rate-limit key store bounded and TTL'd; fetched key sets capped
 - `unsafe_code = "forbid"` workspace-wide; clippy warns on `unwrap`, `panic` and
   indexing, and CI runs it as `-D warnings`
@@ -120,6 +123,15 @@ Honest, not exhaustive. These are known and not yet done; a report that one of
 them is exploitable in a way described here is still welcome, but it will not be
 news.
 
+- **No cap on *concurrent* connections.** `limits.connections_per_ip` bounds how
+  fast one address may open them, which bounds the population once the read
+  timeout is closing idle sockets — but Pingora's accept hook is never told about
+  a close, so a live count cannot be kept honestly from there. A hard ceiling
+  still belongs at the ingress (`limit_conn`) and in `ulimit`.
+- **A per-address limit is the wrong control behind a proxy.** Where every
+  connection arrives from one ingress address, enabling it would throttle the
+  whole gateway. It is off by default for that reason, which means the default
+  deployment has no connection control of its own.
 - **No request-header size limit of our own.** Whatever Pingora's HTTP/1
   parser accepts, the gateway accepts. Bound it at the ingress.
 - **No total-request deadline.** The timeouts are per read, per write and per

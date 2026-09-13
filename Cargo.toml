@@ -16,7 +16,10 @@ license = "Apache-2.0"
 repository = "https://github.com/lagos-sh/lagos"
 
 [workspace.dependencies]
-pingora = { version = "0.9", default-features = false, features = ["proxy", "lb", "rustls"] }
+# `connection_filter` gives a hook immediately after accept and before the TLS
+# handshake -- the only place a connection can be refused before it costs a
+# task, a buffer and a file descriptor.
+pingora = { version = "0.9", default-features = false, features = ["proxy", "lb", "rustls", "connection_filter"] }
 # The Prometheus exposition service; split out of pingora-core in 0.9 so that
 # core no longer carries a prometheus dependency.
 pingora-prometheus = "0.9"
@@ -24,7 +27,9 @@ pingora-prometheus = "0.9"
 # it does not depend on pingora-core, so it tracks its own version.
 pingora-limits = "0.9"
 async-trait = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+# `net` is for `lookup_host`: upstream names are resolved on the runtime's
+# blocking pool rather than with `getaddrinfo` on a proxy worker thread.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net"] }
 http = "1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }

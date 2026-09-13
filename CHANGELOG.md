@@ -19,9 +19,18 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   verification, so an unauthenticated flood is throttled rather than paid for.
 - Secrets no longer appear in `Debug` output; `MachineConfig` and
   `IdentityTokenConfig` print `<redacted>`.
+- Optional per-address connection rate limit at accept time, via Pingora's
+  `connection_filter` — refuses a flood before it costs a task or a handshake.
+  Off by default: behind an ingress every connection shares one address.
+- Optional TCP keepalive on accepted connections, so a peer that vanished without
+  closing releases its socket instead of being held until a timeout notices.
 - Fetched JWKS / certificate bodies are capped at 1 MiB.
 - A verified token whose `sub`, `iss` or mapped claim cannot be a header value is
   refused before any header is built.
+- Upstream names are resolved on the runtime's blocking pool and cached, not with
+  a blocking `getaddrinfo` on a proxy worker thread per request. A slow resolver
+  previously stalled every worker at once — a DNS wobble became a gateway outage,
+  and slow DNS was an amplifier for anyone sending traffic.
 
 ### Changed
 
@@ -39,6 +48,9 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ### Config (all defaulted; existing files still parse)
 
+- `dns.cache_ttl` — `30s` (`0s` resolves every request); `dns.max_entries` — `1024`
+- `limits.connections_per_ip` — off; `limits.upstream_pool` — `128`
+- `server.tcp_keepalive` — off; `server.shutdown_grace` — unset
 - `forward.trusted_proxies` — `0`
 - `limits.max_token` — `8KiB`
 - `limits.keepalive_requests` — `1000`

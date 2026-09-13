@@ -18,6 +18,7 @@
     )
 )]
 
+pub mod accept;
 pub mod auth;
 pub mod binding;
 pub mod breaker;
@@ -26,6 +27,7 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod cors;
+pub mod dns;
 pub mod error;
 pub mod ext;
 pub mod headers;

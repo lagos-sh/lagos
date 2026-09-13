@@ -175,7 +175,13 @@ impl Runtime {
 
         let conf = pingora::server::configuration::ServerConf {
             graceful_shutdown_timeout_seconds: Some(cfg.raw.server.graceful_shutdown.as_secs()),
+            // Spent before draining starts, so a load balancer can stop sending
+            // new connections here while the in-flight ones still finish.
+            grace_period_seconds: cfg.raw.server.shutdown_grace.map(|d| d.as_secs()),
             threads: cfg.raw.server.threads,
+            // Idle upstream connections held for reuse. The main thing setting
+            // the gateway's steady-state memory once it is busy.
+            upstream_keepalive_pool_size: cfg.raw.limits.upstream_pool,
             ..Default::default()
         };
         let mut server = Server::new_with_opt_and_conf(None, conf);
@@ -200,7 +206,7 @@ impl Runtime {
         if let Some(app) = proxy.app_logic_mut() {
             app.server_options = Some(downstream_server_options(&cfg));
         }
-        proxy.add_tcp(&cfg.raw.server.listen);
+        add_listener(&mut proxy, &cfg.raw.server.listen, &cfg);
         server.add_service(proxy);
 
         if let Some(addr) = &cfg.raw.server.internal_listen {
@@ -216,7 +222,7 @@ impl Runtime {
             if let Some(app) = svc.app_logic_mut() {
                 app.server_options = Some(downstream_server_options(&cfg));
             }
-            svc.add_tcp(addr);
+            add_listener(&mut svc, addr, &cfg);
             server.add_service(svc);
             tracing::info!(
                 routes = machine_count,
@@ -289,6 +295,45 @@ impl Runtime {
         }
 
         server.run_forever();
+    }
+}
+
+/// Bind a listener with the socket options and accept-time filter configured.
+///
+/// Both listeners get the same treatment: the internal one is reachable by
+/// anything that can route to its address, and "it is on a private network" has
+/// never been a reason to leave a socket unbounded.
+fn add_listener<A>(
+    svc: &mut pingora::services::listening::Service<A>,
+    addr: &str,
+    cfg: &ResolvedConfig,
+) {
+    match &cfg.raw.server.tcp_keepalive {
+        Some(k) => {
+            let mut opts = pingora::listeners::TcpSocketOptions::default();
+            opts.tcp_keepalive = Some(pingora::protocols::l4::ext::TcpKeepalive {
+                idle: k.idle,
+                interval: k.interval,
+                count: k.count,
+                // Linux-only field; the others are portable.
+                #[cfg(target_os = "linux")]
+                user_timeout: Duration::ZERO,
+            });
+            svc.add_tcp_with_settings(addr, opts);
+        }
+        None => svc.add_tcp(addr),
+    }
+
+    // Refuses a connection immediately after accept, before it costs a task or
+    // a TLS handshake. Nothing else in the gateway runs this early.
+    if let Some(limit) = &cfg.raw.limits.connections_per_ip {
+        svc.set_connection_filter(Arc::new(crate::accept::ConnectionLimiter::new(limit)));
+        tracing::info!(
+            listen = %addr,
+            connections = limit.connections,
+            interval = ?limit.interval,
+            "per-address connection limit enabled",
+        );
     }
 }
 

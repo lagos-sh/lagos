@@ -22,6 +22,7 @@ Ordered roughly by how often the absence bites.
 | **Distributed rate limiting** | Counters are per process today: 100/min across three replicas admits 300/min. Fits behind the existing `Limiter` interface |
 | **Stale-while-error on JWKS** | An identity provider outage currently stops authenticated traffic, even though the cached keys were almost certainly still valid |
 | **Total request deadline** | Timeouts are per read, per write and per connect. A client making slow but steady progress stays inside all of them indefinitely |
+| **In-flight concurrency cap** | Bound the requests being worked on at once, independently of rate, and shed load rather than queue it when saturated |
 | **Request header size limit** | Whatever Pingora's parser accepts, the gateway accepts. Should be ours to bound |
 
 ---

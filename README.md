@@ -706,6 +706,66 @@ instead of the caller.
 throttling one address while telling the upstream about another makes a per-IP
 control unenforceable. `lagos validate` prints which policy is in effect.
 
+### Connection-level limits
+
+Two controls act below HTTP, on the socket itself:
+
+```yaml
+server:
+  # Detect a peer that vanished without closing, and release its socket.
+  tcp_keepalive:
+    idle: 60s
+    interval: 10s
+    count: 6
+
+limits:
+  # Refuse connections from an address opening them too fast. OFF by default.
+  connections_per_ip:
+    connections: 100
+    interval: 1s
+    max_tracked: 100000
+```
+
+`connections_per_ip` uses Pingora's `connection_filter`, which runs immediately
+after `accept()` and before any TLS handshake — the only place a connection can
+be refused before it costs a task, a buffer and a file descriptor. Refused
+connections are dropped rather than answered: there is no request to refuse yet,
+and a flood is not the moment to spend a response on every attempt.
+
+It counts **accepts, not live connections** — the hook is never told about a
+close, so a population count kept there would drift upward until it refused
+everyone. Bounding the rate still bounds the population, because
+`timeouts.downstream_read` closes a connection that never sends a request: at
+`100/s` with a 30s read timeout, one address tops out near 3000 sockets.
+
+> [!WARNING]
+> **Leave this off behind a load balancer or ingress.** Every connection then
+> arrives from one address, and a per-address limit would throttle the entire
+> gateway. It is the right control only where Lagos is the edge. A hard ceiling
+> on concurrent connections still belongs at the layer in front, and in `ulimit`.
+
+### Upstream name resolution
+
+A single-target upstream keeps its hostname rather than an address, so a record
+change is picked up without a restart. Names are resolved on the runtime's
+blocking pool and cached:
+
+```yaml
+dns:
+  cache_ttl: 30s    # 0s resolves on every request
+  max_entries: 1024
+```
+
+`cache_ttl` is the delay before a record change is noticed, traded against a
+resolver round trip per request. Failed lookups are never cached, so one bad
+lookup cannot become a TTL-long outage for that upstream. An upstream written as
+an IP literal skips resolution entirely.
+
+This matters more than it looks. Resolving with `getaddrinfo` on a proxy worker
+thread — two of them by default — means a slow resolver does not slow the
+gateway down, it stops it, and makes slow DNS an amplifier for anyone sending
+traffic.
+
 ### Streaming and request limits
 
 Set `sse: true` on an SSE route to use the SSE timeout and emit headers that
