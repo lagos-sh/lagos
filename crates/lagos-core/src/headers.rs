@@ -57,19 +57,82 @@ impl HeaderPlan {
     }
 }
 
+/// The client address to believe, resolved against the number of proxies in
+/// front of the gateway.
+///
+/// `X-Forwarded-For` is appended to by each hop, so entries are ordered
+/// oldest-first and **only the rightmost ones are trustworthy** — anything
+/// further left was written by whoever sent the request. Counting from the
+/// right is what makes this safe: with `trusted_proxies: 0` nothing in the
+/// header is believed and the socket peer is used; with `1` the last entry is
+/// taken, which the single proxy in front appended itself.
+///
+/// Getting this wrong is a spoof, not a detail. Trusting the *leftmost* entry —
+/// the usual shortcut — lets any caller assert any source address by sending
+/// one header, which defeats every downstream control keyed on client IP:
+/// per-IP quotas, geo rules, fraud scoring, abuse blocklists and audit trails.
+pub fn client_address(
+    forwarded_for: Option<&str>,
+    peer: Option<&str>,
+    trusted_proxies: usize,
+) -> Option<String> {
+    if trusted_proxies == 0 {
+        return peer.map(str::to_string);
+    }
+
+    let mut chain: Vec<&str> = forwarded_for
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Some(p) = peer {
+        chain.push(p);
+    }
+
+    // `trusted_proxies` hops back from the right-hand end.
+    chain
+        .len()
+        .checked_sub(trusted_proxies)
+        .and_then(|i| i.checked_sub(1))
+        .and_then(|i| chain.get(i))
+        .map(|s| (*s).to_string())
+        // A chain shorter than the configured depth means the request did not
+        // arrive through the expected proxies. Fall back to the socket peer
+        // rather than to a client-supplied entry.
+        .or_else(|| peer.map(str::to_string))
+}
+
 /// Build the `X-Forwarded-For` chain and the `X-Real-IP` it implies.
 ///
-/// The chain the edge proxy already built is preserved and the socket peer is
-/// appended, so upstreams see the true client for rate limiting, fraud checks
-/// and audit rather than the gateway's pod IP.
+/// `trusted_proxies` is how many hops in front of this gateway are its own
+/// infrastructure — a cloud load balancer, an ingress controller — and may
+/// therefore be believed.
+///
+/// * `0` (the default) means the gateway is the edge. Whatever chain arrived
+///   was written by the caller, so it is **replaced** rather than extended:
+///   the socket peer is the only address anyone has proven. An upstream that
+///   reads `X-Real-IP` then gets a fact, not a client assertion.
+/// * `n > 0` means the first `n` hops from the right were appended by trusted
+///   proxies. The chain is preserved and the socket peer appended, and
+///   `X-Real-IP` is the entry those trusted hops vouch for.
+///
+/// Either way `X-Real-IP` and the limiter's key come from the same
+/// [`client_address`] rule, so the address an upstream blocks on is the address
+/// the gateway counted.
 pub fn forwarded_for(
     client_headers: &HeaderMap,
     peer: Option<&str>,
+    trusted_proxies: usize,
 ) -> (Option<String>, Option<String>) {
     let prior = client_headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty());
+        .filter(|v| !v.is_empty())
+        // Nothing in front of us appended this, so none of it is evidence.
+        .filter(|_| trusted_proxies > 0);
+
+    let real_ip = client_address(prior, peer, trusted_proxies);
 
     let chain: Vec<&str> = prior.into_iter().chain(peer).collect();
     let xff = if chain.is_empty() {
@@ -77,13 +140,6 @@ pub fn forwarded_for(
     } else {
         Some(chain.join(", "))
     };
-
-    let real_ip = prior
-        .and_then(|p| p.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or(peer)
-        .map(str::to_string);
 
     (xff, real_ip)
 }
@@ -145,33 +201,99 @@ mod tests {
         assert!(plan.removals().any(|r| r == "x-api-key"));
     }
 
-    #[test]
-    fn appends_socket_peer_to_existing_chain() {
+    fn with_xff(value: &'static str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.7, 70.41.3.18"),
-        );
-        let (xff, real) = forwarded_for(&h, Some("10.1.2.3"));
+        h.insert("x-forwarded-for", HeaderValue::from_static(value));
+        h
+    }
+
+    #[test]
+    fn appends_socket_peer_to_a_chain_from_trusted_proxies() {
+        let h = with_xff("203.0.113.7, 70.41.3.18");
+        // Two hops in front, so both entries were appended by our own
+        // infrastructure and the leftmost is the caller they saw.
+        let (xff, real) = forwarded_for(&h, Some("10.1.2.3"), 2);
         assert_eq!(xff.unwrap(), "203.0.113.7, 70.41.3.18, 10.1.2.3");
+        assert_eq!(real.unwrap(), "203.0.113.7");
+    }
+
+    #[test]
+    fn an_untrusted_chain_is_discarded_rather_than_extended() {
+        // The gateway is the edge. Anyone can send this header, so believing
+        // any of it would let a caller pick its own source address and defeat
+        // every downstream control keyed on client IP.
+        let h = with_xff("1.2.3.4, 5.6.7.8");
+        let (xff, real) = forwarded_for(&h, Some("10.1.2.3"), 0);
         assert_eq!(
-            real.unwrap(),
-            "203.0.113.7",
-            "real IP is the original client, not the last hop"
+            xff.unwrap(),
+            "10.1.2.3",
+            "the forged chain must not survive"
         );
+        assert_eq!(real.unwrap(), "10.1.2.3");
+    }
+
+    #[test]
+    fn a_forged_prefix_cannot_displace_the_trusted_hop() {
+        // One trusted proxy in front. The attacker pads the chain hoping the
+        // gateway reads the leftmost entry; counting from the right means the
+        // answer is whatever that one proxy appended, however long the padding.
+        for forged in [
+            "9.9.9.9",
+            "9.9.9.9, 8.8.8.8",
+            "9.9.9.9, 8.8.8.8, 7.7.7.7, 6.6.6.6",
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert(
+                "x-forwarded-for",
+                HeaderValue::from_str(&format!("{forged}, 203.0.113.7")).unwrap(),
+            );
+            let (_, real) = forwarded_for(&h, Some("10.1.2.3"), 1);
+            assert_eq!(
+                real.as_deref(),
+                Some("203.0.113.7"),
+                "padding `{forged}` changed the believed client"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_chain_falls_back_to_the_socket_peer() {
+        // Configured for two proxies but only one entry arrived: the request
+        // did not come the expected way, so nothing in the header is evidence.
+        let h = with_xff("1.2.3.4");
+        let (_, real) = forwarded_for(&h, Some("10.1.2.3"), 2);
+        assert_eq!(real.as_deref(), Some("10.1.2.3"));
     }
 
     #[test]
     fn falls_back_to_socket_peer_with_no_prior_chain() {
-        let (xff, real) = forwarded_for(&HeaderMap::new(), Some("10.1.2.3"));
+        let (xff, real) = forwarded_for(&HeaderMap::new(), Some("10.1.2.3"), 1);
         assert_eq!(xff.unwrap(), "10.1.2.3");
         assert_eq!(real.unwrap(), "10.1.2.3");
     }
 
     #[test]
     fn no_peer_and_no_chain_yields_nothing() {
-        let (xff, real) = forwarded_for(&HeaderMap::new(), None);
+        let (xff, real) = forwarded_for(&HeaderMap::new(), None, 0);
         assert!(xff.is_none() && real.is_none());
+    }
+
+    #[test]
+    fn the_limiter_and_the_upstream_agree_on_the_client() {
+        // These must not drift: throttling one address while telling the
+        // upstream about another makes every per-IP control unenforceable.
+        for trusted in 0..3 {
+            let h = with_xff("1.2.3.4, 203.0.113.7");
+            let (_, real) = forwarded_for(&h, Some("10.1.2.3"), trusted);
+            let keyed = client_address(
+                h.get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .filter(|_| trusted > 0),
+                Some("10.1.2.3"),
+                trusted,
+            );
+            assert_eq!(real, keyed, "disagreement at trusted_proxies={trusted}");
+        }
     }
 
     #[test]

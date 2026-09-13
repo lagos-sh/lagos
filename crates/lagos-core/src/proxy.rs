@@ -450,6 +450,57 @@ impl Gateway {
         self.forwardable.contains(name)
     }
 
+    /// Count one request against the route's limiter.
+    ///
+    /// `Ok(true)` means the client has been answered with a 429 and the filter
+    /// must stop. Split out because the limiter is consulted twice: once before
+    /// token verification for keys that do not need one, and once after for
+    /// `identity`. Sharing the body is what keeps the two passes from drifting
+    /// into two different notions of a quota.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_rate_limit(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        cfg: &crate::config::RateLimitConfig,
+        route: &crate::routes::RouteConfig,
+        limiter: &crate::ratelimit::Limiter,
+        subject: Option<&str>,
+        peer_ip: Option<&str>,
+    ) -> Result<bool> {
+        let key = {
+            let headers = &session.req_header().headers;
+            crate::ratelimit::key_for(
+                cfg,
+                &route.id,
+                subject,
+                headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+                peer_ip,
+                |name| {
+                    headers
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string)
+                },
+            )
+        };
+
+        let Some(key) = key else {
+            return Ok(false);
+        };
+        let decision = limiter.check(&key);
+        if self.dev {
+            ctx.rate_limit = Some((decision.remaining, decision.limit));
+        }
+        if decision.allowed {
+            return Ok(false);
+        }
+        let retry = decision.retry_after.as_secs().max(1);
+        ctx.retry_after = Some(retry);
+        self.reject(session, ctx, Rejection::rate_limited(retry))
+            .await
+    }
+
     async fn send_with_retry_after(
         &self,
         session: &mut Session,
@@ -552,7 +603,8 @@ impl Gateway {
             }
         }
 
-        let (xff, real_ip) = forwarded_for(&req.headers, peer);
+        let (xff, real_ip) =
+            forwarded_for(&req.headers, peer, self.cfg.raw.forward.trusted_proxies);
         if let Some(v) = xff {
             plan.set("x-forwarded-for", v);
         }
@@ -570,6 +622,49 @@ impl ProxyHttp for Gateway {
 
     fn new_ctx(&self) -> Self::CTX {
         Ctx::default()
+    }
+
+    /// Bound what one downstream connection can hold before the request is even
+    /// looked at.
+    ///
+    /// Every setting here is one Pingora already exposes on `ServerSession`;
+    /// most are unset by default, which for an edge gateway means *unbounded*.
+    /// A client that connects, sends a request a byte at a time, then reads the
+    /// response a byte at a time, costs the attacker one socket and holds a
+    /// worker task plus an upstream connection for as long as it likes. That is
+    /// slowloris, and it needs no traffic volume to work.
+    ///
+    /// This runs before [`Self::request_filter`], so it applies to requests
+    /// that are about to be refused as well as ones that are served — a refusal
+    /// that can be made to hang is not a refusal.
+    async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        let t = &self.cfg.raw.timeouts;
+        // Reading the request: header trickled a byte at a time, or a body that
+        // stops mid-upload. Pingora defaults to 60s; this is configurable and
+        // shorter.
+        session.set_read_timeout(Some(t.downstream_read));
+        // Writing the response. Pingora leaves this unset, so without it a
+        // client that stops reading pins the exchange forever.
+        session.set_write_timeout(Some(t.downstream_write));
+        // Discarding a body belonging to a request we are refusing. Also unset
+        // by default, which makes rejecting a large upload cost more than
+        // serving it.
+        session.set_total_drain_timeout(Some(t.downstream_drain));
+        session.set_keepalive(Some(t.downstream_keepalive.as_secs()));
+
+        // A write timeout alone cannot express "slow but making progress": a
+        // large response legitimately takes longer than a small one. Pingora
+        // scales the timeout by how much is being written when a floor rate is
+        // set. Off unless an operator asks for it, since a real client on a bad
+        // link is not an attacker.
+        if let Some(rate) = self.cfg.raw.limits.min_send_rate.filter(|r| *r > 0) {
+            session.set_min_send_rate(Some(rate));
+        }
+        Ok(())
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
@@ -801,9 +896,59 @@ impl ProxyHttp for Gateway {
             }
         }
 
+        let peer_ip_for_limit = session
+            .client_addr()
+            .map(|a| a.to_string())
+            .as_deref()
+            .and_then(crate::headers::socket_peer_ip);
+
+        // --- rate limiting, part one: everything that does not need identity --
+        //
+        // Verifying a token is the most expensive thing on this path — a
+        // public-key signature check per request — and it happens before the
+        // caller has proved anything. Running the limiter afterwards would mean
+        // an unauthenticated flood of well-formed, badly-signed tokens is never
+        // throttled: each one is refused, but only after being paid for.
+        //
+        // A limit keyed on IP, header or route already knows its key here, so
+        // it is applied now. `identity` keys genuinely cannot be, and are
+        // checked after verification below.
+        if let (Some(cfg), Some(limiter)) = (&route.rate_limit, &route.limiter)
+            && !matches!(cfg.key, crate::config::RateLimitKey::Identity)
+            && self
+                .check_rate_limit(
+                    session,
+                    ctx,
+                    cfg,
+                    route,
+                    limiter,
+                    None,
+                    peer_ip_for_limit.as_deref(),
+                )
+                .await?
+        {
+            return Ok(true);
+        }
+
         let mut identity = None;
         if route.auth.verifies() {
             let bearer = authorization.as_deref().and_then(crate::auth::bearer_token);
+
+            // Capped before anything reads it. Finding the issuer means
+            // base64-decoding the payload and parsing it as JSON, and a
+            // recognised issuer then costs a public-key signature check — all
+            // of it on an unauthenticated request, all of it ahead of any limit
+            // keyed on who the caller turns out to be.
+            //
+            // Refused outright rather than treated as absent: on an `Optional`
+            // route "no token" means serve anonymously, and silently
+            // downgrading an oversized token to that would hide the problem
+            // from the client instead of reporting it.
+            if bearer.is_some_and(|t| t.len() as u64 > self.cfg.raw.limits.max_token) {
+                return self
+                    .reject(session, ctx, Rejection::invalid_token("token_too_long"))
+                    .await;
+            }
 
             match (bearer, route.auth) {
                 // Signed out on a route that permits it.
@@ -861,44 +1006,23 @@ impl ProxyHttp for Gateway {
             }
         }
 
-        let peer_ip_for_limit = session
-            .client_addr()
-            .map(|a| a.to_string())
-            .as_deref()
-            .and_then(crate::headers::socket_peer_ip);
-
-        // --- rate limiting ---------------------------------------------------
-        // After authentication, so an `identity` key has a subject to use, and
-        // before any upstream work is planned.
-        if let (Some(cfg), Some(limiter)) = (&route.rate_limit, &route.limiter) {
-            let headers = &session.req_header().headers;
-            let key = crate::ratelimit::key_for(
-                cfg,
-                &route.id,
-                identity.as_ref().map(|i| i.subject.as_str()),
-                headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
-                peer_ip_for_limit.as_deref(),
-                |name| {
-                    headers
-                        .get(name)
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string)
-                },
-            );
-
-            if let Some(key) = key {
-                let decision = limiter.check(&key);
-                if self.dev {
-                    ctx.rate_limit = Some((decision.remaining, decision.limit));
-                }
-                if !decision.allowed {
-                    let retry = decision.retry_after.as_secs().max(1);
-                    ctx.retry_after = Some(retry);
-                    return self
-                        .reject(session, ctx, Rejection::rate_limited(retry))
-                        .await;
-                }
-            }
+        // --- rate limiting, part two: identity keys ---------------------------
+        // These need a verified subject, so this is the earliest they can run.
+        if let (Some(cfg), Some(limiter)) = (&route.rate_limit, &route.limiter)
+            && matches!(cfg.key, crate::config::RateLimitKey::Identity)
+            && self
+                .check_rate_limit(
+                    session,
+                    ctx,
+                    cfg,
+                    route,
+                    limiter,
+                    identity.as_ref().map(|i| i.subject.as_str()),
+                    peer_ip_for_limit.as_deref(),
+                )
+                .await?
+        {
+            return Ok(true);
         }
 
         // --- ownership bindings ---------------------------------------------
@@ -968,22 +1092,27 @@ impl ProxyHttp for Gateway {
         // strips, so an unauthenticated request can never carry identity.
         match &identity {
             Some(id) => {
-                if let Err(detail) = crate::identity::apply(
+                if let Err(e) = crate::identity::apply(
                     &mut plan,
                     &self.cfg.raw.identity,
                     self.cfg.identity_secret.as_deref(),
                     id,
                 ) {
-                    return self
-                        .reject(
-                            session,
-                            ctx,
-                            Rejection::unavailable(
-                                "Unable to sign caller identity",
-                                format!("identity_mint_failed: {detail}"),
-                            ),
-                        )
-                        .await;
+                    // A token the gateway cannot describe to an upstream is a
+                    // 401, not a 503: nothing here is broken, the credential
+                    // just carries something that cannot be a header value.
+                    // Answering 503 would tell the client to retry the one
+                    // thing that can never succeed, and page an operator for it.
+                    let rej = match &e {
+                        crate::identity::IdentityError::Claim(_) => {
+                            Rejection::invalid_token(format!("unrepresentable_identity: {e}"))
+                        }
+                        crate::identity::IdentityError::Mint(_) => Rejection::unavailable(
+                            "Unable to sign caller identity",
+                            format!("identity_mint_failed: {e}"),
+                        ),
+                    };
+                    return self.reject(session, ctx, rej).await;
                 }
             }
             None => crate::identity::strip_all(&mut plan, &self.cfg.raw.identity),
@@ -1038,6 +1167,13 @@ impl ProxyHttp for Gateway {
         ctx.route_id = route.id.clone();
         ctx.upstream_name = route.upstream.clone();
         ctx.sse = route.sse;
+        if route.sse {
+            // An event stream is a long-lived response by design. The write
+            // timeout only fires on a *stalled* write, but a stream with sparse
+            // events is close enough to that shape to be worth the wider budget
+            // the operator already wrote down for SSE.
+            session.set_write_timeout(Some(self.cfg.raw.timeouts.sse));
+        }
         ctx.timeout = if route.sse {
             self.cfg.raw.timeouts.sse
         } else if is_upload_content_type(content_type.as_deref()) {

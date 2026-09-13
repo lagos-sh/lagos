@@ -234,49 +234,13 @@ impl Limiter {
     }
 }
 
-/// The client address to limit on, resolved against the number of proxies in
-/// front of the gateway.
+/// The client address to limit on.
 ///
-/// `X-Forwarded-For` is appended to by each hop, so entries are ordered
-/// oldest-first and **only the rightmost ones are trustworthy** — anything
-/// further left was supplied by the client. Counting from the right is what
-/// makes this safe: with `trusted_proxies: 0` nothing in the header is
-/// believed and the socket peer is used; with `1` the last entry is taken,
-/// which the single proxy in front appended itself.
-///
-/// Getting this wrong is a bypass, not a detail: trusting the *first* entry
-/// would let a client mint a fresh quota per forged address.
-pub fn client_address(
-    forwarded_for: Option<&str>,
-    peer: Option<&str>,
-    trusted_proxies: usize,
-) -> Option<String> {
-    if trusted_proxies == 0 {
-        return peer.map(str::to_string);
-    }
-
-    let mut chain: Vec<&str> = forwarded_for
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if let Some(p) = peer {
-        chain.push(p);
-    }
-
-    // `trusted_proxies` hops back from the right-hand end.
-    chain
-        .len()
-        .checked_sub(trusted_proxies)
-        .and_then(|i| i.checked_sub(1))
-        .and_then(|i| chain.get(i))
-        .map(|s| (*s).to_string())
-        // A chain shorter than the configured depth means the request did not
-        // arrive through the expected proxies. Fall back to the socket peer
-        // rather than to a client-supplied entry.
-        .or_else(|| peer.map(str::to_string))
-}
+/// Re-exported from [`crate::headers`] so the limiter counts the *same* address
+/// the gateway puts in `X-Real-IP`. Two independent notions of "the client"
+/// is how a gateway ends up throttling one address and telling the upstream
+/// about another.
+pub use crate::headers::client_address;
 
 /// Build the limiter key for a request.
 ///

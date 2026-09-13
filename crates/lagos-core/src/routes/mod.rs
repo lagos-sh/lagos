@@ -270,6 +270,51 @@ pub struct RouteTable {
     errors: Vec<String>,
 }
 
+/// Whether `path` is `prefix` itself or sits beneath it, on a segment boundary.
+///
+/// The boundary is the whole point: a plain `starts_with` would put
+/// `/users-admin` under a rule written for `/users`, which on the deny-list is
+/// a bypass and on the allowlist is a route reaching an upstream nobody
+/// authorized.
+///
+/// Written to compare in place rather than building `format!("{prefix}/")`.
+/// That allocation ran once per candidate route *per request* — on the one code
+/// path every request to the gateway takes, and it grew with the size of the
+/// route table, so the busiest deployment paid the most for it.
+fn under_prefix(path: &str, prefix: &str) -> bool {
+    // Exactly `path == prefix || path.starts_with(&format!("{prefix}/"))`:
+    // `strip_prefix` succeeds when `path` begins with `prefix`, an empty
+    // remainder means the two are equal, and a remainder starting with `/`
+    // means the match landed on a segment boundary. No special case for an
+    // empty prefix — it must keep matching only the empty path, as before,
+    // since on the deny-list "matches everything" would be a very loud
+    // surprise.
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::under_prefix;
+
+    #[test]
+    fn matches_only_on_a_segment_boundary() {
+        assert!(under_prefix("users", "users"));
+        assert!(under_prefix("users/4/pets", "users"));
+        assert!(!under_prefix("users-admin", "users"));
+        assert!(!under_prefix("usersx/4", "users"));
+        assert!(!under_prefix("use", "users"));
+    }
+
+    #[test]
+    fn an_empty_prefix_still_matches_only_the_empty_path() {
+        // The behaviour the `format!`-based version had. A deny-list entry that
+        // normalizes to "" must not start denying the whole gateway.
+        assert!(under_prefix("", ""));
+        assert!(!under_prefix("users", ""));
+    }
+}
+
 impl RouteTable {
     pub fn build(groups: RouteGroups) -> Self {
         let deny_prefixes = groups
@@ -371,9 +416,7 @@ impl RouteTable {
     /// so a broad allowlist entry can never expose an internal sub-tree.
     pub fn is_denied(&self, path: &str) -> bool {
         let p = normalize_proxy_path(path);
-        self.deny_prefixes
-            .iter()
-            .any(|d| p == d || p.starts_with(&format!("{d}/")))
+        self.deny_prefixes.iter().any(|d| under_prefix(p, d))
     }
 
     pub fn match_route(&self, path: &str, method: &str) -> Option<&RouteConfig> {
@@ -395,7 +438,7 @@ impl RouteTable {
         let h = host.map(|h| normalize_host(h).to_ascii_lowercase());
 
         self.routes.iter().find(|r| {
-            (p == r.prefix || p.starts_with(&format!("{}/", r.prefix)))
+            under_prefix(p, &r.prefix)
                 // An empty list means the route does not restrict methods.
                 && (r.methods.is_empty() || r.methods.contains(&m))
                 && match (r.hosts.is_empty(), &h) {

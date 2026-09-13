@@ -244,6 +244,16 @@ fn validate(path: Option<String>, registry: &ExtensionRegistry) -> anyhow::Resul
     println!("✓ upstreams   {}", cfg.upstreams.len());
     println!("✓ routes      {}  ({breakdown})", table.len());
     println!("✓ deny-list   {}", table.deny_prefixes().len());
+    // Which addresses upstreams will be told about is a security decision, and
+    // the wrong answer is invisible in traffic: forged and genuine client IPs
+    // look identical downstream. Print it so it is reviewed like the rest.
+    match cfg.raw.forward.trusted_proxies {
+        0 => println!(
+            "✓ client ip   socket peer (forward.trusted_proxies: 0 — any arriving \
+             X-Forwarded-For is discarded)"
+        ),
+        n => println!("✓ client ip   {n} hop(s) back in X-Forwarded-For"),
+    }
     let issuers = cfg.raw.auth.jwt.len()
         + cfg
             .raw

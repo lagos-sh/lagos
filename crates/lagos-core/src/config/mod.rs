@@ -454,6 +454,40 @@ pub struct Timeouts {
     pub upload: Duration,
     #[serde(with = "humantime_serde", default = "d60")]
     pub upstream_idle: Duration,
+
+    // --- downstream (client-facing) budgets ------------------------------
+    //
+    // Pingora leaves most of these unset, which for an edge gateway means
+    // unbounded: a client that opens a connection and then reads slowly, or
+    // never, holds a worker task and an upstream connection for as long as it
+    // likes. A few thousand such connections cost the attacker nothing and
+    // take the gateway down. These are the knobs Pingora already exposes on
+    // `ServerSession`; Lagos only gives them defaults and a name in the file.
+    /// How long a single read from the client may stall — a request header
+    /// arriving a byte at a time, or a body that stops mid-upload.
+    ///
+    /// Pingora's own default is 60s. 30s is plenty for a real client on a bad
+    /// connection and halves what a slowloris costs to hold.
+    #[serde(with = "humantime_serde", default = "d30")]
+    pub downstream_read: Duration,
+    /// How long a single write to the client may stall.
+    ///
+    /// Pingora leaves this unset, so a client that stops reading mid-response
+    /// pins the exchange indefinitely. This is the slow-read half of
+    /// slowloris, and it is the cheaper half to mount.
+    #[serde(with = "humantime_serde", default = "d30")]
+    pub downstream_write: Duration,
+    /// How long to spend discarding a request body the gateway is not going to
+    /// read — a rejected request that still has an upload behind it.
+    ///
+    /// Unset in Pingora. Without it, refusing a request with a large body can
+    /// take longer than serving it would have.
+    #[serde(with = "humantime_serde", default = "d5")]
+    pub downstream_drain: Duration,
+    /// How long an idle keepalive connection is held open for the next
+    /// request.
+    #[serde(with = "humantime_serde", default = "d60")]
+    pub downstream_keepalive: Duration,
 }
 
 fn d5() -> Duration {
@@ -492,6 +526,10 @@ impl Default for Timeouts {
             sse: d120(),
             upload: d120(),
             upstream_idle: d60(),
+            downstream_read: d30(),
+            downstream_write: d30(),
+            downstream_drain: d5(),
+            downstream_keepalive: d60(),
         }
     }
 }
@@ -506,14 +544,53 @@ pub struct Limits {
     /// Maximum request body, e.g. `50MiB`. Default 50 MiB.
     #[serde(default = "default_max_body", deserialize_with = "de_byte_size")]
     pub max_body: u64,
+    /// Maximum bearer token accepted, in bytes. Default 8 KiB.
+    ///
+    /// A token is decoded and parsed as JSON to find its issuer, and then —
+    /// if the issuer is one this gateway trusts — put through a signature
+    /// check, all before any rate limit keyed on identity can apply. Capping
+    /// the length first bounds what one unauthenticated request can cost.
+    /// 8 KiB is far above any real access token, including Firebase's.
+    #[serde(default = "default_max_token", deserialize_with = "de_byte_size")]
+    pub max_token: u64,
+    /// Requests one keepalive connection may serve before the gateway closes
+    /// it. Default 1000; `0` means no limit.
+    ///
+    /// Pingora's default is no limit, which nginx's own documentation advises
+    /// against: per-connection allocations are only reclaimed when the
+    /// connection closes, so a long-lived connection is a slow leak and a
+    /// held-open connection is a cheap way to keep one.
+    #[serde(default = "default_keepalive_requests")]
+    pub keepalive_requests: u32,
+    /// Minimum rate, in bytes per second, at which a client must accept a
+    /// response body. Off by default.
+    ///
+    /// Pingora turns this into a write timeout scaled by how much is being
+    /// written, which `timeouts.downstream_write` alone cannot express: a
+    /// large response legitimately takes longer than a small one. Leave it
+    /// off for clients on genuinely poor links; turn it on where responses are
+    /// big enough that a slow reader is worth the memory it holds.
+    #[serde(default)]
+    pub min_send_rate: Option<usize>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
             max_body: default_max_body(),
+            max_token: default_max_token(),
+            keepalive_requests: default_keepalive_requests(),
+            min_send_rate: None,
         }
     }
+}
+
+fn default_max_token() -> u64 {
+    8 * 1024
+}
+
+fn default_keepalive_requests() -> u32 {
+    1000
 }
 
 fn default_max_body() -> u64 {
@@ -866,7 +943,7 @@ pub struct AuthConfig {
 /// These callers are other systems, not people: there is no user token, only a
 /// shared secret. Restricting *which* systems may reach the internal listener
 /// is a network concern and belongs on that listener's ingress, not here.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfig {
     /// Header names to read the caller credential from, in order. Several are
@@ -874,6 +951,30 @@ pub struct MachineConfig {
     #[serde(default = "default_machine_headers")]
     pub headers: Vec<String>,
     pub secret: String,
+}
+
+/// Hand-written so the shared credential cannot reach a log line.
+///
+/// `ResolvedConfig` derives `Debug`, and one `tracing::debug!(?cfg)` or one
+/// error that formats the configuration would otherwise print the secret that
+/// every machine-tier caller authenticates with.
+impl std::fmt::Debug for MachineConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MachineConfig")
+            .field("headers", &self.headers)
+            .field("secret", &Redacted(self.secret.len()))
+            .finish()
+    }
+}
+
+/// Stands in for a secret in `Debug` output, reporting only its length so a
+/// "did the variable actually get set" question is still answerable.
+pub(crate) struct Redacted(pub usize);
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<redacted {} bytes>", self.0)
+    }
 }
 
 fn default_machine_headers() -> Vec<String> {
@@ -1014,6 +1115,25 @@ pub struct ForwardConfig {
     /// authority. Off by default, matching what an HTTP client library does.
     #[serde(default)]
     pub preserve_host: bool,
+    /// How many proxies in front of this gateway may be believed when they
+    /// append to `X-Forwarded-For`.
+    ///
+    /// `0` — the default — means the gateway is the edge: the arriving chain
+    /// was written by the caller, so it is discarded and `X-Forwarded-For` /
+    /// `X-Real-IP` are rebuilt from the socket peer. Anything else would let a
+    /// caller assert its own source address with one header, and every
+    /// downstream control keyed on client IP — per-IP quotas, geo rules, fraud
+    /// scoring, abuse blocklists, audit trails — would believe it.
+    ///
+    /// Set it to the number of hops that are genuinely yours: `1` behind a
+    /// single cloud load balancer or ingress controller, `2` behind a CDN in
+    /// front of that. Counting is from the right, so only addresses your own
+    /// infrastructure appended are ever read.
+    ///
+    /// This is the same rule `rate_limit.trusted_proxies` uses, and the two
+    /// should agree.
+    #[serde(default)]
+    pub trusted_proxies: usize,
 }
 
 fn default_forward_mode() -> ForwardMode {
@@ -1044,6 +1164,7 @@ impl Default for ForwardConfig {
             headers: default_forward_headers(),
             authorization: true,
             preserve_host: false,
+            trusted_proxies: 0,
         }
     }
 }
@@ -1176,7 +1297,7 @@ impl Default for IdentityConfig {
 /// it, the service verifies one short-lived signature using a single local key
 /// — far cheaper than talking to the identity provider, and it does not fall
 /// apart the moment a shared static credential leaks.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityTokenConfig {
     #[serde(default = "default_token_header")]
@@ -1188,6 +1309,20 @@ pub struct IdentityTokenConfig {
     /// `aud` claim, so a token minted for one service cannot be replayed at another.
     #[serde(default)]
     pub audience: Option<String>,
+}
+
+/// Hand-written for the same reason as [`MachineConfig`]: this secret signs
+/// the identity tokens upstreams trust, so anyone who reads it out of a log can
+/// mint any caller.
+impl std::fmt::Debug for IdentityTokenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityTokenConfig")
+            .field("header", &self.header)
+            .field("secret", &Redacted(self.secret.len()))
+            .field("ttl", &self.ttl)
+            .field("audience", &self.audience)
+            .finish()
+    }
 }
 
 fn default_token_header() -> String {

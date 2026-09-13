@@ -26,6 +26,29 @@ struct IdentityClaims<'a> {
     aud: Option<&'a str>,
 }
 
+/// Why identity headers could not be built.
+///
+/// The split is what the caller answers with: a token whose claims will not fit
+/// in a header is the *caller's* problem and must read as 401, while a signing
+/// key that will not sign is the *gateway's* and must read as 503. Collapsing
+/// them — as a single string error does — means a malformed token pages an
+/// operator, and a broken key tells the client to get a new token.
+#[derive(Debug)]
+pub enum IdentityError {
+    /// A claim cannot be represented as a header value.
+    Claim(String),
+    /// Minting the signed identity token failed.
+    Mint(String),
+}
+
+impl std::fmt::Display for IdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Claim(d) | Self::Mint(d) => f.write_str(d),
+        }
+    }
+}
+
 /// Write the identity headers into the plan.
 ///
 /// Uses [`HeaderPlan::set`], which strips any client-supplied copy first, so a
@@ -33,18 +56,37 @@ struct IdentityClaims<'a> {
 ///
 /// # Errors
 ///
-/// Returns an error when token minting is configured and signing fails.
-/// The caller must fail the request rather than forwarding unsigned headers.
+/// Returns an error when a claim cannot become a header value, or when token
+/// minting is configured and signing fails. The caller must fail the request
+/// rather than forwarding partial or unsigned headers.
 pub fn apply(
     plan: &mut HeaderPlan,
     cfg: &IdentityConfig,
     secret: Option<&[u8]>,
     identity: &Identity,
-) -> Result<(), String> {
+) -> Result<(), IdentityError> {
+    // `sub` and `iss` come out of a *verified* token, but "verified" says the
+    // issuer signed them, not that they are shaped like a header value. A
+    // control character or a non-ASCII subject would be refused by the HTTP
+    // stack when the request is built, several phases later, and surface as a
+    // 502 from a request that should have been a clean 401. Checked here so the
+    // answer is about the token, which is what it is actually about.
     if !cfg.subject_header.is_empty() {
+        if !is_header_safe(&identity.subject) {
+            return Err(IdentityError::Claim(format!(
+                "`sub` contains a character that cannot appear in header `{}`",
+                cfg.subject_header
+            )));
+        }
         plan.set(&cfg.subject_header, identity.subject.clone());
     }
     if !cfg.issuer_header.is_empty() {
+        if !is_header_safe(&identity.issuer) {
+            return Err(IdentityError::Claim(format!(
+                "`iss` contains a character that cannot appear in header `{}`",
+                cfg.issuer_header
+            )));
+        }
         plan.set(&cfg.issuer_header, identity.issuer.clone());
     }
     if !cfg.claims_header.is_empty()
@@ -65,7 +107,7 @@ pub fn apply(
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to mint identity token");
-                return Err(e.to_string());
+                return Err(IdentityError::Mint(e.to_string()));
             }
         }
     } else if let Some(token_cfg) = &cfg.token {
@@ -95,7 +137,7 @@ fn apply_claim_headers(
     plan: &mut HeaderPlan,
     cfg: &IdentityConfig,
     identity: &Identity,
-) -> Result<(), String> {
+) -> Result<(), IdentityError> {
     for (header, mapping) in &cfg.claims {
         if header.is_empty() {
             continue;
@@ -116,10 +158,10 @@ fn apply_claim_headers(
             // An object or array has no single obvious spelling; inventing one
             // would be a silent guess about what the upstream expects.
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                return Err(format!(
+                return Err(IdentityError::Claim(format!(
                     "claim `{}` is a structure and cannot become header `{header}`",
                     mapping.claim
-                ));
+                )));
             }
         };
 
@@ -132,10 +174,10 @@ fn apply_claim_headers(
         // here would split the header block, so refuse the request rather than
         // emit it or silently drop an authority header the upstream needs.
         if !is_header_safe(&rendered) {
-            return Err(format!(
+            return Err(IdentityError::Claim(format!(
                 "claim `{}` contains a character that cannot appear in header `{header}`",
                 mapping.claim
-            ));
+            )));
         }
 
         plan.set(header, rendered);
@@ -197,6 +239,77 @@ fn mint(
 mod tests {
     use super::*;
     use crate::config::ClaimMapping;
+
+    fn id_with(subject: &str, issuer: &str) -> Identity {
+        Identity {
+            subject: subject.into(),
+            issuer: issuer.into(),
+            audience: "aud".into(),
+            claims: Default::default(),
+        }
+    }
+
+    fn subject_issuer_cfg() -> IdentityConfig {
+        IdentityConfig {
+            subject_header: "x-auth-subject".into(),
+            issuer_header: "x-auth-issuer".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_subject_that_cannot_be_a_header_is_refused_as_a_claim_error() {
+        // A signed token still only means the issuer vouched for the bytes.
+        // Left unchecked these reach `insert_header` three phases later and
+        // come back as a 502 blaming the upstream.
+        for bad in [
+            "4821\r\nx-auth-subject: 1",
+            "4821\nx-admin: 1",
+            "usuário",
+            "a\u{0}b",
+        ] {
+            let mut plan = HeaderPlan::new();
+            let err = apply(&mut plan, &subject_issuer_cfg(), None, &id_with(bad, "iss"))
+                .expect_err("an unrepresentable subject must not be forwarded");
+            assert!(
+                matches!(err, IdentityError::Claim(_)),
+                "{bad:?} should be a caller error, not a gateway one"
+            );
+            // Nothing partial may survive: the header must not be set to a
+            // truncated or sanitized version of what the token said.
+            assert!(
+                !plan.additions().any(|(n, _)| n == "x-auth-subject"),
+                "{bad:?} left a subject header behind"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrepresentable_issuer_is_refused_too() {
+        let mut plan = HeaderPlan::new();
+        let err = apply(
+            &mut plan,
+            &subject_issuer_cfg(),
+            None,
+            &id_with("4821", "https://issuer\r\nx-api-key: stolen"),
+        )
+        .expect_err("an unrepresentable issuer must not be forwarded");
+        assert!(matches!(err, IdentityError::Claim(_)));
+    }
+
+    #[test]
+    fn an_ordinary_identity_still_passes() {
+        let mut plan = HeaderPlan::new();
+        apply(
+            &mut plan,
+            &subject_issuer_cfg(),
+            None,
+            &id_with("4821", "https://securetoken.google.com/petsocare"),
+        )
+        .expect("a normal token must not be affected by the safety check");
+        let adds: Vec<_> = plan.additions().cloned().collect();
+        assert!(adds.contains(&("x-auth-subject".into(), "4821".into())));
+    }
 
     fn mapped(claims: serde_json::Value, spec: &[(&str, ClaimMapping)]) -> HeaderPlan {
         let cfg = IdentityConfig {

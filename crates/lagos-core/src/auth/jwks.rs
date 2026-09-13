@@ -21,6 +21,12 @@ use tokio::sync::{RwLock, broadcast};
 
 use super::AuthError;
 
+/// Cap on a fetched key set. Real ones are a few kilobytes — Google's Firebase
+/// certificate map is under 4 KiB and a large OIDC JWKS a few tens — so this is
+/// two orders of magnitude of headroom and still bounds what a misbehaving or
+/// compromised key endpoint can make the gateway allocate.
+const MAX_KEY_SET_BYTES: u64 = 1024 * 1024;
+
 struct Cached {
     keys: HashMap<String, DecodingKey>,
     expires_at: Instant,
@@ -182,13 +188,38 @@ impl CertCache {
             )));
         }
 
+        // Declared oversize is refused before a byte of it is read.
+        if let Some(len) = resp.content_length()
+            && len > MAX_KEY_SET_BYTES
+        {
+            return Err(AuthError::Unavailable(format!(
+                "key set declares {len} bytes, over the {MAX_KEY_SET_BYTES} byte cap"
+            )));
+        }
+
         let ttl = max_age(resp.headers())
             .unwrap_or(self.min_ttl)
             .max(self.min_ttl);
-        let raw = resp
-            .bytes()
+
+        // Read in chunks rather than `bytes()`, which buffers whatever arrives.
+        // The endpoint is operator configuration, not caller input, but it is
+        // still a third party over the network: a compromised or simply broken
+        // key server must not be able to exhaust the gateway's memory, and a
+        // chunked response can carry far more than its `Content-Length` said.
+        let mut raw: Vec<u8> = Vec::new();
+        let mut resp = resp;
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| AuthError::Unavailable(format!("key set could not be read: {e}")))?;
+            .map_err(|e| AuthError::Unavailable(format!("key set could not be read: {e}")))?
+        {
+            if raw.len().saturating_add(chunk.len()) as u64 > MAX_KEY_SET_BYTES {
+                return Err(AuthError::Unavailable(format!(
+                    "key set exceeded the {MAX_KEY_SET_BYTES} byte cap"
+                )));
+            }
+            raw.extend_from_slice(&chunk);
+        }
 
         let keys = match self.format {
             KeyFormat::X509Pem => parse_x509_map(&raw)?,

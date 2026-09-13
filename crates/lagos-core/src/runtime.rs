@@ -91,8 +91,24 @@ impl Runtime {
             routes = table.len(),
             upstreams = upstreams.len(),
             listen = %cfg.raw.server.listen,
+            trusted_proxies = cfg.raw.forward.trusted_proxies,
             "gateway configured",
         );
+
+        if cfg.raw.forward.trusted_proxies == 0 {
+            // Not an error: the edge is exactly where this default is right.
+            // But behind an ingress it means upstreams see the ingress address
+            // rather than the caller's, and that is a silent behaviour change
+            // an operator should hear about once at boot rather than discover
+            // in an audit log.
+            tracing::info!(
+                event = "gateway.forward.untrusted_chain",
+                "forward.trusted_proxies is 0: any arriving X-Forwarded-For is discarded and \
+                 X-Forwarded-For / X-Real-IP are rebuilt from the socket peer. If this gateway \
+                 sits behind a load balancer or ingress, set it to the number of hops in front \
+                 or upstreams will see that hop's address as the client.",
+            );
+        }
 
         // Two tables, two sockets. Machine routes are simply absent from the
         // public gateway, so reaching one from the internet is not a matter of
@@ -181,6 +197,9 @@ impl Runtime {
             self.extensions.clone(),
         );
         let mut proxy = pingora::proxy::http_proxy_service(&server.configuration, gateway);
+        if let Some(app) = proxy.app_logic_mut() {
+            app.server_options = Some(downstream_server_options(&cfg));
+        }
         proxy.add_tcp(&cfg.raw.server.listen);
         server.add_service(proxy);
 
@@ -194,6 +213,9 @@ impl Runtime {
             )
             .for_machine_tier();
             let mut svc = pingora::proxy::http_proxy_service(&server.configuration, internal);
+            if let Some(app) = svc.app_logic_mut() {
+                app.server_options = Some(downstream_server_options(&cfg));
+            }
             svc.add_tcp(addr);
             server.add_service(svc);
             tracing::info!(
@@ -268,6 +290,27 @@ impl Runtime {
 
         server.run_forever();
     }
+}
+
+/// Per-connection limits for a downstream listener.
+///
+/// `keepalive_request_limit` is Pingora's, and it has no default — nginx's own
+/// documentation for the equivalent setting explains why that is the wrong
+/// answer: per-connection allocations are only reclaimed when the connection
+/// closes, so an unbounded connection is a slow leak and holding one open is a
+/// cheap way to keep it.
+///
+/// `h2c` stays off. Plaintext HTTP/2 on the wire would put the gateway's
+/// downstream side on a protocol whose stream-multiplexing attacks (Rapid
+/// Reset and its relatives) are only bounded by Pingora's `H2Options`, which
+/// nothing here has had reason to tune.
+fn downstream_server_options(cfg: &ResolvedConfig) -> pingora::apps::HttpServerOptions {
+    let mut opts = pingora::apps::HttpServerOptions::default();
+    opts.keepalive_request_limit = match cfg.raw.limits.keepalive_requests {
+        0 => None,
+        n => Some(n),
+    };
+    opts
 }
 
 /// Picks up route-file changes without a restart.
