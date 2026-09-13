@@ -503,8 +503,8 @@ pub struct Timeouts {
     // likes. A few thousand such connections cost the attacker nothing and
     // take the gateway down. These are the knobs Pingora already exposes on
     // `ServerSession`; Lagos only gives them defaults and a name in the file.
-    /// How long a single read from the client may stall — a request header
-    /// arriving a byte at a time, or a body that stops mid-upload.
+    /// Absolute deadline for receiving a complete request header, and the
+    /// maximum gap between reads while receiving the body.
     ///
     /// Pingora's own default is 60s. 30s is plenty for a real client on a bad
     /// connection and halves what a slowloris costs to hold.
@@ -696,9 +696,9 @@ fn default_upstream_pool() -> usize {
 ///
 /// This counts *accepts*, not live connections: the accept hook is never told
 /// about a close, so a population count kept from there would drift upward
-/// until it refused everyone. Bounding the rate still bounds the population,
-/// because `timeouts.downstream_read` closes a connection that never sends a
-/// request — at 100/s with a 30s read timeout, one address tops out near 3000.
+/// until it refused everyone. The absolute request-header deadline closes
+/// sockets that never finish a header, but long-lived responses can still
+/// accumulate; this is not a concurrent-connection ceiling.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionLimitConfig {
@@ -1279,6 +1279,10 @@ pub struct ForwardConfig {
     /// should agree.
     #[serde(default)]
     pub trusted_proxies: usize,
+    /// Socket peers allowed to supply the trusted part of X-Forwarded-For.
+    /// Required whenever a proxy hop is trusted; use IPs or CIDR ranges.
+    #[serde(default)]
+    pub trusted_proxy_ips: Vec<String>,
 }
 
 fn default_forward_mode() -> ForwardMode {
@@ -1310,6 +1314,7 @@ impl Default for ForwardConfig {
             authorization: true,
             preserve_host: false,
             trusted_proxies: 0,
+            trusted_proxy_ips: Vec::new(),
         }
     }
 }
@@ -1540,6 +1545,7 @@ impl RoutesConfig {
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     pub raw: GatewayConfig,
+    pub trusted_proxy_ips: Vec<ipnet::IpNet>,
     pub upstreams: HashMap<String, UpstreamConfig>,
     pub injected_headers: Vec<(String, String)>,
     pub firebase_project_ids: Vec<String>,
@@ -1734,6 +1740,28 @@ impl GatewayConfig {
     /// with an unresolvable upstream or a route pointing at nothing would serve
     /// a weaker policy than the one that was written down.
     pub fn resolve(self, expanded: &Interpolated) -> Result<ResolvedConfig, ConfigError> {
+        if self.timeouts.connect.is_zero() || self.timeouts.downstream_read.is_zero() {
+            return Err(ConfigError::invalid(
+                "timeouts.connect and timeouts.downstream_read must be greater than zero",
+            ));
+        }
+        let trusted_proxy_ips: Vec<ipnet::IpNet> = self
+            .forward
+            .trusted_proxy_ips
+            .iter()
+            .map(|entry| {
+                entry.parse().map_err(|_| {
+                    ConfigError::invalid(format!(
+                        "forward.trusted_proxy_ips: `{entry}` is not an IP address or CIDR range"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        if self.forward.trusted_proxies > 0 && trusted_proxy_ips.is_empty() {
+            return Err(ConfigError::invalid(
+                "forward.trusted_proxies requires forward.trusted_proxy_ips; otherwise a direct caller could forge the proxy's address header",
+            ));
+        }
         let mut upstreams: HashMap<String, UpstreamConfig> = HashMap::new();
         for (name, up) in &self.upstreams {
             let mut normalized = up.clone();
@@ -1875,6 +1903,7 @@ impl GatewayConfig {
         Ok(ResolvedConfig {
             cors,
             raw: self,
+            trusted_proxy_ips,
             upstreams,
             injected_headers,
             firebase_project_ids,
@@ -1926,6 +1955,22 @@ fn lower_pairs(map: &BTreeMap<String, String>) -> Vec<(String, String)> {
 }
 
 impl ResolvedConfig {
+    /// Only an allowlisted socket peer may vouch for forwarded address hops.
+    pub fn trusted_proxy_depth(&self, peer: Option<&str>, configured: usize) -> usize {
+        let Some(ip) = peer.and_then(|p| p.parse::<std::net::IpAddr>().ok()) else {
+            return 0;
+        };
+        if self
+            .trusted_proxy_ips
+            .iter()
+            .any(|range| range.contains(&ip))
+        {
+            configured
+        } else {
+            0
+        }
+    }
+
     /// Semantic checks that need the route table, which may be loaded from a
     /// separate file after the document itself is parsed.
     ///
@@ -1948,6 +1993,16 @@ impl ResolvedConfig {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
 
         for r in routes {
+            if let Some(limit) = &r.rate_limit
+                && matches!(limit.key, RateLimitKey::Ip)
+                && limit.trusted_proxies > 0
+                && self.trusted_proxy_ips.is_empty()
+            {
+                return Err(ConfigError::invalid(format!(
+                    "route `{}` trusts X-Forwarded-For for its IP limit but forward.trusted_proxy_ips is empty",
+                    r.id
+                )));
+            }
             if r.prefix.is_empty() {
                 return Err(ConfigError::invalid(format!(
                     "route `{}`: prefix is empty; it would match every request",
@@ -2061,6 +2116,21 @@ routes:
         assert_eq!(r.raw.server.health_path, "/health");
         assert_eq!(url_of(&r, "users"), "http://users:3000");
         assert!(r.referenced_env.is_empty());
+    }
+
+    #[test]
+    fn trusted_proxy_hops_require_allowlisted_socket_peers() {
+        let missing = format!("forward:\n  trusted_proxies: 1\n{MINIMAL}");
+        assert!(parse(&missing).is_err());
+
+        let allowed = format!(
+            "forward:\n  trusted_proxies: 1\n  trusted_proxy_ips: [10.0.0.0/8, '2001:db8::/32']\n{MINIMAL}"
+        );
+        let cfg = parse(&allowed).expect("valid proxy CIDRs");
+        assert_eq!(cfg.trusted_proxy_depth(Some("10.1.2.3"), 1), 1);
+        assert_eq!(cfg.trusted_proxy_depth(Some("2001:db8::1"), 1), 1);
+        assert_eq!(cfg.trusted_proxy_depth(Some("203.0.113.7"), 1), 0);
+        assert_eq!(cfg.trusted_proxy_depth(None, 1), 0);
     }
 
     #[test]

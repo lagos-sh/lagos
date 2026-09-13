@@ -254,6 +254,12 @@ fn validate(path: Option<String>, registry: &ExtensionRegistry) -> anyhow::Resul
         ),
         n => println!("✓ client ip   {n} hop(s) back in X-Forwarded-For"),
     }
+    if !cfg.raw.forward.trusted_proxy_ips.is_empty() {
+        println!(
+            "✓ proxy peers {}",
+            cfg.raw.forward.trusted_proxy_ips.join(", ")
+        );
+    }
     let issuers = cfg.raw.auth.jwt.len()
         + cfg
             .raw

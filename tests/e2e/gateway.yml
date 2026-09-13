@@ -7,6 +7,7 @@ server:
 
 timeouts:
   connect: 2s
+  downstream_read: 1s
   default: 3s
   sse: 30s
 
@@ -71,6 +72,8 @@ forward:
   mode: allowlist
   headers: [user-agent, traceparent, tracestate]
   authorization: false
+  trusted_proxies: 1
+  trusted_proxy_ips: [127.0.0.1/32]
 
 identity:
   subject_header: x-auth-subject

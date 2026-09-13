@@ -8,8 +8,10 @@ use std::time::Duration;
 
 use pingora::server::Server;
 use pingora::services::background::{BackgroundService, background_service};
+use pingora::services::listening::Service;
 
 use crate::config::{GatewayConfig, ResolvedConfig};
+use crate::downstream::DeadlineProxy;
 use crate::ext::{Extension, ExtensionRegistry};
 use crate::proxy::Gateway;
 use crate::routes::{
@@ -202,10 +204,12 @@ impl Runtime {
             verifier.clone(),
             self.extensions.clone(),
         );
-        let mut proxy = pingora::proxy::http_proxy_service(&server.configuration, gateway);
-        if let Some(app) = proxy.app_logic_mut() {
-            app.server_options = Some(downstream_server_options(&cfg));
-        }
+        let mut app = pingora::proxy::http_proxy(&server.configuration, gateway);
+        app.server_options = Some(downstream_server_options(&cfg));
+        let mut proxy = Service::new(
+            "Lagos public proxy".into(),
+            DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read),
+        );
         add_listener(&mut proxy, &cfg.raw.server.listen, &cfg);
         server.add_service(proxy);
 
@@ -218,10 +222,12 @@ impl Runtime {
                 self.extensions.clone(),
             )
             .for_machine_tier();
-            let mut svc = pingora::proxy::http_proxy_service(&server.configuration, internal);
-            if let Some(app) = svc.app_logic_mut() {
-                app.server_options = Some(downstream_server_options(&cfg));
-            }
+            let mut app = pingora::proxy::http_proxy(&server.configuration, internal);
+            app.server_options = Some(downstream_server_options(&cfg));
+            let mut svc = Service::new(
+                "Lagos internal proxy".into(),
+                DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read),
+            );
             add_listener(&mut svc, addr, &cfg);
             server.add_service(svc);
             tracing::info!(

@@ -684,6 +684,8 @@ arriving chain to believe:
 forward:
   # Hops in front of this gateway that are yours. 0 = the gateway is the edge.
   trusted_proxies: 1
+  # Socket peers allowed to supply those hops.
+  trusted_proxy_ips: [10.1.2.3/32]
 ```
 
 `X-Forwarded-For` is appended to by each hop, so entries run oldest-first and
@@ -693,11 +695,16 @@ counts from the right:
 | `trusted_proxies` | Arriving chain | `X-Real-IP` sent upstream |
 |---|---|---|
 | `0` (default) | discarded | the socket peer |
-| `1` | preserved, peer appended | the entry your one proxy appended |
-| `2` | preserved, peer appended | one further left |
+| `1` | untrusted prefix removed, peer appended | the entry your one proxy appended |
+| `2` | untrusted prefix removed, peer appended | one further left |
 
 Set it to the number of hops that are genuinely yours — `1` behind a single
 cloud load balancer or ingress controller, `2` behind a CDN in front of that.
+`trusted_proxy_ips` must list their source IPs or CIDR ranges. Lagos ignores
+XFF from any other socket peer, including a direct connection. The list is
+required whenever forwarding or an IP rate limit trusts a proxy hop.
+Use narrow ranges and restrict the listener to those proxies at the network
+layer: any host allowed to connect from a listed address can supply XFF.
 Set it too high and a client can forge its own address by padding the header;
 leave it at `0` behind an ingress and every upstream sees the ingress address
 instead of the caller.
@@ -734,9 +741,9 @@ and a flood is not the moment to spend a response on every attempt.
 
 It counts **accepts, not live connections** — the hook is never told about a
 close, so a population count kept there would drift upward until it refused
-everyone. Bounding the rate still bounds the population, because
-`timeouts.downstream_read` closes a connection that never sends a request: at
-`100/s` with a 30s read timeout, one address tops out near 3000 sockets.
+everyone. The absolute header deadline closes connections that never finish a
+request header. Long-lived responses can outlive it, so this is not a hard
+concurrent-connection ceiling.
 
 > [!WARNING]
 > **Leave this off behind a load balancer or ingress.** Every connection then
@@ -759,7 +766,9 @@ dns:
 `cache_ttl` is the delay before a record change is noticed, traded against a
 resolver round trip per request. Failed lookups are never cached, so one bad
 lookup cannot become a TTL-long outage for that upstream. An upstream written as
-an IP literal skips resolution entirely.
+an IP literal skips resolution entirely. The connect timeout bounds DNS lookup;
+multiple answers are rotated across requests and the next address is tried
+when a connection fails before a request is delivered.
 
 This matters more than it looks. Resolving with `getaddrinfo` on a proxy worker
 thread — two of them by default — means a slow resolver does not slow the
@@ -783,7 +792,7 @@ what one client connection can hold:
 
 ```yaml
 timeouts:
-  downstream_read: 30s        # a stalled read: header or body arriving by the byte
+  downstream_read: 30s        # absolute header deadline; body read-stall limit
   downstream_write: 30s       # a stalled write: a client that stops reading
   downstream_drain: 5s        # discarding the body of a request being refused
   downstream_keepalive: 60s   # idle connection reuse

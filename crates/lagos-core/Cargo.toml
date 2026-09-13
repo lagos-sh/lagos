@@ -29,6 +29,7 @@ humantime-serde.workspace = true
 uuid.workspace = true
 moka.workspace = true
 arc-swap.workspace = true
+ipnet.workspace = true
 prometheus.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }

@@ -76,31 +76,51 @@ pub fn client_address(
     peer: Option<&str>,
     trusted_proxies: usize,
 ) -> Option<String> {
-    if trusted_proxies == 0 {
-        return peer.map(str::to_string);
-    }
-
-    let mut chain: Vec<&str> = forwarded_for
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if let Some(p) = peer {
-        chain.push(p);
-    }
-
-    // `trusted_proxies` hops back from the right-hand end.
-    chain
-        .len()
-        .checked_sub(trusted_proxies)
-        .and_then(|i| i.checked_sub(1))
-        .and_then(|i| chain.get(i))
+    trusted_suffix(forwarded_for, peer, trusted_proxies)
+        .first()
         .map(|s| (*s).to_string())
-        // A chain shorter than the configured depth means the request did not
-        // arrive through the expected proxies. Fall back to the socket peer
-        // rather than to a client-supplied entry.
-        .or_else(|| peer.map(str::to_string))
+}
+
+/// Keep only addresses vouched for by the configured hops, starting with the
+/// client address they saw. The socket peer is always the final entry.
+fn trusted_suffix<'a>(
+    forwarded_for: Option<&'a str>,
+    peer: Option<&'a str>,
+    trusted_proxies: usize,
+) -> Vec<&'a str> {
+    let Some(peer) = peer else {
+        return Vec::new();
+    };
+    let entries: Vec<&str> = forwarded_for
+        .map(|value| value.split(',').map(str::trim).collect())
+        .unwrap_or_default();
+    if trusted_proxies == 0 || entries.len() < trusted_proxies {
+        return vec![peer];
+    }
+    let suffix = entries
+        .get(entries.len() - trusted_proxies..)
+        .unwrap_or(&[]);
+    if !suffix
+        .iter()
+        .all(|entry| entry.parse::<std::net::IpAddr>().is_ok())
+    {
+        return vec![peer];
+    }
+    let mut trusted = suffix.to_vec();
+    trusted.push(peer);
+    trusted
+}
+
+/// Combine repeated X-Forwarded-For fields before counting from the right.
+/// A proxy may append a second field rather than edit the client's first one.
+pub fn forwarded_for_chain(headers: &HeaderMap) -> Option<String> {
+    let values: Vec<&str> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .map(|value| value.to_str())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    (!values.is_empty()).then(|| values.join(", "))
 }
 
 /// Build the `X-Forwarded-For` chain and the `X-Real-IP` it implies.
@@ -114,8 +134,8 @@ pub fn client_address(
 ///   the socket peer is the only address anyone has proven. An upstream that
 ///   reads `X-Real-IP` then gets a fact, not a client assertion.
 /// * `n > 0` means the first `n` hops from the right were appended by trusted
-///   proxies. The chain is preserved and the socket peer appended, and
-///   `X-Real-IP` is the entry those trusted hops vouch for.
+///   proxies. Only that suffix and the socket peer are forwarded, so a service
+///   reading the first entry cannot mistake a caller's forged prefix for fact.
 ///
 /// Either way `X-Real-IP` and the limiter's key come from the same
 /// [`client_address`] rule, so the address an upstream blocks on is the address
@@ -125,16 +145,13 @@ pub fn forwarded_for(
     peer: Option<&str>,
     trusted_proxies: usize,
 ) -> (Option<String>, Option<String>) {
-    let prior = client_headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-        // Nothing in front of us appended this, so none of it is evidence.
-        .filter(|_| trusted_proxies > 0);
-
-    let real_ip = client_address(prior, peer, trusted_proxies);
-
-    let chain: Vec<&str> = prior.into_iter().chain(peer).collect();
+    let prior = if trusted_proxies > 0 {
+        forwarded_for_chain(client_headers)
+    } else {
+        None
+    };
+    let chain = trusted_suffix(prior.as_deref(), peer, trusted_proxies);
+    let real_ip = chain.first().map(|s| (*s).to_string());
     let xff = if chain.is_empty() {
         None
     } else {
@@ -247,13 +264,43 @@ mod tests {
                 "x-forwarded-for",
                 HeaderValue::from_str(&format!("{forged}, 203.0.113.7")).unwrap(),
             );
-            let (_, real) = forwarded_for(&h, Some("10.1.2.3"), 1);
+            let (xff, real) = forwarded_for(&h, Some("10.1.2.3"), 1);
             assert_eq!(
                 real.as_deref(),
                 Some("203.0.113.7"),
                 "padding `{forged}` changed the believed client"
             );
+            assert_eq!(
+                xff.as_deref(),
+                Some("203.0.113.7, 10.1.2.3"),
+                "padding `{forged}` reached the upstream"
+            );
         }
+    }
+
+    #[test]
+    fn a_proxy_appending_a_separate_header_is_counted() {
+        let mut h = with_xff("9.9.9.9");
+        h.append("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+        let (xff, real) = forwarded_for(&h, Some("10.1.2.3"), 1);
+        assert_eq!(real.as_deref(), Some("203.0.113.7"));
+        assert_eq!(xff.as_deref(), Some("203.0.113.7, 10.1.2.3"));
+    }
+
+    #[test]
+    fn an_invalid_trusted_entry_falls_back_to_the_peer() {
+        let h = with_xff("not-an-ip");
+        let (xff, real) = forwarded_for(&h, Some("10.1.2.3"), 1);
+        assert_eq!(real.as_deref(), Some("10.1.2.3"));
+        assert_eq!(xff.as_deref(), Some("10.1.2.3"));
+    }
+
+    #[test]
+    fn an_empty_hop_cannot_shift_the_trust_boundary() {
+        let h = with_xff("9.9.9.9, , 203.0.113.7");
+        let (xff, real) = forwarded_for(&h, Some("10.1.2.3"), 2);
+        assert_eq!(real.as_deref(), Some("10.1.2.3"));
+        assert_eq!(xff.as_deref(), Some("10.1.2.3"));
     }
 
     #[test]

@@ -29,16 +29,22 @@ of it are yours:
 ```yaml
 forward:
   trusted_proxies: 1   # new; defaults to 0
+  trusted_proxy_ips: [10.1.2.3/32]  # source addresses of your proxy peers
 ```
 
 | `trusted_proxies` | Arriving chain | `X-Real-IP` sent upstream |
 |---|---|---|
 | `0` (**the default**) | discarded | the socket peer |
-| `1` | preserved, peer appended | the entry your one proxy appended |
-| `2` | preserved, peer appended | one further left |
+| `1` | untrusted prefix removed, peer appended | the entry your one proxy appended |
+| `2` | untrusted prefix removed, peer appended | one further left |
 
 **What to do.** Count the hops between the internet and the gateway that you
 operate, and set `forward.trusted_proxies` to that number.
+List their source addresses or CIDR ranges under `forward.trusted_proxy_ips`.
+Lagos refuses a trusted-hop configuration without this list; a direct caller
+must not be able to impersonate a proxy by supplying XFF.
+Use narrow ranges and restrict the listener to those proxies at the network
+layer; any host allowed to connect from a listed address can supply XFF.
 
 - **Behind an ingress controller, cloud load balancer or service mesh** — the
   usual Kubernetes deployment — set it to `1`. Leaving it at `0` is safe but
@@ -62,14 +68,15 @@ land together:
 
 1. Deploy the new binary with the config unchanged. It starts, and behaves as
    `trusted_proxies: 0` — safe, but upstreams see the ingress address.
-2. Add `forward.trusted_proxies` and roll again.
+2. Add `forward.trusted_proxies` and `forward.trusted_proxy_ips` and roll again.
 
 Do not add the line first, and do not roll back to 0.1.2 with the line still in
 place.
 
 `rate_limit.trusted_proxies` is unchanged and still per-route. The two should
 agree — throttling one address while telling the upstream about another makes a
-per-IP control unenforceable.
+per-IP control unenforceable. An IP rate limit that trusts a proxy also requires
+`forward.trusted_proxy_ips`.
 
 ### 2. Downstream connections now have time and request budgets
 
@@ -78,7 +85,7 @@ unbounded. New defaults:
 
 ```yaml
 timeouts:
-  downstream_read: 30s        # was Pingora's 60s
+  downstream_read: 30s        # absolute header deadline; body read-stall limit
   downstream_write: 30s       # was unset — unbounded
   downstream_drain: 5s        # was unset — unbounded
   downstream_keepalive: 60s
@@ -98,8 +105,9 @@ liked, at a cost to the attacker of one socket.
   its write budget instead of `downstream_write`. If your event streams already
   worked, they still do.
 - **Very slow clients on poor links** uploading large bodies. The read timeout
-  is per read operation, not for the whole request, so a 30s gap between chunks
-  is what trips it. Raise `timeouts.downstream_read` if your clients need it.
+  is per read operation for bodies, so a 30s gap between chunks trips it.
+  Headers must complete within 30s total. Raise `timeouts.downstream_read` if
+  your clients need it.
 
 `min_send_rate` stays off, since a real client on a bad link is not an attacker.
 

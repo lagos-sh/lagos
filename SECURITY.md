@@ -106,9 +106,10 @@ reviewer knows what is already covered.
 - Request bodies capped by declared length and by streamed bytes
 - Bearer tokens capped before being decoded or verified
 - Rate limits keyed on IP, header or route applied *before* token verification
-- Client address counted from the right of `X-Forwarded-For`, by trusted-hop
-  count, for both the limiter key and what upstreams are told
-- Downstream read, write, drain and keepalive budgets set, plus a per-connection
+- Client address counted from the right of `X-Forwarded-For` only for allowlisted
+  proxy socket peers; untrusted prefixes are removed before forwarding
+- Absolute request-header deadline and downstream read, write, drain and
+  keepalive budgets set, plus a per-connection
   request limit — Pingora leaves most of these unbounded
 - Optional per-address connection rate limit at accept time, before a connection
   costs a task or a handshake
@@ -124,8 +125,8 @@ them is exploitable in a way described here is still welcome, but it will not be
 news.
 
 - **No cap on *concurrent* connections.** `limits.connections_per_ip` bounds how
-  fast one address may open them, which bounds the population once the read
-  timeout is closing idle sockets — but Pingora's accept hook is never told about
+  fast one address may open them, while the header deadline closes sockets
+  that never finish a request — but Pingora's accept hook is never told about
   a close, so a live count cannot be kept honestly from there. A hard ceiling
   still belongs at the ingress (`limit_conn`) and in `ulimit`.
 - **A per-address limit is the wrong control behind a proxy.** Where every

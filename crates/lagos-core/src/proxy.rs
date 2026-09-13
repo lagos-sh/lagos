@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -58,6 +59,7 @@ pub struct Gateway {
     cache: Option<&'static crate::cache::Cache>,
     /// Resolves upstream names off the worker threads.
     resolver: Arc<crate::dns::Resolver>,
+    dns_next: AtomicUsize,
 }
 
 /// Headers required for the request to remain well-formed. Removing these would
@@ -74,6 +76,16 @@ const STRUCTURAL_HEADERS: &[&str] = &[
     "expect",
     "range",
 ];
+
+fn choose_dns_address(
+    addrs: &[std::net::SocketAddr],
+    start: usize,
+    attempt: u32,
+) -> Option<std::net::SocketAddr> {
+    let offset = usize::try_from(attempt).unwrap_or(usize::MAX);
+    let index = start.wrapping_add(offset) % addrs.len().max(1);
+    addrs.get(index).copied()
+}
 
 /// Whether a new trace should be sampled.
 ///
@@ -158,6 +170,14 @@ pub struct Ctx {
     /// The backend chosen for this request. Selected once in `upstream_peer`
     /// and reused, so a pool cannot dial one member while addressing another.
     pub target: Option<UpstreamTarget>,
+    /// Initial DNS choice retained across retries of this request.
+    pub dns_start: Option<usize>,
+    /// DNS addresses offered for the currently selected target.
+    pub dns_candidates: usize,
+    /// Connect attempts through those addresses, including route retries.
+    pub dns_attempts: u32,
+    /// Automatic failovers made for this request, bounded by the DNS answer.
+    pub dns_failovers: usize,
 }
 
 impl Gateway {
@@ -189,6 +209,7 @@ impl Gateway {
         let resolver = Arc::new(crate::dns::Resolver::new(
             cfg.raw.dns.cache_ttl,
             cfg.raw.dns.max_entries,
+            cfg.raw.timeouts.connect,
         ));
 
         let mut forwardable: std::collections::HashSet<String> =
@@ -222,6 +243,7 @@ impl Gateway {
             serves_machine: false,
             forwardable,
             resolver,
+            dns_next: AtomicUsize::new(0),
         }
     }
 
@@ -476,11 +498,17 @@ impl Gateway {
     ) -> Result<bool> {
         let key = {
             let headers = &session.req_header().headers;
+            let trusted = self.cfg.trusted_proxy_depth(peer_ip, cfg.trusted_proxies);
+            let forwarded = if trusted > 0 {
+                crate::headers::forwarded_for_chain(headers)
+            } else {
+                None
+            };
             crate::ratelimit::key_for(
                 cfg,
                 &route.id,
                 subject,
-                headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+                forwarded.as_deref(),
                 peer_ip,
                 |name| {
                     headers
@@ -609,8 +637,12 @@ impl Gateway {
             }
         }
 
-        let (xff, real_ip) =
-            forwarded_for(&req.headers, peer, self.cfg.raw.forward.trusted_proxies);
+        let trusted = self
+            .cfg
+            .trusted_proxy_depth(peer, self.cfg.raw.forward.trusted_proxies);
+        let (xff, real_ip) = forwarded_for(&req.headers, peer, trusted);
+        plan.strip("x-forwarded-for");
+        plan.strip("x-real-ip");
         if let Some(v) = xff {
             plan.set("x-forwarded-for", v);
         }
@@ -648,10 +680,10 @@ impl ProxyHttp for Gateway {
         session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<()> {
+        crate::downstream::header_parsed();
         let t = &self.cfg.raw.timeouts;
-        // Reading the request: header trickled a byte at a time, or a body that
-        // stops mid-upload. Pingora defaults to 60s; this is configurable and
-        // shorter.
+        // The wrapper has already applied an absolute header deadline. This
+        // setting bounds stalls while the request body is read.
         session.set_read_timeout(Some(t.downstream_read));
         // Writing the response. Pingora leaves this unset, so without it a
         // client that stops reading pins the exchange forever.
@@ -1275,7 +1307,18 @@ impl ProxyHttp for Gateway {
         // blocking `getaddrinfo` off this worker thread: it is one of two, and
         // a slow resolver holding both is a gateway outage rather than a
         // gateway slowdown.
-        let addr = self.resolver.resolve(&target.addr).await?;
+        let addrs = self.resolver.addresses(&target.addr).await?;
+        let start = *ctx
+            .dns_start
+            .get_or_insert_with(|| self.dns_next.fetch_add(1, Ordering::Relaxed));
+        ctx.dns_candidates = addrs.len();
+        let addr = choose_dns_address(&addrs, start, ctx.dns_attempts).ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::ConnectError,
+                "upstream DNS returned no addresses",
+            )
+            .into_up()
+        })?;
         let mut peer = HttpPeer::new(addr, target.tls, target.sni.clone());
         peer.options.connection_timeout = Some(self.cfg.raw.timeouts.connect);
         peer.options.total_connection_timeout = Some(self.cfg.raw.timeouts.connect * 2);
@@ -1355,10 +1398,21 @@ impl ProxyHttp for Gateway {
         ctx: &mut Self::CTX,
         mut e: Box<pingora::Error>,
     ) -> Box<pingora::Error> {
+        let replayable = !session.as_ref().retry_buffer_truncated();
+
+        // A DNS answer with multiple addresses is itself a failover set. No
+        // request was delivered, so try its next address even when the route
+        // did not opt into broader retry behavior.
+        if replayable && ctx.dns_failovers.saturating_add(1) < ctx.dns_candidates {
+            ctx.dns_failovers = ctx.dns_failovers.saturating_add(1);
+            ctx.dns_attempts = ctx.dns_attempts.saturating_add(1);
+            e.set_retry(true);
+            return e;
+        }
+
         let Some(policy) = ctx.retry else {
             return e;
         };
-        let replayable = !session.as_ref().retry_buffer_truncated();
 
         if policy.should_retry(
             crate::retry::Failure::Connect,
@@ -1367,6 +1421,7 @@ impl ProxyHttp for Gateway {
             replayable,
         ) {
             ctx.attempts = ctx.attempts.saturating_add(1);
+            ctx.dns_attempts = ctx.dns_attempts.saturating_add(1);
             tracing::warn!(
                 event = "gateway.upstream.retry",
                 request_id = %ctx.request_id,
@@ -1796,6 +1851,18 @@ impl ProxyHttp for Gateway {
 mod tests {
     use super::*;
     use crate::config::GatewayConfig;
+
+    #[test]
+    fn dns_retries_use_the_next_address() {
+        let a = "192.0.2.1:443".parse().unwrap();
+        let b = "192.0.2.2:443".parse().unwrap();
+        let addrs = [a, b];
+        assert_eq!(choose_dns_address(&addrs, 0, 0), Some(a));
+        assert_eq!(choose_dns_address(&addrs, 0, 1), Some(b));
+        assert_eq!(choose_dns_address(&addrs, 1, 0), Some(b));
+        assert_eq!(choose_dns_address(&addrs, 1, 1), Some(a));
+        assert_eq!(choose_dns_address(&[], 0, 0), None);
+    }
 
     fn gateway_with_base(base: &str) -> Gateway {
         let yaml = format!(

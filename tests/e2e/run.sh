@@ -529,6 +529,38 @@ UNKNOWN=$(acao https://app.example.com /no/such/path)
   && ok "denied and unknown paths are indistinguishable" || bad "the deny-list is enumerable via CORS"
 
 say "rate limiting"
+# A caller may prepend arbitrary XFF entries. The upstream must receive only
+# the suffix vouched for by the configured proxy peer, even when it reads the
+# leftmost entry rather than X-Real-IP.
+curl -s -m 5 -H "X-Forwarded-For: 9.9.9.9, 203.0.113.7" \
+  "$G/bff/v1/products/42" > "$WORK/forwarded.json"
+python3 - "$WORK/forwarded.json" <<'PY' && ok "forged XFF prefix is removed upstream" || bad "forged XFF prefix survived"
+import json, sys
+h = json.load(open(sys.argv[1]))["headers"]
+assert h["x-forwarded-for"] == "203.0.113.7, 127.0.0.1"
+assert h["x-real-ip"] == "203.0.113.7"
+PY
+
+python3 - <<'PY' && ok "trickled request headers meet an absolute deadline" || bad "trickled headers held a socket open"
+import socket, sys, time
+s = socket.create_connection(("127.0.0.1", 3311), timeout=2)
+s.settimeout(1)
+s.sendall(b"GET /bff/v1/products/42 HTTP/1.1\r\nHost: localhost\r\nX-Drip: ")
+started = time.monotonic()
+while time.monotonic() - started < 1.8:
+    try:
+        s.sendall(b"a")
+    except OSError:
+        sys.exit(0)
+    time.sleep(0.2)
+try:
+    closed = s.recv(1) == b""
+except socket.timeout:
+    closed = False
+s.close()
+sys.exit(0 if closed else 1)
+PY
+
 CODES=$(for i in 1 2 3 4 5; do
   curl -s -o /dev/null -m 5 -H "X-Forwarded-For: 203.0.113.7" -w '%{http_code} ' "$G/bff/v1/limited/x"
 done)

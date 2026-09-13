@@ -47,6 +47,7 @@ moka = { version = "0.12", features = ["future", "sync"] }
 humantime-serde = "1"
 uuid = { version = "1", features = ["v4"] }
 arc-swap = "1"
+ipnet = "2"
 # Must track the version `pingora-prometheus` uses. The registry is a process
 # global *per crate version*, so a mismatch means we register into one registry
 # while the exposition endpoint serves another — and /metrics comes back empty

@@ -18,10 +18,9 @@
 //! everyone. What is counted instead is **how fast one address may open new
 //! connections**, which is the shape of the attack anyway.
 //!
-//! Bounding the rate does bound the population, because connections no longer
-//! live forever: `timeouts.downstream_read` closes one that never sends a
-//! request. At `100/s` with a 30s read timeout, one address tops out near 3000
-//! sockets instead of as many as the kernel will hand out.
+//! The absolute request-header deadline bounds sockets that never finish a
+//! header. Long-lived responses can still outlive it, so this is not a hard
+//! concurrent-connection ceiling; use an ingress limit for that.
 //!
 //! # This is a blunt instrument, and it is off by default
 //!

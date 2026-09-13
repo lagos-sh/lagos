@@ -24,7 +24,8 @@
 //!    free.
 //!
 //! An address that is already an IP literal skips both: there is nothing to
-//! resolve and nothing worth remembering.
+//! resolve and nothing worth remembering. The connect budget also bounds the
+//! lookup, and all returned addresses remain available for connection failover.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,6 +36,7 @@ pub struct Resolver {
     /// `None` when caching is disabled, in which case every call resolves —
     /// still asynchronously, which is the half that was actually a bug.
     cache: Option<moka::future::Cache<String, Arc<Vec<SocketAddr>>>>,
+    lookup_timeout: Duration,
 }
 
 impl std::fmt::Debug for Resolver {
@@ -52,7 +54,7 @@ impl Resolver {
     /// not from requests, so this cannot be flooded by a caller — the cap is
     /// there because an unbounded map in a long-lived process is a bad habit
     /// regardless of who fills it.
-    pub fn new(ttl: Duration, max_entries: u64) -> Self {
+    pub fn new(ttl: Duration, max_entries: u64, lookup_timeout: Duration) -> Self {
         let cache = (!ttl.is_zero()).then(|| {
             moka::future::Cache::builder()
                 .max_capacity(max_entries)
@@ -62,7 +64,10 @@ impl Resolver {
                 .time_to_live(ttl)
                 .build()
         });
-        Self { cache }
+        Self {
+            cache,
+            lookup_timeout,
+        }
     }
 
     /// Resolve `addr` (`host:port`) to a socket address.
@@ -75,13 +80,18 @@ impl Resolver {
     /// only the configured upstream, which is operator input, and reaches logs
     /// rather than the response body.
     pub async fn resolve(&self, addr: &str) -> pingora::Result<SocketAddr> {
+        first(addr, self.addresses(addr).await?)
+    }
+
+    /// Return every address so a failed connection can try another DNS answer.
+    pub async fn addresses(&self, addr: &str) -> pingora::Result<Arc<Vec<SocketAddr>>> {
         // An IP literal needs no resolver and no cache entry.
         if let Ok(sock) = addr.parse::<SocketAddr>() {
-            return Ok(sock);
+            return Ok(Arc::new(vec![sock]));
         }
 
         let Some(cache) = &self.cache else {
-            return first(addr, lookup(addr).await?);
+            return lookup(addr, self.lookup_timeout).await;
         };
 
         // `try_get_with` coalesces concurrent misses for the same key into one
@@ -90,7 +100,9 @@ impl Resolver {
         // request; without the second property, one DNS blip would be
         // remembered for the whole TTL.
         let addrs = cache
-            .try_get_with(addr.to_string(), async { lookup(addr).await })
+            .try_get_with(addr.to_string(), async {
+                lookup(addr, self.lookup_timeout).await
+            })
             .await
             .map_err(|e: Arc<Box<pingora::Error>>| {
                 pingora::Error::explain(
@@ -100,13 +112,23 @@ impl Resolver {
                 .into_up()
             })?;
 
-        first(addr, addrs)
+        if addrs.is_empty() {
+            return Err(no_addresses(addr));
+        }
+        Ok(addrs)
     }
 }
 
-async fn lookup(addr: &str) -> pingora::Result<Arc<Vec<SocketAddr>>> {
-    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(addr)
+async fn lookup(addr: &str, deadline: Duration) -> pingora::Result<Arc<Vec<SocketAddr>>> {
+    let resolved: Vec<SocketAddr> = tokio::time::timeout(deadline, tokio::net::lookup_host(addr))
         .await
+        .map_err(|_| {
+            pingora::Error::explain(
+                pingora::ErrorType::ConnectError,
+                format!("upstream address {addr} did not resolve within {deadline:?}"),
+            )
+            .into_up()
+        })?
         .map_err(|e| {
             pingora::Error::explain(
                 pingora::ErrorType::ConnectError,
@@ -115,18 +137,23 @@ async fn lookup(addr: &str) -> pingora::Result<Arc<Vec<SocketAddr>>> {
             .into_up()
         })?
         .collect();
+    if resolved.is_empty() {
+        return Err(no_addresses(addr));
+    }
     Ok(Arc::new(resolved))
 }
 
-/// The first address, matching what the blocking path returned.
+fn no_addresses(addr: &str) -> Box<pingora::Error> {
+    pingora::Error::explain(
+        pingora::ErrorType::ConnectError,
+        format!("upstream address {addr} resolved to no addresses"),
+    )
+    .into_up()
+}
+
+/// Compatibility helper for callers that need only one address.
 fn first(addr: &str, addrs: Arc<Vec<SocketAddr>>) -> pingora::Result<SocketAddr> {
-    addrs.first().copied().ok_or_else(|| {
-        pingora::Error::explain(
-            pingora::ErrorType::ConnectError,
-            format!("upstream address {addr} resolved to no addresses"),
-        )
-        .into_up()
-    })
+    addrs.first().copied().ok_or_else(|| no_addresses(addr))
 }
 
 #[cfg(test)]
@@ -134,14 +161,14 @@ mod tests {
     use super::*;
 
     fn resolver() -> Resolver {
-        Resolver::new(Duration::from_secs(30), 128)
+        Resolver::new(Duration::from_secs(30), 128, Duration::from_secs(5))
     }
 
     #[tokio::test]
     async fn an_ip_literal_resolves_without_touching_dns() {
         // The fast path matters: an upstream written as an address should not
         // consult a resolver, a cache, or the blocking pool.
-        let r = Resolver::new(Duration::ZERO, 0);
+        let r = Resolver::new(Duration::ZERO, 0, Duration::from_secs(5));
         let addr = r
             .resolve("127.0.0.1:3002")
             .await

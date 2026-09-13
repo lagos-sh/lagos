@@ -28,6 +28,7 @@ pub mod cli;
 pub mod config;
 pub mod cors;
 pub mod dns;
+pub mod downstream;
 pub mod error;
 pub mod ext;
 pub mod headers;
