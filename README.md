@@ -535,7 +535,7 @@ issue identity-provider access tokens.
 ```yaml
 auth:
   firebase:
-    projects: [customer-prod, merchant-prod, staff-prod]
+    projects: [mobile-app, admin-app]
 ```
 
 Firebase verification uses project IDs and Google's public signing
@@ -551,7 +551,7 @@ After verification, Lagos describes the caller to the upstream:
 
 ```text
 x-auth-subject: 4821
-x-auth-issuer: https://securetoken.google.com/customer-prod
+x-auth-issuer: https://securetoken.google.com/mobile-app
 x-auth-claims: <base64url-encoded JSON claims>
 ```
 
@@ -586,9 +586,9 @@ Map verified claims into individual headers:
 identity:
   claims:
     x-user-id: sub
-    x-user-type: user_type
-    x-employer-company-id:
-      claim: employerCompanyId
+    x-role: role
+    x-team-id:
+      claim: teamId
       when_null: none
 ```
 
@@ -604,10 +604,10 @@ Ownership bindings compare a request value with the verified identity:
 ```yaml
 routes:
   authenticated:
-    - prefix: /events/orders
-      upstream: realtime
+    - prefix: /projects
+      upstream: projects
       bind:
-        query.merchantId: identity.company_id
+        query.projectId: identity.project_id
 ```
 
 Bindings support `query.<name>` and `header.<name>` sources, compared with
@@ -1248,9 +1248,9 @@ Routes refer to registered extensions by name:
 ```yaml
 routes:
   authenticated:
-    - prefix: /pos
-      upstream: pos
-      extensions: [pos-actor-context]
+    - prefix: /workspaces
+      upstream: workspaces
+      extensions: [workspace-context]
 ```
 
 An extension can inspect verified identity and construct a header plan:
@@ -1259,17 +1259,17 @@ An extension can inspect verified identity and construct a header plan:
 use async_trait::async_trait;
 use lagos_core::{Extension, ExtensionContext, Rejection};
 
-struct PosActorContext;
+struct WorkspaceContext;
 
 #[async_trait]
-impl Extension for PosActorContext {
+impl Extension for WorkspaceContext {
     fn name(&self) -> &'static str {
-        "pos-actor-context"
+        "workspace-context"
     }
 
     async fn on_request(&self, cx: &mut ExtensionContext<'_>) -> Result<(), Rejection> {
         let subject = cx.require_identity()?.subject.clone();
-        cx.plan.set("x-cashier-user-id", subject);
+        cx.plan.set("x-verified-user-id", subject);
         Ok(())
     }
 }

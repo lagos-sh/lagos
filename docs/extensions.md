@@ -26,33 +26,31 @@ live lookup that the verified token and `gateway.yml` cannot provide:
 
 | Use case | What the extension does | Use YAML when |
 |---|---|---|
-| Merchant or tenant profile lookup | Fetches the caller's current company from an application service, rejects an unverified assignment, and sets trusted upstream headers | The verified token already carries the company claim; use `identity.claims` |
-| Branch or account selection | Checks a client-selected branch against the caller's allowed branches before emitting a privileged header | The allowed value is already a single verified claim; use a route `bind` |
+| Tenant membership lookup | Fetches the caller's current tenant from an application service, rejects an unverified assignment, and sets trusted upstream headers | The verified token already carries the tenant claim; use `identity.claims` |
+| Workspace or account selection | Checks a client-selected workspace against the caller's allowed workspaces before emitting a privileged header | The allowed value is already a single verified claim; use a route `bind` |
 | Live entitlement check | Calls a membership or permissions service and rejects access when the entitlement is absent or cannot be verified | Authentication tier and existing token claims fully express the rule |
 | Application-specific request context | Builds several related headers from verified identity and a business rule that cannot be expressed as direct claim mapping | Headers are direct claim copies or constants; use `identity.claims` and `inject.headers` |
 
-Petsocare provides three concrete examples:
+For example:
 
-- **POS cashier context:** A client sends `x-pos-branch-id: 12` with a POS
-  request. The extension looks up the verified cashier's company and allowed
-  branches, rejects branch 12 if it is not assigned to that cashier, and only
-  then emits trusted `x-company-id`, `x-branch-id` and permission headers.
-- **Merchant order stream:** A vendor requests
-  `/realtime/events/orders?merchantId=42`. The extension compares `42` with
-  the vendor's verified company from `legacy-service`; a mismatch is rejected
-  before the upstream can stream another merchant's orders.
-- **Bookings actor context:** The extension constructs headers for the
-  verified caller and merchant. For pexperts, a known independent worker,
-  a known employer, and an unknown employer remain three distinct states;
-  an unknown employer is never reported as independent.
+- **Workspace membership:** A client sends `x-requested-workspace: 12`. The
+  extension looks up the verified caller's memberships, rejects workspace 12
+  if it is not assigned to that caller, and only then emits a trusted
+  `x-workspace-id` header.
+- **Tenant-scoped event stream:** A caller requests `/events?tenantId=42`.
+  The extension compares `42` with the caller's verified tenant assignment;
+  a mismatch is rejected before the upstream starts streaming events.
+- **Live account status:** The extension checks an account service before
+  forwarding a sensitive operation. An active account may proceed; an inactive
+  account is rejected, and an unavailable lookup is never treated as active.
 
-These policies consult `legacy-service` because the current token does not
-carry all the company and branch information they need. They belong in the
-application's `ext/`, while Lagos keeps reusable routing and token
-verification. An extension receives the canonical request path, method,
-query, verified identity and client headers, and may reject the request or
-change the upstream header plan. It does **not** inspect or rewrite request
-and response bodies. Treat extension code as privileged gateway policy.
+These policies may consult an application service when the token does not
+carry the needed information. They belong in the application's `ext/`, while
+Lagos keeps reusable routing and token verification. An extension receives
+the canonical request path, method, query, verified identity and client
+headers, and may reject the request or change the upstream header plan. It
+does **not** inspect or rewrite request and response bodies. Treat extension
+code as privileged gateway policy.
 
 Keep network lookups bounded by a timeout and cache only answers whose freshness
 is acceptable for the policy. If the lookup cannot verify authority, reject
@@ -115,9 +113,3 @@ may require source changes. Pin the builder and runtime image tags together,
 test the custom image, and read [UPGRADING.md](../UPGRADING.md) before changing
 the pin. Existing handwritten custom binaries continue to work; adopting this
 folder convention is optional.
-
-For Petsocare, the current `pos`, `bookings`, `merchant_sse` and `legacy` modules
-can stay application-specific. Adopting this starter would move their module
-declarations and constructor list into `ext/src/lib.rs`, add their dependencies
-to `ext/Cargo.toml`, and remove the handwritten gateway entrypoint and builder
-Docker stages. It would not change the deployed policy by itself.
