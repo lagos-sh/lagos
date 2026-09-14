@@ -34,6 +34,92 @@ lagos run gateway.yml
 > deprecation period before 1.0. Evaluate it in development and test environments;
 > it is not yet recommended for production traffic. See [Project status](#project-status).
 
+## Quick start: two files, no Rust
+
+Create an empty `myapp/` directory with these two files (or copy them from
+[`examples/minimal/`](examples/minimal/)):
+
+`Dockerfile`:
+
+```dockerfile
+ARG LAGOS_IMAGE=ghcr.io/lagos-sh/lagos:0.1.4
+FROM ${LAGOS_IMAGE}
+COPY gateway.yml /etc/lagos/gateway.yml
+RUN ["lagos", "validate", "--allow-unset"]
+```
+
+`gateway.yml`:
+
+```yaml
+upstreams:
+  users: ${USERS_URL:-http://host.docker.internal:3000}
+
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      methods: [GET]
+```
+
+Build and run from `myapp/`:
+
+```bash
+docker build -t my-gateway .
+docker run --rm -p 8080:8080 \
+  --add-host=host.docker.internal:host-gateway my-gateway
+```
+
+`curl http://localhost:8080/health` should return gateway status. `GET /users`
+is forwarded to a service on your host's port 3000. To try it without an
+existing service, create a file named `users` in a temporary directory and
+serve that directory on port 3000 with `python3 -m http.server`. Set `USERS_URL`
+at `docker run` time when your service lives elsewhere, for example
+`-e USERS_URL=http://users:3000` on a shared Docker network. The default URL
+is for local development; the gateway's container cannot reach a host service
+through `localhost`.
+
+The image build checks the YAML before producing an image. An unset required
+`${VAR}` is reported as *unchecked* by `--allow-unset`; the container still
+refuses to start unless that value is supplied. Add routes and policy to this
+same file. Split them into `routes.yml` only when the table becomes hard to
+read. An `ext/` directory is not a supported drop-in mechanism: Rust
+extensions require a custom binary today. See [Extensions](#extensions).
+
+The CLI in this repository also provides `lagos init --docker` to create the
+same two-file starter; this command will be available in the next release.
+Plain `lagos init` creates a minimal YAML file for native use.
+
+### Where the `lagos` command runs
+
+The official image already contains the `lagos` binary and uses it as its
+entrypoint. In the two-file setup, these commands run **inside Docker**; they
+do not install anything on your machine:
+
+```bash
+docker run --rm my-gateway validate
+docker run --rm -v "$PWD:/app" my-gateway test
+docker run --rm -v "$PWD:/app" my-gateway diff old.yml gateway.yml
+```
+
+The last two commands read files from your current directory. `test` expects
+`gateway.test.yml` beside `gateway.yml`. The `test` and `diff` commands require
+the upcoming 0.1.4 image; the published 0.1.3 image does not include them.
+
+To type `lagos` directly in your host terminal, install it from source with
+Rust and Cargo:
+
+```bash
+git clone https://github.com/lagos-sh/lagos.git
+cd lagos
+cargo install --path crates/lagos --locked
+lagos --help
+```
+
+See [native prerequisites](#prerequisites) if the build needs system libraries.
+`lagos init --docker` runs wherever that binary runs, so the simplest no-Rust
+start is to copy the two example files. The release workflow currently
+publishes Docker images to GHCR, not a separate downloadable CLI binary.
+
 ## Where Lagos sits
 
 Lagos is one layer in a chain, not the whole edge:
@@ -77,6 +163,8 @@ answer before deploying, not by reading logs afterwards:
 lagos validate gateway.yml    # refuses to start on anything it cannot prove
 lagos routes   gateway.yml    # the whole surface, tier by tier
 lagos explain  --method GET --host api.example.com --path /users/42
+lagos test     gateway.yml    # check your request-policy examples
+lagos diff     old.yml gateway.yml # review the effective route surface
 lagos dev      gateway.yml    # narrates every request as it is decided
 ```
 
@@ -154,7 +242,8 @@ metrics; sampled requests also produce trace data.
 - [Know what it will do before traffic arrives](#know-what-it-will-do-before-traffic-arrives)
 - [How Lagos handles a request](#how-lagos-handles-a-request)
 - [Features](#features)
-- [Quick start](#quick-start)
+- [Quick start](#quick-start-two-files-no-rust)
+- [Native use](#native-use)
 - [Configuration](#configuration)
 - [Authentication and identity](#authentication-and-identity)
 - [Traffic management](#traffic-management)
@@ -219,7 +308,7 @@ Extensions are Rust, compiled in. A WASM policy runtime is a plausible later
 direction, but it is not implemented and the extension API is not stable enough
 to freeze into one.
 
-## Quick start
+## Native use
 
 ### Prerequisites
 
@@ -231,6 +320,9 @@ to freeze into one.
 The gateway itself does not require a database, Redis, or a separate control plane.
 
 ### Install from source
+
+This builds and installs the same `lagos` binary that is inside the Docker
+image. There is currently no standalone binary download in releases.
 
 ```bash
 git clone https://github.com/lagos-sh/lagos.git
@@ -280,9 +372,10 @@ curl http://127.0.0.1:8080/users
 so its response depends on that service being available. The route prefix is
 preserved: `/users/42` is forwarded as `/users/42`.
 
-For a generated starter configuration, run `lagos init` in a directory without
+For a generated minimal configuration, run `lagos init` in a directory without
 an existing `gateway.yml`. See [examples/gateway.yml](examples/gateway.yml) for
-additional configuration patterns.
+the full configuration reference. `lagos init --docker` creates a root-level
+Dockerfile and Docker-specific `gateway.yml` instead.
 
 ## Configuration
 
@@ -916,11 +1009,14 @@ logs and emits its own contextual failure records.
 
 | Command | Purpose |
 |---|---|
-| `lagos init [PATH]` | Generate a starter configuration; defaults to `gateway.yml` |
+| `lagos init [PATH]` | Generate a minimal native configuration; defaults to `gateway.yml` |
+| `lagos init --docker` | Generate root-level `gateway.yml` and `Dockerfile`; refuses to overwrite either unless `--force` is passed |
 | `lagos validate [CONFIG]` | Validate configuration, routes, and extension references |
 | `lagos validate --allow-unset` | The same checks where `${VAR}`s are not set, as in a container build |
 | `lagos routes [CONFIG]` | Display routes and upstreams |
 | `lagos explain --path PATH [--method METHOD] [--host HOST] [--config CONFIG]` | Explain routing and configured policy without serving traffic |
+| `lagos test [CONFIG] [CASES] [--allow-unset]` | Check request-policy examples; defaults to `gateway.test.yml` beside the config |
+| `lagos diff OLD NEW [--allow-unset]` | Compare effective routes, deny-list, mounts, and upstream targets |
 | `lagos dev [CONFIG]` | Serve with request narration and validated configuration reloads |
 | `lagos run [CONFIG]` | Start the gateway |
 
@@ -932,6 +1028,44 @@ lagos explain --method GET --host api.example.com --path /users/42
 
 Use `lagos --help` or `lagos <command> --help` for command options. Running
 `lagos` without a subcommand starts serving with the discovered configuration.
+
+### Test and review configuration changes
+
+Put `gateway.test.yml` beside `gateway.yml`. A small test suite can prove that
+an allowed request reaches the expected authentication tier and that a denied
+path stays denied:
+
+```yaml
+tests:
+  - name: catalogue is public
+    request: { path: /users/42, method: GET }
+    expect: { result: route, route: users, tier: public, upstream: users }
+  - name: writes are not allowlisted
+    request: { path: /users/42, method: DELETE }
+    expect: { result: no_route }
+```
+
+Run `lagos test gateway.yml`. A failing expectation exits nonzero and names the
+field that differed. For an ownership rule, supply `request.query`, optional
+`request.headers`, and a synthetic `request.identity` with `subject` and
+`claims`; `expect.bindings: true` or `false` checks all configured bindings.
+`request.listener: internal` checks machine-tier routing. Other results are
+`denied`, `outside_mount`, and `unsafe_path`.
+Use `--allow-unset` in CI when deployment-only variables are unavailable; the
+report names every value it could not check. As with `validate`, a boolean
+route switch needs a real value or a default so the route table can be parsed.
+
+These are offline routing and binding checks. The synthetic identity represents
+a caller whose token was **already verified**; `test` does not verify JWTs,
+execute extensions, contact upstreams, or simulate rate limits. Use end-to-end
+tests for those behaviours.
+
+`lagos diff old.yml new.yml` shows route additions, removals, tier and policy
+changes, deny-list changes, mounts, and changed upstream definitions. It hides
+upstream target values. It is a route-surface report, not a replacement for the
+YAML diff: review auth providers, injected headers, listeners, and secrets in
+the original files. `--allow-unset` can compare documents without production
+environment values, and explicitly names any values it left unchecked.
 
 ### Where the configuration is found
 
@@ -1010,20 +1144,19 @@ docker run --rm -p 8080:8080 \
 
 ### Building your own image
 
-Extend the published image and copy a configuration directory into
+Extend the published image and copy the root configuration into
 `/etc/lagos`, which is one of the locations searched when no path is given:
 
 ```
 myapp/
 ├── Dockerfile
-└── lagos/
-    ├── gateway.yml
-    └── routes.yml
+└── gateway.yml
 ```
 
 ```dockerfile
-FROM ghcr.io/lagos-sh/lagos:0.1.3
-COPY lagos/ /etc/lagos/
+ARG LAGOS_IMAGE=ghcr.io/lagos-sh/lagos:0.1.4
+FROM ${LAGOS_IMAGE}
+COPY gateway.yml /etc/lagos/gateway.yml
 RUN ["lagos", "validate", "--allow-unset"]
 ```
 
@@ -1032,7 +1165,9 @@ built above.
 
 The `RUN` line makes a broken configuration fail `docker build` rather than the
 deploy. It must be in exec form: the runtime image is distroless and has no
-shell for the usual `RUN lagos ...`.
+shell for the usual `RUN lagos ...`. If you later split routes into a separate
+`routes.yml`, add `COPY routes.yml /etc/lagos/routes.yml` before `RUN`; relative
+route paths are resolved beside `gateway.yml`.
 
 This path covers a deployment whose policy is entirely declarative. Compiled-in
 [extensions](#extensions) cannot be added this way — the image holds a built
@@ -1042,6 +1177,8 @@ against `lagos-core` and ships that instead.
 The image uses a distroless Debian runtime and runs as a nonroot user. Pass any
 required configuration environment variables to the container. Mount separate
 route files at their configured paths when using file-based routes.
+For Docker Compose and Kubernetes integration, see the
+[two-file deployment guide](docs/deploying.md).
 
 ### Listeners and graceful shutdown
 

@@ -6,6 +6,15 @@ moved forward deliberately rather than discovered in production.
 
 ---
 
+## 0.1.3 → 0.1.4 — CLI developer experience
+
+No gateway configuration keys or proxy runtime semantics changed. Existing
+`gateway.yml` files continue to load. `lagos init` now generates a minimal
+one-route file; use `examples/gateway.yml` for the full reference. The new
+`lagos init --docker`, `lagos test`, and `lagos diff` commands are optional.
+
+---
+
 ## 0.1.2 → 0.1.3 — request-path hardening
 
 Every new setting has a default, so an existing `gateway.yml` still parses and

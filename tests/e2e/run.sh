@@ -96,6 +96,151 @@ else
   bad "init hints are copy-pasteable" "$(grep -m1 'validate' "$WORK/init.log")"
 fi
 
+# A first run should have one small config, while Docker scaffolding should
+# produce exactly the public two-file example with no hand edits.
+if ( cd "$NAMEDIR" && ./my-gateway validate gateway.yml >"$WORK/minimal.log" 2>&1 ) \
+  && grep -q 'routes      1' "$WORK/minimal.log"; then
+  ok "init creates a valid one-route starter"
+else
+  bad "init creates a valid one-route starter" "$(tail -1 "$WORK/minimal.log")"
+fi
+
+DOCKERDIR="$WORK/docker-starter"
+mkdir -p "$DOCKERDIR"
+cp "$BIN/lagos" "$DOCKERDIR/my-gateway"
+if ( cd "$DOCKERDIR" && ./my-gateway init --docker >"$WORK/docker-init.log" 2>&1 ) \
+  && cmp -s "$DOCKERDIR/Dockerfile" examples/minimal/Dockerfile \
+  && cmp -s "$DOCKERDIR/gateway.yml" examples/minimal/gateway.yml \
+  && ( cd "$DOCKERDIR" && ./my-gateway validate --allow-unset >/dev/null ); then
+  ok "init --docker matches the valid two-file example"
+else
+  bad "init --docker matches the valid two-file example"
+fi
+
+rm -f "$DOCKERDIR/gateway.yml"
+if ( cd "$DOCKERDIR" && ./my-gateway init --docker >"$WORK/docker-refusal.log" 2>&1 ); then
+  bad "init --docker refuses to overwrite an existing Dockerfile"
+elif [ ! -e "$DOCKERDIR/gateway.yml" ]; then
+  ok "init --docker checks both destinations before writing"
+else
+  bad "init --docker checked only one destination"
+fi
+
+POLICYDIR="$WORK/policy"
+mkdir -p "$POLICYDIR"
+cp "$BIN/lagos" "$POLICYDIR/lagos"
+cat >"$POLICYDIR/gateway.yml" <<'YAML'
+server:
+  mounts: [/api]
+  internal_listen: 127.0.0.1:8081
+auth:
+  machine: { secret: test-machine-secret }
+upstreams:
+  users: http://localhost:3000
+routes:
+  internal: [/admin]
+  public:
+    - { id: catalog, prefix: /products, upstream: users, methods: [GET], host: api.example.com }
+  authenticated:
+    - id: orders
+      prefix: /orders
+      upstream: users
+      bind: { query.accountId: identity.account_id }
+  machine:
+    - { id: jobs, prefix: /jobs, upstream: users, methods: [POST] }
+YAML
+cat >"$POLICYDIR/gateway.test.yml" <<'YAML'
+tests:
+  - name: public catalog on its host
+    request: { path: /api/products/1, host: api.example.com }
+    expect: { result: route, route: catalog, tier: public, upstream: users }
+  - name: host restriction
+    request: { path: /api/products/1, host: other.example.com }
+    expect: { result: no_route }
+  - name: wrong method
+    request: { path: /api/products/1, method: POST, host: api.example.com }
+    expect: { result: no_route }
+  - name: deny-list before routing
+    request: { path: /api/admin/users }
+    expect: { result: denied }
+  - name: outside mount
+    request: { path: /products }
+    expect: { result: outside_mount }
+  - name: unsafe path
+    request: { path: /api/%2e%2e/products }
+    expect: { result: unsafe_path }
+  - name: binding permits owner
+    request:
+      path: /api/orders
+      query: accountId=11
+      identity: { subject: "7", claims: { account_id: 11 } }
+    expect: { result: route, route: orders, tier: authenticated, bindings: true }
+  - name: binding refuses another account
+    request:
+      path: /api/orders
+      query: accountId=12
+      identity: { subject: "7", claims: { account_id: 11 } }
+    expect: { result: route, route: orders, bindings: false }
+  - name: machine route is absent on public listener
+    request: { path: /api/jobs, method: POST }
+    expect: { result: no_route }
+  - name: machine route on internal listener
+    request: { path: /api/jobs, method: POST, listener: internal }
+    expect: { result: route, route: jobs, tier: machine }
+YAML
+if ( cd "$POLICYDIR" && ./lagos test >"$WORK/policy-test.log" 2>&1 ) \
+  && grep -q '10 passed, 0 failed' "$WORK/policy-test.log"; then
+  ok "lagos test checks routes, tiers, binds, and listener isolation"
+else
+  bad "lagos test checks routes, tiers, binds, and listener isolation" "$(tail -3 "$WORK/policy-test.log")"
+fi
+
+sed 's#http://localhost:3000#${POLICY_UPSTREAM_URL}#' "$POLICYDIR/gateway.yml" >"$POLICYDIR/unset.yml"
+if ( cd "$POLICYDIR" && env -u POLICY_UPSTREAM_URL ./lagos test unset.yml gateway.test.yml --allow-unset >"$WORK/policy-unset.log" 2>&1 ) \
+  && grep -q 'Unchecked environment values:.*POLICY_UPSTREAM_URL' "$WORK/policy-unset.log"; then
+  ok "lagos test can check structure without deployment values"
+else
+  bad "lagos test can check structure without deployment values" "$(tail -3 "$WORK/policy-unset.log")"
+fi
+
+sed 's/tier: public/tier: authenticated/' "$POLICYDIR/gateway.test.yml" >"$POLICYDIR/failing.test.yml"
+if ( cd "$POLICYDIR" && ./lagos test gateway.yml failing.test.yml >"$WORK/policy-fail.log" 2>&1 ); then
+  bad "lagos test exits nonzero on a wrong expectation"
+elif grep -q 'tier: expected "authenticated", got Some("public")' "$WORK/policy-fail.log"; then
+  ok "lagos test names the failed expectation"
+else
+  bad "lagos test names the failed expectation" "$(tail -3 "$WORK/policy-fail.log")"
+fi
+
+cat >"$POLICYDIR/new.yml" <<'YAML'
+server:
+  mounts: [/api]
+  internal_listen: 127.0.0.1:8081
+auth:
+  machine: { secret: test-machine-secret }
+upstreams:
+  users: http://localhost:3000
+  accounts: http://localhost:3001
+routes:
+  authenticated:
+    - { id: catalog, prefix: /products, upstream: users, methods: [GET], host: api.example.com }
+    - { id: accounts, prefix: /accounts, upstream: accounts, methods: [GET] }
+    - id: orders
+      prefix: /orders
+      upstream: users
+      bind: { query.accountId: identity.account_id }
+  machine:
+    - { id: jobs, prefix: /jobs, upstream: users, methods: [POST] }
+YAML
+if ( cd "$POLICYDIR" && ./lagos diff gateway.yml new.yml >"$WORK/policy-diff.log" 2>&1 ) \
+  && grep -q 'route catalog: tier: public → authenticated' "$WORK/policy-diff.log" \
+  && grep -q 'route accounts' "$WORK/policy-diff.log" \
+  && grep -q 'denied /admin' "$WORK/policy-diff.log"; then
+  ok "lagos diff reports tier changes, added routes, and removed denies"
+else
+  bad "lagos diff reports tier changes, added routes, and removed denies" "$(tail -5 "$WORK/policy-diff.log")"
+fi
+
 # The same name has to reach the error path, not just the happy path.
 # Captured rather than piped: this command is *meant* to exit non-zero, and
 # `set -o pipefail` would report the whole pipeline as failed even on a match.

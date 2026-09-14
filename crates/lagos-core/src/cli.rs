@@ -18,6 +18,8 @@ use crate::routes::{
     file::{FileRouteProvider, InlineRouteProvider},
 };
 
+mod policy;
+
 const DEFAULT_CONFIG: &str = "gateway.yml";
 
 /// Candidate locations tried when no path is given, so `run` works in a
@@ -89,6 +91,9 @@ enum Command {
         /// Overwrite an existing file
         #[arg(long)]
         force: bool,
+        /// Create a two-file Docker deployment (gateway.yml and Dockerfile)
+        #[arg(long)]
+        docker: bool,
     },
     /// Serve traffic
     Run {
@@ -115,6 +120,26 @@ enum Command {
     Routes {
         #[arg(value_name = "CONFIG")]
         path: Option<String>,
+    },
+    /// Check request and policy examples without contacting upstreams
+    Test {
+        #[arg(value_name = "CONFIG")]
+        config: Option<String>,
+        #[arg(value_name = "CASES")]
+        cases: Option<String>,
+        /// Check structure where `${VAR}`s are not set
+        #[arg(long)]
+        allow_unset: bool,
+    },
+    /// Compare the effective route surface of two configurations
+    Diff {
+        #[arg(value_name = "OLD")]
+        old: String,
+        #[arg(value_name = "NEW")]
+        new: String,
+        /// Check structure where `${VAR}`s are not set
+        #[arg(long)]
+        allow_unset: bool,
     },
     /// Show how one request would be handled
     Explain {
@@ -204,10 +229,24 @@ impl Cli {
             Some(Command::Validate { path, allow_unset }) => {
                 validate(path, &registry_from(make_extensions)?, allow_unset)
             }
-            // These three neither serve traffic nor resolve an extension name,
-            // so they must work with no environment at all.
-            Some(Command::Init { path, force }) => init(&path, force),
+            // These commands neither serve traffic nor resolve an extension
+            // name, so they must work without extension setup.
+            Some(Command::Init {
+                path,
+                force,
+                docker,
+            }) => init(&path, force, docker),
             Some(Command::Routes { path }) => routes(path),
+            Some(Command::Test {
+                config,
+                cases,
+                allow_unset,
+            }) => policy::test(config, cases, allow_unset),
+            Some(Command::Diff {
+                old,
+                new,
+                allow_unset,
+            }) => policy::diff(&old, &new, allow_unset),
             Some(Command::Explain {
                 method,
                 path,
@@ -550,6 +589,24 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Strip the longest configured mount using the same segment boundary rule
+/// as the request path. Shared by `explain` and offline policy tests.
+fn strip_mount<'a>(cfg: &'a ResolvedConfig, request_path: &str) -> Option<(&'a str, String)> {
+    cfg.base_paths.iter().find_map(|base| {
+        let p = request_path.trim_start_matches('/');
+        if base.is_empty() {
+            return Some((base.as_str(), p.to_string()));
+        }
+        let rest = p.strip_prefix(base.as_str())?;
+        if rest.is_empty() {
+            Some((base.as_str(), String::new()))
+        } else {
+            rest.strip_prefix('/')
+                .map(|r| (base.as_str(), r.to_string()))
+        }
+    })
+}
+
 fn explain(
     config: Option<String>,
     method: &str,
@@ -566,19 +623,7 @@ fn explain(
     }
 
     // 1. Mount. Longest first, matching the proxy.
-    let stripped = cfg.base_paths.iter().find_map(|base| {
-        let p = request_path.trim_start_matches('/');
-        if base.is_empty() {
-            return Some((base.as_str(), p.to_string()));
-        }
-        let rest = p.strip_prefix(base.as_str())?;
-        if rest.is_empty() {
-            Some((base.as_str(), String::new()))
-        } else {
-            rest.strip_prefix('/')
-                .map(|r| (base.as_str(), r.to_string()))
-        }
-    });
+    let stripped = strip_mount(&cfg, request_path);
 
     let Some((mount, sub)) = stripped else {
         println!("  ✗ no mount matches. Mounts are: {:?}", cfg.base_paths);
@@ -742,18 +787,50 @@ fn explain(
     Ok(())
 }
 
-const STARTER: &str = include_str!("../templates/gateway.yml");
+const STARTER: &str = include_str!("../templates/minimal-gateway.yml");
+const DOCKER_STARTER: &str = include_str!("../templates/docker-gateway.yml");
+const DOCKERFILE_TEMPLATE: &str = include_str!("../templates/Dockerfile");
 
-fn init(path: &str, force: bool) -> anyhow::Result<()> {
-    if Path::new(path).exists() && !force {
-        anyhow::bail!("{path} already exists. Pass --force to overwrite it.");
+fn init(path: &str, force: bool, docker: bool) -> anyhow::Result<()> {
+    if docker && path != DEFAULT_CONFIG {
+        anyhow::bail!(
+            "--docker writes gateway.yml and a Dockerfile beside it; omit PATH or use gateway.yml"
+        );
     }
-    std::fs::write(path, STARTER)?;
+    let dockerfile = DOCKERFILE_TEMPLATE.replace("{{LAGOS_VERSION}}", env!("CARGO_PKG_VERSION"));
+    let files = if docker {
+        vec![(path, DOCKER_STARTER), ("Dockerfile", dockerfile.as_str())]
+    } else {
+        vec![(path, STARTER)]
+    };
+    // Check every destination before writing any of them. A directory that
+    // already contains either file must stay untouched unless --force is
+    // explicit, including when the other destination does not yet exist.
+    for (destination, _) in &files {
+        if Path::new(destination).exists() && !force {
+            anyhow::bail!("{destination} already exists. Pass --force to overwrite it.");
+        }
+        if Path::new(destination).is_dir() {
+            anyhow::bail!("{destination} is a directory, not a file.");
+        }
+    }
+    for (destination, contents) in &files {
+        std::fs::write(destination, contents)?;
+    }
     let bin = bin_name();
-    println!("Created {path}\n");
-    println!("  {bin} validate {path}   check it");
-    println!("  {bin} routes   {path}   see the route table");
-    println!("  {bin} run      {path}   serve traffic");
+    if docker {
+        println!("Created gateway.yml and Dockerfile\n");
+        println!("  docker build -t my-gateway .");
+        println!(
+            "  docker run --rm -p 8080:8080 --add-host=host.docker.internal:host-gateway my-gateway"
+        );
+    } else {
+        println!("Created {path}\n");
+        println!("  {bin} validate {path}   check it");
+        println!("  {bin} routes   {path}   see the route table");
+        println!("  {bin} run      {path}   serve traffic");
+        println!("\nFor a two-file Docker deployment: {bin} init --docker");
+    }
     Ok(())
 }
 

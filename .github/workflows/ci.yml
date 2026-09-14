@@ -6,6 +6,16 @@ on:
   pull_request:
 
 jobs:
+  starter:
+    name: Two-file Docker starter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Before the next tag exists, test the starter against the last published
+      # image. The release workflow tests it again against the new image.
+      - run: docker build --pull --build-arg LAGOS_IMAGE=ghcr.io/lagos-sh/lagos:0.1.3 -t lagos-starter:ci examples/minimal
+      - run: docker run --rm lagos-starter:ci validate
+
   check:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,10 @@
+# The default upstream runs on your host, outside this container. Set USERS_URL
+# to a service name or other reachable URL when you deploy.
+upstreams:
+  users: ${USERS_URL:-http://host.docker.internal:3000}
+
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      methods: [GET]

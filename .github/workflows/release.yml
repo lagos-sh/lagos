@@ -47,6 +47,11 @@ jobs:
       - name: End-to-end suite
         run: ./tests/e2e/run.sh
 
+      - name: Two-file Docker starter
+        run: |
+          docker build --pull --build-arg LAGOS_IMAGE=ghcr.io/lagos-sh/lagos:0.1.3 -t lagos-starter:verify examples/minimal
+          docker run --rm lagos-starter:verify validate
+
       # Advisories, licences and sources. Was configured but never run, so a
       # licence the allow-list does not cover, or a new advisory, reached a
       # release unnoticed.
@@ -196,6 +201,11 @@ jobs:
           out=$(docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} --version)
           echo "$out"
           echo "$out" | grep -q "${GITHUB_REF_NAME#v}"
+
+      - name: Smoke test two-file starter on published image
+        run: |
+          docker build --build-arg LAGOS_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} -t lagos-starter:release examples/minimal
+          docker run --rm lagos-starter:release validate
 
       - name: Report
         run: |

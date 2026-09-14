@@ -1,0 +1,10 @@
+# Start with one upstream and one allowlisted route. Add auth and policy only
+# when this request path works. The Lagos README documents the full surface.
+upstreams:
+  users: ${USERS_URL:-http://localhost:3000}
+
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      methods: [GET]

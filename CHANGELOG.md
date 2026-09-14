@@ -3,6 +3,21 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## 0.1.4 — two-file setup and policy checks
+
+- `lagos init` now writes a minimal one-route configuration; the larger
+  configuration reference remains in `examples/gateway.yml`.
+- `lagos init --docker` creates root-level `gateway.yml` and `Dockerfile`,
+  pinning the image to the generating CLI's version. It checks both destinations
+  before writing and requires `--force` to replace existing files.
+- Added a copyable two-file example and Docker Compose/Kubernetes deployment
+  guidance. No proxy runtime or configuration semantics changed.
+- `lagos test` checks offline request selection, auth tiers, listener isolation,
+  and ownership bindings against a `gateway.test.yml` suite.
+- `lagos diff` reports effective route-surface changes without printing upstream
+  target values; it labels settings outside its scope and unchecked environment
+  values.
+
 ## 0.1.3 — request-path hardening
 
 ### Added

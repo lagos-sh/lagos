@@ -17,8 +17,6 @@ Ordered roughly by how often the absence bites.
 | | Why |
 |---|---|
 | **Production validation** | Load and soak testing, memory behaviour under sustained traffic. The single biggest gap between "tested" and "trustworthy" — see [Project status](README.md#project-status) |
-| **`lagos diff old.yml new.yml`** | Configuration is infrastructure-as-code; a reviewer needs to see what a PR actually changes to the route surface, not to the YAML |
-| **`lagos test`** | Assert routing and policy outcomes without upstreams. Unit tests for gateway configuration |
 | **Distributed rate limiting** | Counters are per process today: 100/min across three replicas admits 300/min. Fits behind the existing `Limiter` interface |
 | **Stale-while-error on JWKS** | An identity provider outage currently stops authenticated traffic, even though the cached keys were almost certainly still valid |
 | **Total request deadline** | Timeouts are per read, per write and per connect. A client making slow but steady progress stays inside all of them indefinitely |
