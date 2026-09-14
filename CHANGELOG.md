@@ -3,7 +3,7 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## 0.1.4 — two-file setup and policy checks
+## 0.1.4 — Docker starters and policy checks (unreleased)
 
 - `lagos init` now writes a minimal one-route configuration; the larger
   configuration reference remains in `examples/gateway.yml`.
@@ -17,6 +17,14 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 - `lagos diff` reports effective route-surface changes without printing upstream
   target values; it labels settings outside its scope and unchecked environment
   values.
+- Added an optional `ext/` starter via `lagos init --docker --extensions` and a
+  version-matched builder image that compiles its policy into a custom gateway
+  binary without a handwritten entrypoint or Docker toolchain setup. The same
+  builder runs extension unit tests with `lagos-build /work/ext test`.
+- Convention-based extensions can declare their names for
+  `validate --allow-unset`, so a build checks route references without
+  constructing extensions or needing runtime secrets. Ordinary validation and
+  serving still construct them.
 
 ## 0.1.3 — request-path hardening
 

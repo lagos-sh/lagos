@@ -7,7 +7,7 @@ on:
 
 jobs:
   starter:
-    name: Two-file Docker starter
+    name: Docker starters
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,6 +15,13 @@ jobs:
       # image. The release workflow tests it again against the new image.
       - run: docker build --pull --build-arg LAGOS_IMAGE=ghcr.io/lagos-sh/lagos:0.1.3 -t lagos-starter:ci examples/minimal
       - run: docker run --rm lagos-starter:ci validate
+      - name: Extension builder and starter
+        run: |
+          docker build --target build -t lagos-builder:ci .
+          docker run --rm -v "$PWD/examples/extension/ext:/work/ext:ro" lagos-builder:ci lagos-build /work/ext test
+          docker build --build-arg LAGOS_BUILDER=lagos-builder:ci --build-arg LAGOS_RUNTIME=ghcr.io/lagos-sh/lagos:0.1.3 -t lagos-extension:ci examples/extension
+          docker run --rm lagos-extension:ci validate
+          bash tests/extension-smoke.sh lagos-extension:ci
 
   check:
     runs-on: ubuntu-latest

@@ -1,12 +1,12 @@
 name: Release
 
-# Publishes the stock `lagos` image to GitHub Packages (ghcr.io) on a version
-# tag. Extensions are not in this image by design — a deployment that compiles
-# its own policy links `lagos-core` and builds its own binary.
+# Publishes the stock `lagos` runtime and matching extension builder to GHCR
+# on a version tag. The stock runtime has no application extensions compiled
+# in; the builder links an app's ext/ crate to the same lagos-core source.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Produces ghcr.io/lagos-sh/lagos:0.1.0, :0.1 and :latest.
+# Produces lagos and lagos-builder images tagged 0.1.0, 0.1 and latest.
 on:
   push:
     tags: ['v*']
@@ -24,6 +24,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  BUILDER_IMAGE_NAME: ${{ github.repository }}-builder
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -51,6 +52,14 @@ jobs:
         run: |
           docker build --pull --build-arg LAGOS_IMAGE=ghcr.io/lagos-sh/lagos:0.1.3 -t lagos-starter:verify examples/minimal
           docker run --rm lagos-starter:verify validate
+
+      - name: Extension builder and starter
+        run: |
+          docker build --target build -t lagos-builder:verify .
+          docker run --rm -v "$PWD/examples/extension/ext:/work/ext:ro" lagos-builder:verify lagos-build /work/ext test
+          docker build --build-arg LAGOS_BUILDER=lagos-builder:verify --build-arg LAGOS_RUNTIME=ghcr.io/lagos-sh/lagos:0.1.3 -t lagos-extension:verify examples/extension
+          docker run --rm lagos-extension:verify validate
+          bash tests/extension-smoke.sh lagos-extension:verify
 
       # Advisories, licences and sources. Was configured but never run, so a
       # licence the allow-list does not cover, or a new advisory, reached a
@@ -144,6 +153,32 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Build and push extension builder by digest
+        id: builder_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: build
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+          provenance: false
+
+      - name: Export builder digest
+        run: |
+          mkdir -p /tmp/builder-digests
+          digest="${{ steps.builder_build.outputs.digest }}"
+          touch "/tmp/builder-digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: builder-digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/builder-digests/*
+          if-no-files-found: error
+          retention-days: 1
+
   merge:
     name: Publish manifest
     needs: build
@@ -153,6 +188,12 @@ jobs:
         with:
           path: /tmp/digests
           pattern: digests-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/builder-digests
+          pattern: builder-digests-*
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
@@ -193,6 +234,29 @@ jobs:
       - name: Inspect
         run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
+      - name: Builder tags
+        id: builder_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=${{ !contains(github.ref_name, '-') }}
+
+      - name: Publish extension builder manifest
+        working-directory: /tmp/builder-digests
+        run: |
+          # One -t pair per tag and one digest reference per architecture.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect extension builder
+        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}:${{ steps.builder_meta.outputs.version }}
+
       # Distroless has no shell, so this also proves the entrypoint resolves and
       # the binary's dynamic linkage is satisfied in the runtime image — the two
       # things a builder-stage test cannot tell you.
@@ -207,6 +271,12 @@ jobs:
           docker build --build-arg LAGOS_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} -t lagos-starter:release examples/minimal
           docker run --rm lagos-starter:release validate
 
+      - name: Smoke test extension starter on published images
+        run: |
+          docker build --build-arg LAGOS_BUILDER=${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}:${{ steps.builder_meta.outputs.version }} --build-arg LAGOS_RUNTIME=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} -t lagos-extension:release examples/extension
+          docker run --rm lagos-extension:release validate
+          bash tests/extension-smoke.sh lagos-extension:release
+
       - name: Report
         run: |
           {
@@ -214,7 +284,9 @@ jobs:
             echo
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
+            echo "${{ steps.builder_meta.outputs.tags }}"
             echo '```'
             echo
             echo "    docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+            echo "    docker pull ${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}:${{ steps.builder_meta.outputs.version }}"
           } >> "$GITHUB_STEP_SUMMARY"

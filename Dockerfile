@@ -25,6 +25,12 @@ COPY crates crates
 RUN find crates -name '*.rs' -exec touch {} + \
     && cargo build --release --locked --bin lagos
 
+# This stage is also published as the version-matched extension builder. It
+# carries the Lagos source and toolchain and generates the small entrypoint
+# that links a conventional ext/ crate into one binary.
+COPY LICENSE NOTICE /src/
+COPY --chmod=755 builder/lagos-build /usr/local/bin/lagos-build
+
 # Run
 FROM gcr.io/distroless/cc-debian12:nonroot
 WORKDIR /app

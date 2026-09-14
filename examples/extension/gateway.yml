@@ -1,0 +1,10 @@
+# Add custom behavior by naming an extension registered in ext/src/lib.rs.
+upstreams:
+  users: ${USERS_URL:-http://host.docker.internal:3000}
+
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      methods: [GET]
+      extensions: [example-header]

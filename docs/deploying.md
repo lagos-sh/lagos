@@ -64,3 +64,8 @@ and copy `routes.yml` beside it in the image. The main config needs a new image
 and process restart after a change. A route file hot-reloads only if it is
 mounted as a changing file and `routes.reload` is configured; a file baked into
 an immutable image changes only when a new image is deployed.
+
+If a route needs application-specific code or a live authorization lookup,
+use the optional [`ext/` convention](extensions.md). Its builder image compiles
+the extension into the gateway binary; the two-file stock image cannot load
+Rust source at runtime.

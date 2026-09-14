@@ -1,0 +1,13 @@
+[package]
+name = "lagos-app-ext"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "lagos_app_ext"
+
+[dependencies]
+lagos-core.workspace = true
+anyhow = "1"
+async-trait = "0.1"

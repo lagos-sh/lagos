@@ -85,9 +85,14 @@ same file. Split them into `routes.yml` only when the table becomes hard to
 read. An `ext/` directory is not a supported drop-in mechanism: Rust
 extensions require a custom binary today. See [Extensions](#extensions).
 
-The CLI in this repository also provides `lagos init --docker` to create the
-same two-file starter; this command will be available in the next release.
-Plain `lagos init` creates a minimal YAML file for native use.
+For custom request policy, the optional [extension starter](examples/extension/)
+adds an `ext/` folder. Lagos supplies a version-matched builder image that
+compiles it into the gateway binary; see [Building with extensions](docs/extensions.md).
+
+The unreleased 0.1.4 CLI in this repository provides `lagos init --docker` to
+create the same two-file starter and `lagos init --docker --extensions` to
+create the optional custom-code starter. Plain `lagos init` creates a minimal
+YAML file for native use.
 
 ### Where the `lagos` command runs
 
@@ -1011,6 +1016,7 @@ logs and emits its own contextual failure records.
 |---|---|
 | `lagos init [PATH]` | Generate a minimal native configuration; defaults to `gateway.yml` |
 | `lagos init --docker` | Generate root-level `gateway.yml` and `Dockerfile`; refuses to overwrite either unless `--force` is passed |
+| `lagos init --docker --extensions` | Generate the custom-code starter with `ext/Cargo.toml` and `ext/src/lib.rs` |
 | `lagos validate [CONFIG]` | Validate configuration, routes, and extension references |
 | `lagos validate --allow-unset` | The same checks where `${VAR}`s are not set, as in a container build |
 | `lagos routes [CONFIG]` | Display routes and upstreams |
@@ -1234,6 +1240,8 @@ and upstream request construction. See [path.rs](crates/lagos-core/src/path.rs).
 Custom gateway binaries link `lagos-core`, implement the
 [`Extension` trait](crates/lagos-core/src/ext.rs), and register extensions before
 calling the CLI or runtime. The stock binary has no custom extensions registered.
+The [extension starter](docs/extensions.md) provides a pinned builder image and
+generates the entrypoint for an optional `ext/` crate.
 
 Routes refer to registered extensions by name:
 

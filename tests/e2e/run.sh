@@ -126,6 +126,34 @@ else
   bad "init --docker checked only one destination"
 fi
 
+EXTDIR="$WORK/extension-starter"
+mkdir -p "$EXTDIR"
+cp "$BIN/lagos" "$EXTDIR/lagos"
+if ( cd "$EXTDIR" && ./lagos init --docker --extensions >"$WORK/ext-init.log" 2>&1 ) \
+  && cmp -s "$EXTDIR/Dockerfile" examples/extension/Dockerfile \
+  && cmp -s "$EXTDIR/gateway.yml" examples/extension/gateway.yml \
+  && cmp -s "$EXTDIR/ext/Cargo.toml" examples/extension/ext/Cargo.toml \
+  && cmp -s "$EXTDIR/ext/src/lib.rs" examples/extension/ext/src/lib.rs; then
+  ok "init --docker --extensions matches the optional extension example"
+else
+  bad "init --docker --extensions matches the optional extension example"
+fi
+
+rm -f "$EXTDIR/gateway.yml"
+if ( cd "$EXTDIR" && ./lagos init --docker --extensions >"$WORK/ext-refusal.log" 2>&1 ); then
+  bad "extension starter refuses to overwrite an existing ext/ file"
+elif [ ! -e "$EXTDIR/gateway.yml" ]; then
+  ok "extension starter checks all destinations before writing"
+else
+  bad "extension starter checked only some destinations"
+fi
+
+if ( cd "$EXTDIR" && ./lagos init --extensions >"$WORK/ext-no-docker.log" 2>&1 ); then
+  bad "--extensions requires --docker"
+else
+  ok "--extensions requires --docker"
+fi
+
 POLICYDIR="$WORK/policy"
 mkdir -p "$POLICYDIR"
 cp "$BIN/lagos" "$POLICYDIR/lagos"

@@ -1,0 +1,81 @@
+#!/bin/sh
+# Compile the conventional ext/ crate into a Lagos gateway. The builder image
+# owns the Lagos source and generated entrypoint, so applications only supply
+# their policy code and dependencies.
+set -eu
+
+if [ "${1:-}" = "--help" ]; then
+    echo "Usage: lagos-build EXT_DIR [test]"
+    echo "EXT_DIR must contain Cargo.toml and src/lib.rs for lagos-app-ext."
+    exit 0
+fi
+
+extension_dir=${1:-/work/ext}
+mode=${2:-build}
+source_dir=${LAGOS_SOURCE_DIR:-/src}
+output_dir=${LAGOS_OUTPUT_DIR:-/out}
+case "$mode" in
+    build|test) ;;
+    *) echo "lagos-build: unknown mode $mode (expected build or test)" >&2; exit 1 ;;
+esac
+if [ ! -f "$extension_dir/Cargo.toml" ] || [ ! -f "$extension_dir/src/lib.rs" ]; then
+    echo "lagos-build: $extension_dir must contain Cargo.toml and src/lib.rs" >&2
+    exit 1
+fi
+
+build_root=$(mktemp -d /tmp/lagos-app.XXXXXX)
+trap 'rm -rf "$build_root"' EXIT HUP INT TERM
+mkdir -p "$build_root/app/src" "$output_dir"
+cp -R "$extension_dir" "$build_root/ext"
+
+cat > "$build_root/Cargo.toml" <<'TOML'
+[workspace]
+resolver = "2"
+members = ["app", "ext"]
+
+[workspace.dependencies]
+TOML
+printf 'lagos-core = { path = "%s/crates/lagos-core" }\n' "$source_dir" >> "$build_root/Cargo.toml"
+
+cat > "$build_root/app/Cargo.toml" <<'TOML'
+[package]
+name = "lagos-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "lagos"
+path = "src/main.rs"
+
+[dependencies]
+lagos-core.workspace = true
+lagos-app-ext = { path = "../ext" }
+anyhow = "1"
+TOML
+
+cat > "$build_root/app/src/main.rs" <<'RUST'
+fn main() -> anyhow::Result<()> {
+    lagos_core::Cli::run_with_extension_names(lagos_app_ext::NAMES, lagos_app_ext::extensions)
+}
+RUST
+
+# Reuse the pinned Lagos dependency graph where possible. Teams may commit a
+# lockfile at ext/Cargo.lock; when present it is enforced exactly.
+if [ -f "$extension_dir/Cargo.lock" ]; then
+    cp "$extension_dir/Cargo.lock" "$build_root/Cargo.lock"
+    locked=--locked
+else
+    cp "$source_dir/Cargo.lock" "$build_root/Cargo.lock"
+    locked=
+fi
+
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$source_dir/target}"
+if [ "$mode" = "test" ]; then
+    cargo test --manifest-path "$build_root/Cargo.toml" $locked -p lagos-app-ext
+    exit 0
+fi
+cargo build --release --manifest-path "$build_root/Cargo.toml" $locked --bin lagos
+cp "$CARGO_TARGET_DIR/release/lagos" "$output_dir/lagos"
+cp "$build_root/Cargo.lock" "$output_dir/Cargo.lock"
+echo "lagos-build: wrote $output_dir/lagos"

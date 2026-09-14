@@ -12,6 +12,10 @@ No gateway configuration keys or proxy runtime semantics changed. Existing
 `gateway.yml` files continue to load. `lagos init` now generates a minimal
 one-route file; use `examples/gateway.yml` for the full reference. The new
 `lagos init --docker`, `lagos test`, and `lagos diff` commands are optional.
+The new `lagos init --docker --extensions` starter and matching builder image
+are also optional. Existing custom binaries can keep calling `Cli::run`; only
+convention-based builds use `Cli::run_with_extension_names` to check names
+without constructing extensions during `validate --allow-unset`.
 
 ---
 

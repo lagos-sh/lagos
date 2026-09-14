@@ -94,6 +94,9 @@ enum Command {
         /// Create a two-file Docker deployment (gateway.yml and Dockerfile)
         #[arg(long)]
         docker: bool,
+        /// Include a conventional ext/ crate compiled into the gateway image
+        #[arg(long, requires = "docker")]
+        extensions: bool,
     },
     /// Serve traffic
     Run {
@@ -205,6 +208,27 @@ impl Cli {
     where
         F: FnOnce() -> anyhow::Result<Vec<Arc<dyn Extension>>>,
     {
+        Self::run_inner(None, make_extensions)
+    }
+
+    /// Run a gateway whose available extension names are known before their
+    /// runtime constructors need credentials or network access. The names are
+    /// checked by `validate --allow-unset`; `run` and ordinary `validate` still
+    /// build the actual extensions and refuse missing registrations.
+    pub fn run_with_extension_names<F>(
+        extension_names: &[&str],
+        make_extensions: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> anyhow::Result<Vec<Arc<dyn Extension>>>,
+    {
+        Self::run_inner(Some(extension_names), make_extensions)
+    }
+
+    fn run_inner<F>(extension_names: Option<&[&str]>, make_extensions: F) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> anyhow::Result<Vec<Arc<dyn Extension>>>,
+    {
         // Deliberately not a closure over `registry`: `make_extensions` is
         // FnOnce, so each arm may call it at most once, and the type checker
         // enforces that rather than a convention.
@@ -227,7 +251,16 @@ impl Cli {
             Some(Command::Run { path }) => serve(path, registry_from(make_extensions)?),
             Some(Command::Dev { path }) => dev(path, registry_from(make_extensions)?),
             Some(Command::Validate { path, allow_unset }) => {
-                validate(path, &registry_from(make_extensions)?, allow_unset)
+                if allow_unset && let Some(names) = extension_names {
+                    validate(path, None, Some(names), allow_unset)
+                } else {
+                    validate(
+                        path,
+                        Some(&registry_from(make_extensions)?),
+                        None,
+                        allow_unset,
+                    )
+                }
             }
             // These commands neither serve traffic nor resolve an extension
             // name, so they must work without extension setup.
@@ -235,7 +268,8 @@ impl Cli {
                 path,
                 force,
                 docker,
-            }) => init(&path, force, docker),
+                extensions,
+            }) => init(&path, force, docker, extensions),
             Some(Command::Routes { path }) => routes(path),
             Some(Command::Test {
                 config,
@@ -378,14 +412,28 @@ fn placeheld_in_both(cfg: &ResolvedConfig, fallback: Option<fn(&str) -> String>)
 
 fn validate(
     path: Option<String>,
-    registry: &ExtensionRegistry,
+    registry: Option<&ExtensionRegistry>,
+    extension_names: Option<&[&str]>,
     allow_unset: bool,
 ) -> anyhow::Result<()> {
     let path = resolve_config_path(path)?;
     let fallback = allow_unset.then_some(unset_placeholder as fn(&str) -> String);
     let (cfg, table) = load_with_fallback(&path, fallback)?;
 
-    let missing = registry.missing(table.extension_names());
+    let missing = match (extension_names, registry) {
+        (Some(names), _) => {
+            let available: std::collections::BTreeSet<_> = names.iter().copied().collect();
+            table
+                .extension_names()
+                .filter(|name| !available.contains(name))
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        }
+        (None, Some(registry)) => registry.missing(table.extension_names()),
+        (None, None) => anyhow::bail!("extension validation requires names or a registry"),
+    };
     if !missing.is_empty() {
         anyhow::bail!(
             "routes reference extensions that are not registered: {}.\n\
@@ -406,6 +454,9 @@ fn validate(
         .join(", ");
 
     println!("✓ syntax");
+    if extension_names.is_some() {
+        println!("✓ extensions  names checked; runtime initialization unchecked");
+    }
     println!("✓ upstreams   {}", cfg.upstreams.len());
     println!("✓ routes      {}  ({breakdown})", table.len());
     println!("✓ deny-list   {}", table.deny_prefixes().len());
@@ -790,15 +841,28 @@ fn explain(
 const STARTER: &str = include_str!("../templates/minimal-gateway.yml");
 const DOCKER_STARTER: &str = include_str!("../templates/docker-gateway.yml");
 const DOCKERFILE_TEMPLATE: &str = include_str!("../templates/Dockerfile");
+const EXTENSION_STARTER: &str = include_str!("../templates/extension-gateway.yml");
+const EXTENSION_DOCKERFILE_TEMPLATE: &str = include_str!("../templates/extension-Dockerfile");
+const EXTENSION_MANIFEST: &str = include_str!("../templates/extension-Cargo.toml");
+const EXTENSION_SOURCE: &str = include_str!("../templates/extension-lib.rs");
 
-fn init(path: &str, force: bool, docker: bool) -> anyhow::Result<()> {
+fn init(path: &str, force: bool, docker: bool, extensions: bool) -> anyhow::Result<()> {
     if docker && path != DEFAULT_CONFIG {
         anyhow::bail!(
             "--docker writes gateway.yml and a Dockerfile beside it; omit PATH or use gateway.yml"
         );
     }
     let dockerfile = DOCKERFILE_TEMPLATE.replace("{{LAGOS_VERSION}}", env!("CARGO_PKG_VERSION"));
-    let files = if docker {
+    let extension_dockerfile =
+        EXTENSION_DOCKERFILE_TEMPLATE.replace("{{LAGOS_VERSION}}", env!("CARGO_PKG_VERSION"));
+    let files = if extensions {
+        vec![
+            (path, EXTENSION_STARTER),
+            ("Dockerfile", extension_dockerfile.as_str()),
+            ("ext/Cargo.toml", EXTENSION_MANIFEST),
+            ("ext/src/lib.rs", EXTENSION_SOURCE),
+        ]
+    } else if docker {
         vec![(path, DOCKER_STARTER), ("Dockerfile", dockerfile.as_str())]
     } else {
         vec![(path, STARTER)]
@@ -814,12 +878,22 @@ fn init(path: &str, force: bool, docker: bool) -> anyhow::Result<()> {
             anyhow::bail!("{destination} is a directory, not a file.");
         }
     }
+    if extensions && Path::new("ext").exists() && !Path::new("ext").is_dir() {
+        anyhow::bail!("ext exists and is not a directory");
+    }
+    if extensions {
+        std::fs::create_dir_all("ext/src")?;
+    }
     for (destination, contents) in &files {
         std::fs::write(destination, contents)?;
     }
     let bin = bin_name();
     if docker {
-        println!("Created gateway.yml and Dockerfile\n");
+        if extensions {
+            println!("Created gateway.yml, Dockerfile, and ext/\n");
+        } else {
+            println!("Created gateway.yml and Dockerfile\n");
+        }
         println!("  docker build -t my-gateway .");
         println!(
             "  docker run --rm -p 8080:8080 --add-host=host.docker.internal:host-gateway my-gateway"
