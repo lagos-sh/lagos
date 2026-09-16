@@ -9,6 +9,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use pingora::lb::health_check::{HealthCheck, HttpHealthCheck};
 use pingora::lb::selection::{Consistent, Random, RoundRobin};
 use pingora::lb::{Backend, Backends, LoadBalancer};
 
@@ -160,35 +161,49 @@ impl Upstream {
     }
 }
 
-/// Build a health check from configuration.
-///
-/// Without a path this is a TCP connect check, which proves only that
-/// something accepted a socket. A path makes it an HTTP check, which is what
-/// actually shows the service can serve.
-fn health_check(
+/// Build Pingora's HTTP checker with this target's authority and TLS settings.
+fn http_health_check(
     cfg: &HealthCheckConfig,
     target: &UpstreamTarget,
-) -> Box<dyn pingora::lb::health_check::HealthCheck + Send + Sync + 'static> {
-    match &cfg.path {
-        Some(path) => {
-            let mut check =
-                pingora::lb::health_check::HttpHealthCheck::new(&target.sni, target.tls);
-            check.consecutive_success = cfg.healthy_after;
-            check.consecutive_failure = cfg.unhealthy_after;
-            check.peer_template.options.connection_timeout = Some(cfg.timeout);
-            check.peer_template.options.read_timeout = Some(cfg.timeout);
-            if let Ok(req) = pingora::http::RequestHeader::build("GET", path.as_bytes(), None) {
-                // Keep the Host and framing headers initialized by Pingora.
-                check.req.set_uri(req.uri.clone());
-            }
-            Box::new(check)
-        }
-        None => {
-            let mut check = pingora::lb::health_check::TcpHealthCheck::new();
-            check.consecutive_success = cfg.healthy_after;
-            check.consecutive_failure = cfg.unhealthy_after;
-            check.peer_template.options.connection_timeout = Some(cfg.timeout);
-            check
+    path: &str,
+) -> pingora::Result<HttpHealthCheck> {
+    let mut check = HttpHealthCheck::new(&target.sni, target.tls);
+    check.req.insert_header("Host", target.addr.as_str())?;
+    check.consecutive_success = cfg.healthy_after;
+    check.consecutive_failure = cfg.unhealthy_after;
+    check.peer_template.options.connection_timeout = Some(cfg.timeout);
+    check.peer_template.options.read_timeout = Some(cfg.timeout);
+    check.peer_template.options.write_timeout = Some(cfg.timeout);
+    let req = pingora::http::RequestHeader::build("GET", path.as_bytes(), None)?;
+    check.req.set_uri(req.uri.clone());
+    Ok(check)
+}
+
+/// Dispatch to Pingora's HTTP checker using the selected backend's authority
+/// and TLS settings. Pingora replaces only the address in its peer template.
+struct PoolHttpHealthCheck {
+    checks: HashMap<String, HttpHealthCheck>,
+    healthy_after: usize,
+    unhealthy_after: usize,
+}
+
+#[async_trait::async_trait]
+impl HealthCheck for PoolHttpHealthCheck {
+    async fn check(&self, target: &Backend) -> pingora::Result<()> {
+        let check = self.checks.get(&target.addr.to_string()).ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "health check has no matching upstream target",
+            )
+        })?;
+        check.check(target).await
+    }
+
+    fn health_threshold(&self, success: bool) -> usize {
+        if success {
+            self.healthy_after
+        } else {
+            self.unhealthy_after
         }
     }
 }
@@ -224,21 +239,44 @@ fn build_pool(name: &str, cfg: &UpstreamConfig) -> anyhow::Result<(Kind, Option<
         let backend = Backend::new_with_weight(&target.addr, t.weight).map_err(|e| {
             anyhow::anyhow!("upstream `{name}`: cannot resolve `{}`: {e}", target.addr)
         })?;
-        members.insert(backend.addr.to_string(), target);
+        if members.insert(backend.addr.to_string(), target).is_some() {
+            anyhow::bail!(
+                "upstream `{name}`: multiple targets resolve to backend `{}`; \
+                 each pool member must have a distinct address and port",
+                backend.addr,
+            );
+        }
         backends.insert(backend);
     }
 
     let mut discovered = Backends::new(pingora::lb::discovery::Static::new(backends));
     if let Some(hc) = &cfg.health_check {
-        // Any member will do as the template: the check replaces the address
-        // per backend, and TLS settings are uniform across a pool.
-        let first = UpstreamTarget::parse(
-            &cfg.targets
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("upstream `{name}` has no targets"))?
-                .url,
-        )?;
-        discovered.set_health_check(health_check(hc, &first));
+        match &hc.path {
+            Some(path) => {
+                let checks = members
+                    .iter()
+                    .map(|(addr, target)| {
+                        http_health_check(hc, target, path)
+                            .map(|check| (addr.clone(), check))
+                            .map_err(|e| {
+                                anyhow::anyhow!("upstream `{name}`: invalid HTTP health check: {e}")
+                            })
+                    })
+                    .collect::<anyhow::Result<HashMap<_, _>>>()?;
+                discovered.set_health_check(Box::new(PoolHttpHealthCheck {
+                    checks,
+                    healthy_after: hc.healthy_after,
+                    unhealthy_after: hc.unhealthy_after,
+                }));
+            }
+            None => {
+                let mut check = pingora::lb::health_check::TcpHealthCheck::new();
+                check.consecutive_success = hc.healthy_after;
+                check.consecutive_failure = hc.unhealthy_after;
+                check.peer_template.options.connection_timeout = Some(hc.timeout);
+                discovered.set_health_check(check);
+            }
+        }
     }
 
     let interval = cfg.health_check.as_ref().map(|h| h.interval);
@@ -456,6 +494,45 @@ mod tests {
             health_check: None,
             circuit_breaker: None,
         }
+    }
+
+    #[test]
+    fn http_health_checks_preserve_each_targets_authority_and_tls_server_name() {
+        let cfg = HealthCheckConfig {
+            path: Some("/ready".into()),
+            interval: std::time::Duration::from_secs(1),
+            timeout: std::time::Duration::from_secs(1),
+            healthy_after: 2,
+            unhealthy_after: 3,
+        };
+        for (url, authority, sni) in [
+            ("http://plain.example:8080", "plain.example:8080", ""),
+            (
+                "https://secure.example:8443",
+                "secure.example:8443",
+                "secure.example",
+            ),
+        ] {
+            let target = UpstreamTarget::parse(url).unwrap();
+            let check = http_health_check(&cfg, &target, "/ready").unwrap();
+            assert_eq!(check.req.headers["host"], authority);
+            assert_eq!(check.req.uri.path(), "/ready");
+            assert_eq!(check.peer_template.is_tls(), target.tls);
+            assert_eq!(check.peer_template.sni, sni);
+        }
+    }
+
+    #[test]
+    fn colliding_pool_targets_are_rejected_instead_of_overwriting_settings() {
+        let mut cfg = pool(&[9001, 9001], Balance::RoundRobin);
+        cfg.targets[1].url = "https://127.0.0.1:9001/other".into();
+        let configured = HashMap::from([("u".to_string(), cfg)]);
+        let error = match resolve_all(&configured) {
+            Ok(_) => panic!("colliding HTTP and HTTPS targets must not share backend settings"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("upstream `u`"));
+        assert!(error.to_string().contains("multiple targets resolve"));
     }
 
     #[test]

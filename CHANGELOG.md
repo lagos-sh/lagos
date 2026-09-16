@@ -5,6 +5,10 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## 0.1.4 — Docker starters and policy checks (unreleased)
 
+- Fixed pool HTTP health checks to use each backend's Host, port, scheme, and
+  TLS server name instead of reusing the first target's settings. Duplicate
+  resolved backend addresses now fail startup instead of silently overwriting
+  target settings.
 - `lagos init` now writes a minimal one-route configuration; the larger
   configuration reference remains in `examples/gateway.yml`.
 - `lagos init --docker` creates root-level `gateway.yml` and `Dockerfile`,

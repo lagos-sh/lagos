@@ -6,16 +6,26 @@ moved forward deliberately rather than discovered in production.
 
 ---
 
-## 0.1.3 → 0.1.4 — CLI developer experience
+## 0.1.3 → 0.1.4 — CLI developer experience and pool health checks
 
-No gateway configuration keys or proxy runtime semantics changed. Existing
-`gateway.yml` files continue to load. `lagos init` now generates a minimal
+No gateway configuration keys changed. `lagos init` now generates a minimal
 one-route file; use `examples/gateway.yml` for the full reference. The new
 `lagos init --docker`, `lagos test`, and `lagos diff` commands are optional.
 The new `lagos init --docker --extensions` starter and matching builder image
 are also optional. Existing custom binaries can keep calling `Cli::run`; only
 convention-based builds use `Cli::run_with_extension_names` to check names
 without constructing extensions during `validate --allow-unset`.
+
+Pool HTTP health checks now use each target's Host header, including its port,
+scheme, and TLS server name. Previously, every member inherited the first
+target's settings, which could incorrectly remove healthy members from rotation.
+The configured health-check path still applies to every member as written.
+
+Pool targets that resolve to the same address and port now prevent startup.
+Previously, their target settings could silently overwrite one another. Remove
+duplicate entries and use a single target's `weight` to express its traffic
+share. Separate logical upstreams are needed when different authorities share
+the same socket address. Pool DNS membership remains fixed at startup.
 
 ---
 

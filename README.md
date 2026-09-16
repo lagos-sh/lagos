@@ -668,6 +668,9 @@ rather than the original client.
 Health checks use HTTP when `path` is configured and TCP otherwise. Unhealthy
 members leave the selection pool and rejoin after successful checks. If no
 healthy member can be selected, Lagos returns `502`.
+HTTP checks use each member's own Host header (including its port), scheme,
+and TLS server name. Targets must resolve to distinct address-and-port pairs;
+ambiguous duplicates prevent startup.
 
 Pool discovery resolves configured targets at startup. A target that cannot be
 resolved prevents startup. Pool membership is static; DNS-based membership

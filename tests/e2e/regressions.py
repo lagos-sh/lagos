@@ -68,6 +68,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         status = 500 if path == "/cb/fail" else 200
         if path == "/hc" and not self.headers.get("host"):
             status = 400
+        if path == "/member-hc" and self.headers.get("host") != self.server.health_host:
+            status = 400
         if path == "/jwks":
             response = self.server.jwks
         if path == "/bound":
@@ -143,6 +145,8 @@ def run(binary, work):
             thread.start()
             threads.append(thread)
         first, second = [server.server_port for server in servers]
+        servers[0].health_host = f"127.0.0.1:{first}"
+        servers[1].health_host = f"127.0.0.1:{second}"
         port, metrics = free_port(), free_port()
         origin = f"http://127.0.0.1:{first}"
         groups = {
@@ -152,6 +156,8 @@ def run(binary, work):
             ] + [
                 {"id": "swap", "prefix": "/swap", "upstream": "origin", "cache": True},
                 {"prefix": "/healthprobe", "upstream": "health"},
+                {"prefix": "/memberprobe", "upstream": "memberhealth"},
+                {"prefix": "/mixedprobe", "upstream": "mixedhealth"},
                 {"prefix": "/cb/fail", "upstream": "cb"},
                 {"prefix": "/cb/limited", "upstream": "cb", "rate_limit": {
                     "requests": 1, "interval": "60s", "key": "route"}},
@@ -182,7 +188,8 @@ def run(binary, work):
         publish_routes()
         config = {
             "server": {"listen": f"127.0.0.1:{port}", "graceful_shutdown": "1s"},
-            "observability": {"metrics": {"listen": f"127.0.0.1:{metrics}"}},
+            "observability": {"metrics": {"listen": f"127.0.0.1:{metrics}",
+                                           "pool_sample_interval": "100ms"}},
             "cache": {"max_size": "64KiB", "max_object_size": "4KiB"},
             "auth": {"jwt": [{"issuer": "https://regression.test", "audience": ["regression-api"],
                                "jwks_url": origin + "/jwks"}]},
@@ -197,6 +204,13 @@ def run(binary, work):
                     "failures": 1, "cooldown": "200ms", "successes_to_close": 1}},
                 "health": {"url": origin, "health_check": {
                     "path": "/hc", "interval": "100ms", "unhealthy_after": 1}},
+                "memberhealth": {"targets": [origin, f"http://127.0.0.1:{second}"],
+                                 "health_check": {"path": "/member-hc", "interval": "100ms",
+                                                  "unhealthy_after": 1}},
+                "mixedhealth": {"targets": [f"https://127.0.0.1:{first}",
+                                             f"http://127.0.0.1:{second}"],
+                                "health_check": {"path": "/member-hc", "interval": "100ms",
+                                                 "timeout": "200ms", "unhealthy_after": 1}},
             },
             "routes": {"file": str(route_file), "reload": "100ms"},
         }
@@ -225,8 +239,8 @@ def run(binary, work):
             finally:
                 conn.close()
 
-        def wait_until(predicate, description):
-            deadline = time.monotonic() + 5
+        def wait_until(predicate, description, timeout=5):
+            deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
                     raise AssertionError("gateway exited during " + description)
@@ -238,7 +252,7 @@ def run(binary, work):
                 time.sleep(0.05)
             raise AssertionError("timed out: " + description)
 
-        wait_until(lambda: request("/health")[0] == 200, "gateway startup")
+        wait_until(lambda: request("/health")[0] == 200, "gateway startup", timeout=30)
         auth = {"authorization": token()}
         checks.check(request("/bound?merchantId=11", auth)[0] == 200, "a unique ownership parameter passes")
         for query in ("merchantId=11&merchantId=12", "merchantId=11&%6derchantId=12",
@@ -300,6 +314,17 @@ def run(binary, work):
                      "forged issuers share one bounded rejection label")
         wait_until(lambda: servers[0].counts["/hc"] >= 2, "health probes")
         checks.check(request("/healthprobe")[0] == 200, "HTTP health checks retain Host")
+        wait_until(lambda: all(server.counts["/member-hc"] >= 2 for server in servers),
+                   "per-member health probes")
+        # Wait for the failing TLS endpoint to be ejected and successful HTTP
+        # checks to finish. Initial pool members are provisionally healthy.
+        wait_until(lambda: 'gateway_pool_backends{state="unhealthy",upstream="mixedhealth"} 1'
+                   in request("/metrics", target=metrics)[1], "mixed-scheme health result")
+        peers = {request("/memberprobe")[1]["port"] for _ in range(8)}
+        checks.check(peers == {first, second},
+                     "health checks use each member's Host authority and port")
+        checks.check(all(request("/mixedprobe")[1].get("port") == second for _ in range(4)),
+                     "HTTP member stays healthy when the first pool member uses TLS")
 
         cached = request("/cb/cached")[1]
         checks.check(request("/cb/limited")[0] == 200, "initial quota request reaches the upstream")
