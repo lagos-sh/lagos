@@ -9,7 +9,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{
-    load_with_fallback, placeheld_in_both, resolve_config_path, strip_mount, unset_placeholder,
+    Listener, load_with_fallback, placeheld_in_both, resolve_config_path, strip_mount,
+    unset_placeholder,
 };
 use crate::auth::Identity;
 use crate::config::ResolvedConfig;
@@ -51,14 +52,6 @@ struct TestRequest {
 
 fn default_method() -> String {
     "GET".to_string()
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Listener {
-    #[default]
-    Public,
-    Internal,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,6 +294,15 @@ fn route_fields(route: &RouteConfig) -> BTreeMap<&'static str, String> {
         ("prefix", route.prefix.clone()),
         ("hosts", format!("{:?}", route.host)),
         ("methods", format!("{:?}", route.methods)),
+        (
+            "methods_origin",
+            route.policy_origins.methods.label().into(),
+        ),
+        ("retry_origin", route.policy_origins.retry.label().into()),
+        (
+            "rate_limit_origin",
+            route.policy_origins.rate_limit.label().into(),
+        ),
         ("upstream", route.upstream.clone()),
         ("bindings", format!("{:?}", route.bind)),
         ("extensions", format!("{:?}", route.extensions)),
@@ -420,7 +422,7 @@ pub(super) fn diff(old: &str, new: &str, allow_unset: bool) -> anyhow::Result<()
         println!("Unchecked environment values: old={old_unset:?}, new={new_unset:?}");
     }
     println!(
-        "Scope: routes, deny-list, mounts, and upstream targets. Review the YAML diff for auth, headers, listeners, and secrets."
+        "Scope: effective routes (including defaults and policy origins), deny-list, mounts, and upstream targets. Top-level defaults require restart; route-file policies can reload. Review the YAML diff for auth, headers, listeners, and secrets."
     );
     Ok(())
 }

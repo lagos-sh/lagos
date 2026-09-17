@@ -8,13 +8,54 @@ moved forward deliberately rather than discovered in production.
 
 ## 0.1.3 → 0.1.4 — CLI developer experience and pool health checks
 
-No gateway configuration keys changed. `lagos init` now generates a minimal
-one-route file; use `examples/gateway.yml` for the full reference. The new
+Existing gateway configuration remains valid without `defaults:`. `lagos init`
+now generates a minimal one-route file; use `examples/gateway.yml` for the full reference. The new
 `lagos init --docker`, `lagos test`, and `lagos diff` commands are optional.
 The new `lagos init --docker --extensions` starter and matching builder image
 are also optional. Existing custom binaries can keep calling `Cli::run`; only
 convention-based builds use `Cli::run_with_extension_names` to check names
 without constructing extensions during `validate --allow-unset`.
+
+`lagos schema`, `lagos schema --routes`, and `init --schema` are optional editor
+tools. Official release images add a version-pinned schema comment to generated
+YAML; local/source builds can select a local schema. Existing configuration files
+and proxy behavior are unchanged by schema support. Update schema references
+alongside image upgrades; see [editor setup](docs/configuration-editor.md).
+
+`lagos vars [CONFIG]` is an optional environment inventory command. It works
+with missing variables, hides values and defaults, and reports unchecked route
+files. It does not change runtime interpolation or configuration validation;
+see [variable diagnostics](docs/configuration-vars.md).
+
+`lagos explain --why-not` and `--listener public|internal` are optional diagnostic
+flags; the default listener remains public. Explanations now report unchecked
+runtime work and handle local health paths and query strings consistently with
+the proxy. Injected header names follow the selected listener. No request-handling
+behavior changes; see [route explanations](docs/route-explanations.md).
+
+`lagos config --effective [CONFIG]` is an optional redacted offline JSON view.
+It uses current inputs rather than the serving process's snapshot, requires a
+resolvable configuration, and marks extension introspection unchecked. Its
+output is unsuitable for deployment. Runtime configuration and request handling
+are unchanged; see [effective configuration](docs/effective-configuration.md).
+
+Optional top-level `defaults:` shares `methods`, `retry`, and `rate_limit`.
+Omitted route fields inherit; explicit `retry: null` or `rate_limit: null`
+disables the inherited policy. `methods: []` explicitly allows any method;
+`methods: null` remains invalid. Route mappings replace entire policies, so
+required fields cannot be supplied by defaults. Auth, caching, and listeners
+cannot be defaulted. Restart after changing top-level defaults; external
+route-file overrides still reload and invalid changes keep the last valid table.
+`diff` reports inherited policy changes, and diagnostic tools show their origins.
+See [route defaults](docs/route-defaults.md).
+
+Custom Rust code constructing `RouteConfig` with struct literals must now set
+`policy_origins`, normally with `Default::default()` for explicit policies.
+Custom `GatewayConfig` struct literals also need `defaults: Default::default()`.
+Existing deserialization and route-provider constructors remain available;
+custom providers can call `RouteTable::build_with_defaults` to opt into global
+inheritance. Stock gateways and the conventional `ext/` starter handle this
+without application changes.
 
 Pool HTTP health checks now use each target's Host header, including its port,
 scheme, and TLS server name. Previously, every member inherited the first

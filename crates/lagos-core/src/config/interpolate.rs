@@ -90,6 +90,84 @@ pub struct Interpolated {
     pub placeheld: Vec<String>,
 }
 
+/// A reference's state, using the same whitespace and control rules as runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VariableState {
+    Set,
+    Defaulted,
+    Required,
+    Invalid,
+}
+
+// Deliberately no Debug: the selected value may be a credential. Only the
+// metadata is exposed by diagnostics; values are used solely to locate files.
+pub(crate) struct VariableReference {
+    pub name: String,
+    pub line: usize,
+    pub column: usize,
+    pub has_default: bool,
+    pub state: VariableState,
+    marker: String,
+    selected: Option<String>,
+}
+
+pub(crate) struct Inspection {
+    pub masked: String,
+    pub references: Vec<VariableReference>,
+}
+
+impl Inspection {
+    pub fn contains_marker(&self, scalar: &str) -> bool {
+        self.references
+            .iter()
+            .any(|reference| scalar.contains(&reference.marker))
+    }
+
+    /// Resolve a scalar extracted from the masked YAML, without re-expanding
+    /// escaped literals or inspecting unrelated credential values.
+    pub fn resolve_scalar(&self, scalar: &str) -> Option<String> {
+        // Walk the original scalar once: a value containing another marker
+        // must not be interpreted as a second substitution.
+        let mut rest = scalar;
+        let mut out = String::new();
+        loop {
+            let next = self
+                .references
+                .iter()
+                .filter_map(|reference| {
+                    rest.find(&reference.marker)
+                        .map(|offset| (offset, reference))
+                })
+                .min_by_key(|(offset, _)| *offset);
+            let Some((offset, reference)) = next else {
+                out.push_str(rest);
+                return Some(out);
+            };
+            let (before, after) = rest.split_at(offset);
+            out.push_str(before);
+            out.push_str(reference.selected.as_deref()?);
+            rest = after.strip_prefix(&reference.marker)?;
+        }
+    }
+}
+
+/// Inspect every occurrence, even when required variables are missing. The
+/// document contains markers instead of environment values or default text.
+pub(crate) fn inspect<F>(text: &str, lookup: F) -> Result<Inspection, InterpolateError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut prefix = "lagos-vars-placeholder-".to_string();
+    while text.contains(&prefix) {
+        prefix.push('x');
+    }
+    let (expanded, references) = process(text, lookup, None, Some(prefix))?;
+    Ok(Inspection {
+        masked: expanded.text,
+        references,
+    })
+}
+
 /// Where a YAML comment starts on this line, if anywhere.
 ///
 /// A `#` opens a comment only at the start of a line or after whitespace, and
@@ -148,6 +226,8 @@ struct Expansion<'a> {
     referenced: Vec<String>,
     defaulted: Vec<String>,
     placeheld: Vec<String>,
+    inspection_prefix: Option<String>,
+    occurrences: Vec<VariableReference>,
 }
 
 impl Expansion<'_> {
@@ -187,12 +267,26 @@ pub fn interpolate_with_fallback<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    process(text, lookup, fallback, None).map(|(expanded, _)| expanded)
+}
+
+fn process<F>(
+    text: &str,
+    lookup: F,
+    fallback: Option<&dyn Fn(&str) -> String>,
+    inspection_prefix: Option<String>,
+) -> Result<(Interpolated, Vec<VariableReference>), InterpolateError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut out = String::with_capacity(text.len());
     let mut exp = Expansion {
         fallback,
         referenced: Vec::new(),
         defaulted: Vec::new(),
         placeheld: Vec::new(),
+        inspection_prefix,
+        occurrences: Vec::new(),
     };
     // Indentation of the block scalar we are inside, if any. Its body is
     // literal, so `#` there is content and gets expanded like any other text.
@@ -238,12 +332,15 @@ where
         out.pop();
     }
 
-    Ok(Interpolated {
-        text: out,
-        referenced: exp.referenced,
-        defaulted: exp.defaulted,
-        placeheld: exp.placeheld,
-    })
+    Ok((
+        Interpolated {
+            text: out,
+            referenced: exp.referenced,
+            defaulted: exp.defaulted,
+            placeheld: exp.placeheld,
+        },
+        exp.occurrences,
+    ))
 }
 
 /// Expand one comment-free fragment of a single line.
@@ -257,9 +354,9 @@ fn expand_into<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    let mut chars = fragment.chars().peekable();
+    let mut chars = fragment.char_indices().peekable();
 
-    while let Some(c) = chars.next() {
+    while let Some((offset, c)) = chars.next() {
         if c != '$' {
             out.push(c);
             continue;
@@ -267,15 +364,15 @@ where
         match chars.peek() {
             // `$$` is an escape: emit one `$` and consume both, so `$${VAR}`
             // survives as the literal text `${VAR}`.
-            Some('$') => {
+            Some((_, '$')) => {
                 chars.next();
                 out.push('$');
             }
-            Some('{') => {
+            Some((_, '{')) => {
                 chars.next();
                 let mut body = String::new();
                 let mut closed = false;
-                for c in chars.by_ref() {
+                for (_, c) in chars.by_ref() {
                     if c == '}' {
                         closed = true;
                         break;
@@ -308,6 +405,34 @@ where
                 let resolved = lookup(name)
                     .map(|v| v.trim().to_string())
                     .filter(|v| !v.is_empty());
+
+                if let Some(prefix) = &exp.inspection_prefix {
+                    let state = match (&resolved, default) {
+                        (Some(_), _) => VariableState::Set,
+                        (None, Some(_)) => VariableState::Defaulted,
+                        (None, None) => VariableState::Required,
+                    };
+                    let selected = resolved.or_else(|| default.map(str::to_string));
+                    let invalid = selected
+                        .as_deref()
+                        .is_some_and(|v| !is_structurally_safe(v));
+                    let marker = format!("{prefix}{}-end", exp.occurrences.len());
+                    out.push_str(&marker);
+                    exp.occurrences.push(VariableReference {
+                        name: name.to_string(),
+                        line,
+                        column: fragment.get(..offset).unwrap_or_default().chars().count() + 1,
+                        has_default: default.is_some(),
+                        state: if invalid {
+                            VariableState::Invalid
+                        } else {
+                            state
+                        },
+                        marker,
+                        selected: if invalid { None } else { selected },
+                    });
+                    continue;
+                }
 
                 // A declared default always wins over the fallback: the
                 // document said what it wants when the variable is absent, and
@@ -367,6 +492,72 @@ pub fn interpolate_env_with_fallback(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn inspection_agrees_with_runtime_and_retains_occurrences() {
+        let text = "é: ${ X } ${X:-secret-default} $${IGNORE} # ${COMMENT}\nblock: |\n  # ${Y}\n";
+        let inspected = inspect(text, |_| None).expect("inventory works before env setup");
+        assert_eq!(inspected.references.len(), 3);
+        assert_eq!(inspected.references[0].column, 4);
+        assert_eq!(inspected.references[0].state, VariableState::Required);
+        assert_eq!(inspected.references[1].state, VariableState::Defaulted);
+        assert_eq!(inspected.references[2].name, "Y");
+        assert!(!inspected.masked.contains("secret-default"));
+        assert!(matches!(
+            interpolate(text, |_| None),
+            Err(InterpolateError::Unset { line: 1, .. })
+        ));
+        let resolved = interpolate_with_fallback(text, |_| None, Some(&|_| "placeholder".into()))
+            .expect("fallback");
+        assert_eq!(resolved.referenced, ["X", "Y"]);
+    }
+
+    #[test]
+    fn inspection_handles_control_values_without_exposing_them() {
+        let text = "a: ${X}\nb: ${Y:-fallback}\nc: ${Z:-\tbad}\n";
+        let inspected = inspect(text, |_| Some("secret\nvalue".into()))
+            .expect("invalid values are inventory states");
+        assert!(
+            inspected
+                .references
+                .iter()
+                .all(|r| r.state == VariableState::Invalid)
+        );
+        assert!(!inspected.masked.contains("secret"));
+        assert!(inspected.resolve_scalar(&inspected.masked).is_none());
+        let absent = inspect(text, |_| None).expect("default control value");
+        assert_eq!(absent.references[2].state, VariableState::Invalid);
+        assert!(matches!(
+            interpolate(text, |_| Some("secret\nvalue".into())),
+            Err(InterpolateError::ControlCharacter { .. })
+        ));
+    }
+
+    #[test]
+    fn inspection_resolution_never_expands_replacement_content_again() {
+        let text = "a: ${A}\nb: ${B}\n";
+        let inspected = inspect(text, |name| {
+            Some(if name == "A" {
+                "lagos-vars-placeholder-1-end".into()
+            } else {
+                "secret".into()
+            })
+        })
+        .expect("valid references");
+        assert_eq!(
+            inspected
+                .resolve_scalar(&inspected.references[0].marker)
+                .as_deref(),
+            Some("lagos-vars-placeholder-1-end")
+        );
+        let collision =
+            inspect("a: lagos-vars-placeholder- ${X}", |_| None).expect("marker collision");
+        assert!(
+            collision.references[0]
+                .marker
+                .starts_with("lagos-vars-placeholder-x")
+        );
+    }
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

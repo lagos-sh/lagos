@@ -1,0 +1,2759 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuthConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "firebase": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/FirebaseConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            "jwt": {
+              "anyOf": [
+                {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/JwtConfig"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Trusted OIDC issuers. Any provider that signs JWTs and publishes a JWKS\nworks — tokens are routed to one of these by their `iss` claim."
+            },
+            "machine": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/MachineConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "Balance": {
+      "oneOf": [
+        {
+          "const": "round_robin",
+          "description": "Weighted round robin. Predictable, and the right default: it needs no\nper-request state and spreads load evenly for uniform request costs.",
+          "type": "string"
+        },
+        {
+          "const": "random",
+          "description": "Weighted random. Useful when many gateway instances would otherwise\nmarch in step through the same backend order.",
+          "type": "string"
+        },
+        {
+          "const": "consistent",
+          "description": "Ketama consistent hashing on a key derived from the request.\n\nThe same key lands on the same backend for as long as that backend is\nhealthy, and adding or removing one moves only its share of keys rather\nthan reshuffling everything. That is what makes an upstream's own cache\nworth having.\n\nPair with `hash_on` to choose the key.",
+          "type": "string"
+        }
+      ]
+    },
+    "CacheConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "default_ttl": {
+              "default": "1m",
+              "description": "Freshness for a response whose upstream said nothing about caching.",
+              "type": "string"
+            },
+            "max_object_size": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "pattern": "^\\s*[0-9]+\\s*([bB]|[kKmMgG]([bB]|[iI][bB])?)?\\s*$",
+                      "type": "string"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "default": 8388608,
+              "description": "Largest single object stored. Enforced while the body streams in, so an\noversized response is abandoned rather than buffered and then discarded.",
+              "examples": [
+                52428800,
+                "50mb",
+                "8 MiB"
+              ]
+            },
+            "max_size": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "pattern": "^\\s*[0-9]+\\s*([bB]|[kKmMgG]([bB]|[iI][bB])?)?\\s*$",
+                      "type": "string"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "default": 268435456,
+              "description": "Total bytes held. Bounds the cache by size rather than entry count,\nbecause ten 100 MB objects and ten thousand 10 KB ones are not the same\ncache.",
+              "examples": [
+                52428800,
+                "50mb",
+                "8 MiB"
+              ]
+            },
+            "stale_while_revalidate": {
+              "default": "0s",
+              "description": "How long a stale entry may still be served while it revalidates.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "The shared response cache.\n\nConfiguring it does not cache anything — a route must set `cache: true`.\nCaching is opt-in per route because the failure mode of caching the wrong\nthing (one user's response served to another) is far worse than a cache\nmiss."
+    },
+    "CircuitBreakerConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cooldown": {
+              "default": "10s",
+              "description": "How long to shed load before trying the upstream again.",
+              "type": "string"
+            },
+            "failures": {
+              "anyOf": [
+                {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 5,
+              "description": "Failures within `window` before the circuit opens."
+            },
+            "max_trials": {
+              "anyOf": [
+                {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 1,
+              "description": "Trial requests allowed through at once while half-open. Kept small so a\nrecovering upstream is not hit by the full load the moment the cooldown\nends."
+            },
+            "successes_to_close": {
+              "anyOf": [
+                {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 2,
+              "description": "Successful trials needed to close the circuit again."
+            },
+            "window": {
+              "default": "30s",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Stop sending to an upstream that is failing.\n\nComplements `health_check` rather than duplicating it: a health check asks\n\"is this backend up\", a breaker asks \"is this service working\". An upstream\nthat accepts connections, passes its probe and then returns 500s or takes\n30 seconds to answer is invisible to the former."
+    },
+    "ClaimDetails": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "claim": {
+              "type": "string"
+            },
+            "when_null": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "claim"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "ClaimMapping": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ClaimDetails"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "description": "How one claim becomes one header.\n\nThe short form is the claim path. The long form exists for the case where\na JSON `null` is meaningful and distinct from the claim being absent:\n\n```yaml\nx-employer-company-id:\n  claim: employerCompanyId\n  when_null: none          # explicitly \"no employer\", not \"unknown\"\n```"
+    },
+    "ConnectionLimitConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "connections": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "New connections allowed per `interval` from one address."
+            },
+            "interval": {
+              "default": "1s",
+              "type": "string"
+            },
+            "max_tracked": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 100000,
+              "description": "Addresses tracked at once. The store is bounded because its keys come\nfrom the network: without a cap, the memory-exhaustion bug this setting\nexists to prevent would simply move into the limiter."
+            }
+          },
+          "required": [
+            "connections"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "How fast one address may open new connections.\n\nThis counts *accepts*, not live connections: the accept hook is never told\nabout a close, so a population count kept from there would drift upward\nuntil it refused everyone. The absolute request-header deadline closes\nsockets that never finish a header, but long-lived responses can still\naccumulate; this is not a concurrent-connection ceiling."
+    },
+    "CorsConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "credentials": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Allow cookies and `Authorization` on cross-origin requests."
+            },
+            "expose": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Response headers a browser may read."
+            },
+            "headers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [
+                "content-type",
+                "authorization"
+              ],
+              "description": "Request headers a browser may send."
+            },
+            "max_age": {
+              "default": "10m",
+              "description": "How long a browser may cache the preflight.",
+              "type": "string"
+            },
+            "methods": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [
+                "GET",
+                "HEAD",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE"
+              ]
+            },
+            "origins": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Exact origins (`https://app.example.com`), wildcard sub-domains\n(`https://*.preview.example.com`), or `*` for any."
+            }
+          },
+          "required": [
+            "origins"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Cross-origin resource sharing.\n\nSee [`crate::cors`] — `credentials: true` alongside origin `*` is refused at\nstartup rather than honoured."
+    },
+    "Counter": {
+      "description": "How a rate limiter counts.\n\nBoth use the same sliding-window formula — the previous interval weighted by\nhow much of it is still in view — so a limit means the same thing either\nway. They differ in what they trade for memory.",
+      "oneOf": [
+        {
+          "const": "exact",
+          "description": "One counter per key, in a capacity-bounded cache.\n\nExact: a caller is refused for its own traffic and nobody else's. The\ncost is an allocation per key and eviction under a key flood, which\ndegrades limiting for the evicted keys.",
+          "type": "string"
+        },
+        {
+          "const": "sketch",
+          "description": "A shared count-min sketch (`pingora-limits`).\n\nFixed memory and lock-free whatever the key cardinality — but\n**approximate, and it only ever over-counts**. Two keys can collide and\none caller can be refused because of another's traffic. Worth it when\nthe key space is huge and the limit is a blunt abuse control; wrong when\nthe 429 is a promise to a specific customer.",
+          "type": "string"
+        }
+      ]
+    },
+    "DnsConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cache_ttl": {
+              "default": "30s",
+              "description": "How long a resolved name is reused. `0s` resolves on every request.\n\nThis is the delay before a record change is noticed, traded against a\nresolver round trip per request. 30s is what a proxy usually settles on\nand is far shorter than the time a rolling deployment takes anyway.\n\nFailures are never cached: one bad lookup must not become a TTL-long\noutage for that upstream after the resolver has recovered.",
+              "type": "string"
+            },
+            "max_entries": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 1024,
+              "description": "Maximum names held. Upstream names come from configuration rather than\nfrom requests, so this cannot be flooded by a caller; it is here because\nan unbounded map in a long-lived process is worth avoiding regardless."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Upstream name resolution.\n\nA single-target upstream keeps its hostname so that a record change is\npicked up without a restart. That means a name is resolved on the way to\nchoosing a peer, and the only question is how often and on which thread."
+    },
+    "FirebaseConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "certs_url": {
+              "default": "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com",
+              "type": "string"
+            },
+            "clock_skew": {
+              "default": "1m",
+              "type": "string"
+            },
+            "min_cert_ttl": {
+              "default": "5m",
+              "description": "Floor on how long fetched signing certificates are cached, regardless of\nthe upstream `Cache-Control` header.",
+              "type": "string"
+            },
+            "projects": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Firebase project IDs whose tokens are accepted. A token is routed to a\nproject by its `iss` claim; unknown issuers are refused.\n\nOnly project *IDs* are needed. Unlike the Firebase Admin SDK, verifying\na token requires no service-account credentials, so this gateway holds\nno private keys."
+            }
+          },
+          "required": [
+            "projects"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "ForwardConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authorization": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": true,
+              "description": "Relay the caller's `Authorization` header.\n\nSet to `false` once upstreams stop verifying tokens themselves and read\nidentity from the injected headers instead — that is what stops a\nservice from having to know anything about the identity provider."
+            },
+            "headers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [
+                "user-agent",
+                "x-forwarded-proto",
+                "x-forwarded-host",
+                "traceparent",
+                "tracestate",
+                "x-request-id"
+              ],
+              "description": "Client headers relayed upstream when present."
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ForwardMode"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            },
+            "preserve_host": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Send the client's `Host` upstream instead of the upstream's own\nauthority. Off by default, matching what an HTTP client library does."
+            },
+            "trusted_proxies": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 0,
+              "description": "How many proxies in front of this gateway may be believed when they\nappend to `X-Forwarded-For`.\n\n`0` — the default — means the gateway is the edge: the arriving chain\nwas written by the caller, so it is discarded and `X-Forwarded-For` /\n`X-Real-IP` are rebuilt from the socket peer. Anything else would let a\ncaller assert its own source address with one header, and every\ndownstream control keyed on client IP — per-IP quotas, geo rules, fraud\nscoring, abuse blocklists, audit trails — would believe it.\n\nSet it to the number of hops that are genuinely yours: `1` behind a\nsingle cloud load balancer or ingress controller, `2` behind a CDN in\nfront of that. Counting is from the right, so only addresses your own\ninfrastructure appended are ever read.\n\nThis is the same rule `rate_limit.trusted_proxies` uses, and the two\nshould agree."
+            },
+            "trusted_proxy_ips": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Socket peers allowed to supply the trusted part of X-Forwarded-For.\nRequired whenever a proxy hop is trusted; use IPs or CIDR ranges."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "ForwardMode": {
+      "oneOf": [
+        {
+          "const": "allowlist",
+          "description": "Drop every client header except those listed. The safe default: a header\nan upstream trusts can never arrive just because a client sent it.",
+          "type": "string"
+        },
+        {
+          "const": "passthrough",
+          "description": "Relay client headers untouched apart from explicit strips.",
+          "type": "string"
+        }
+      ]
+    },
+    "HashKey": {
+      "anyOf": [
+        {
+          "pattern": "^(ip|identity|path|header\\..+)$",
+          "type": "string"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "The request value a consistent hash is taken over.",
+      "examples": [
+        "path",
+        "ip",
+        "identity",
+        "header.x-tenant"
+      ]
+    },
+    "HealthCheckConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "healthy_after": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 1,
+              "description": "Consecutive successes before an unhealthy backend is used again."
+            },
+            "interval": {
+              "default": "10s",
+              "type": "string"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null
+            },
+            "timeout": {
+              "default": "2s",
+              "type": "string"
+            },
+            "unhealthy_after": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 2,
+              "description": "Consecutive failures before a backend is taken out of rotation."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Active health checking for a pool.\n\nWithout `path` this is a TCP connect check, which proves only that\nsomething is listening. Naming a path makes it an HTTP check, which is what\nactually tells you the service is able to serve."
+    },
+    "IdentityConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "claims": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/ClaimMapping"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "object"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Verified claims copied into upstream headers, as `header: claim`:\n\n```yaml\nidentity:\n  claims:\n    x-user-id:   sub\n    x-user-type: user_type\n```\n\nEach header is stripped from the client request before being set, so a\ncaller can never assert one itself. A claim that is **absent** leaves\nits header absent — it is not rendered as an empty value, because\n\"unknown\" and \"empty\" mean different things to an upstream that is\nmaking an authorization decision from them."
+            },
+            "claims_header": {
+              "default": "x-auth-claims",
+              "description": "Header carrying the full claim set as base64url-encoded JSON. Empty to omit.",
+              "type": "string"
+            },
+            "issuer_header": {
+              "default": "x-auth-issuer",
+              "type": "string"
+            },
+            "subject_header": {
+              "default": "x-auth-subject",
+              "type": "string"
+            },
+            "token": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/IdentityTokenConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Mint a short-lived signed token alongside the plain headers."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "How the verified caller is described to upstreams.\n\nThis is the whole point of the gateway: a service that reads these headers\nneeds no identity-provider SDK and no token-verification code. Every one of\nthem is stripped from the client request before being set, so a caller can\nnever assert its own identity."
+    },
+    "IdentityTokenConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "audience": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "`aud` claim, so a token minted for one service cannot be replayed at another."
+            },
+            "header": {
+              "default": "x-auth-token",
+              "type": "string"
+            },
+            "secret": {
+              "description": "HS256 signing secret. Keep it out of the file itself: `${SECRET}`.",
+              "type": "string"
+            },
+            "ttl": {
+              "default": "1m",
+              "type": "string"
+            }
+          },
+          "required": [
+            "secret"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "A per-request token proving the identity headers came from the gateway.\n\nWithout this, an upstream that trusts `x-auth-subject` is trusting the\nnetwork: anything that can reach the service can claim to be any user. With\nit, the service verifies one short-lived signature using a single local key\n— far cheaper than talking to the identity provider, and it does not fall\napart the moment a shared static credential leaks."
+    },
+    "InjectConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "headers": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": {},
+              "description": "Headers added to every upstream request. Any client-supplied copy is\nremoved first, so these cannot be spoofed."
+            },
+            "machine": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": {},
+              "description": "Used *instead of* `headers` on the internal listener.\n\nMachine-tier upstreams generally expect a different, higher-trust\ncredential than public ones. Injecting the public credential there\nwould merge two trust tiers that were deliberately separated."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "JwtConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "algorithms": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [
+                "RS256"
+              ],
+              "description": "Signature algorithms to accept. The token's own `alg` header is checked\nagainst this list — it never selects its own verification."
+            },
+            "audience": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Accepted `aud` values. Required: without it, a token this issuer minted\nfor a *different* service would be accepted here."
+            },
+            "clock_skew": {
+              "default": "1m",
+              "type": "string"
+            },
+            "issuer": {
+              "description": "Must equal the token's `iss` exactly. Also how a token is routed when\nseveral issuers are configured.",
+              "type": "string"
+            },
+            "jwks_url": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Where the issuer publishes its signing keys. Defaults to the\nconventional `<issuer>/.well-known/jwks.json`."
+            },
+            "min_key_ttl": {
+              "default": "5m",
+              "description": "Floor on how long fetched keys are cached, whatever the issuer's\n`Cache-Control` says.",
+              "type": "string"
+            },
+            "required_claims": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Claims that must be present beyond the standard set."
+            }
+          },
+          "required": [
+            "issuer",
+            "audience"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "One trusted OIDC issuer.\n\n```yaml\nauth:\n  jwt:\n    - issuer: https://auth.example.com\n      audience: my-api\n      jwks_url: https://auth.example.com/.well-known/jwks.json\n```"
+    },
+    "Limits": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "connections_per_ip": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ConnectionLimitConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Refuse connections from an address that opens them too quickly.\n\nOff by default, and deliberately so: an address is not a caller. Behind\nan ingress controller *every* connection arrives from one address, and\nturning this on there would throttle the whole gateway. It is the right\ncontrol only where Lagos is genuinely the edge."
+            },
+            "keepalive_requests": {
+              "anyOf": [
+                {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 1000,
+              "description": "Requests one keepalive connection may serve before the gateway closes\nit. Default 1000; `0` means no limit.\n\nPingora's default is no limit, which nginx's own documentation advises\nagainst: per-connection allocations are only reclaimed when the\nconnection closes, so a long-lived connection is a slow leak and a\nheld-open connection is a cheap way to keep one."
+            },
+            "max_body": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "pattern": "^\\s*[0-9]+\\s*([bB]|[kKmMgG]([bB]|[iI][bB])?)?\\s*$",
+                      "type": "string"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "default": 52428800,
+              "description": "Maximum request body, e.g. `50MiB`. Default 50 MiB.",
+              "examples": [
+                52428800,
+                "50mb",
+                "8 MiB"
+              ]
+            },
+            "max_token": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "pattern": "^\\s*[0-9]+\\s*([bB]|[kKmMgG]([bB]|[iI][bB])?)?\\s*$",
+                      "type": "string"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "default": 8192,
+              "description": "Maximum bearer token accepted, in bytes. Default 8 KiB.\n\nA token is decoded and parsed as JSON to find its issuer, and then —\nif the issuer is one this gateway trusts — put through a signature\ncheck, all before any rate limit keyed on identity can apply. Capping\nthe length first bounds what one unauthenticated request can cost.\n8 KiB is far above any real access token, including Firebase's.",
+              "examples": [
+                52428800,
+                "50mb",
+                "8 MiB"
+              ]
+            },
+            "min_send_rate": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Minimum rate, in bytes per second, at which a client must accept a\nresponse body. Off by default.\n\nPingora turns this into a write timeout scaled by how much is being\nwritten, which `timeouts.downstream_write` alone cannot express: a\nlarge response legitimately takes longer than a small one. Leave it\noff for clients on genuinely poor links; turn it on where responses are\nbig enough that a slow reader is worth the memory it holds."
+            },
+            "upstream_pool": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 128,
+              "description": "Idle upstream connections kept for reuse, per upstream. Pingora's own\ndefault is 128; it is exposed here because it is the main thing\ndetermining the gateway's steady-state memory once it is busy."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Caps that exist so a single request cannot hold a connection open forever\nor stream an unbounded body. Timeouts cover the clock; this covers bytes."
+    },
+    "MachineConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "headers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [
+                "x-internal-api-key",
+                "x-api-key"
+              ],
+              "description": "Header names to read the caller credential from, in order. Several are\nallowed because upstream guards accept more than one spelling."
+            },
+            "secret": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "secret"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Credential for service-to-service callers on the `machine` tier.\n\nThese callers are other systems, not people: there is no user token, only a\nshared secret. Restricting *which* systems may reach the internal listener\nis a network concern and belongs on that listener's ingress, not here."
+    },
+    "MetricsConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "listen": {
+              "type": "string"
+            },
+            "pool_sample_interval": {
+              "default": "10s",
+              "description": "How often pool health is sampled into `gateway_pool_backends`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "listen"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Prometheus exposition.\n\nOn a listener of its own, never the traffic port: scrape endpoints are for\noperators, and putting one on the public socket makes internal route names\nand upstream health readable by anyone who can reach the gateway."
+    },
+    "ObservabilityConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "metrics": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/MetricsConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            "tracing": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/TracingConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "OtlpConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "description": "OTLP/HTTP traces endpoint, e.g. `http://collector:4318/v1/traces`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "endpoint"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "RateLimitConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "counter": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Counter"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            },
+            "interval": {
+              "default": "1m",
+              "type": "string"
+            },
+            "key": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/RateLimitKey"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            },
+            "max_keys": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 100000,
+              "description": "Ceiling on tracked keys. Keys come from requests, so this is what stops\na flood of distinct callers growing the process without bound.\n\nOnly meaningful for `counter: exact`; the sketch has fixed memory."
+            },
+            "requests": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            },
+            "trusted_proxies": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 0,
+              "description": "How many proxies sit in front of this gateway.\n\n`X-Forwarded-For` is appended to by each hop, so only the rightmost\nentries are trustworthy. **0 believes nothing in the header** and uses\nthe socket peer — safe, but behind an ingress every client shares one\nbucket. Set it to the number of hops that actually front the gateway;\nsetting it too high reads a client-supplied entry and hands out a fresh\nquota per forged address."
+            }
+          },
+          "required": [
+            "requests"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "A rate limit, applied per route.\n\n```yaml\nrate_limit:\n  requests: 100\n  interval: 1m\n  key: ip\n  trusted_proxies: 1\n```"
+    },
+    "RateLimitKey": {
+      "anyOf": [
+        {
+          "pattern": "^(ip|identity|route|header\\..+)$",
+          "type": "string"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "What a rate limit counts, and against whom.",
+      "examples": [
+        "ip",
+        "identity",
+        "route",
+        "header.x-tenant"
+      ]
+    },
+    "RejectConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "client_headers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Headers that cause an immediate 403 when a client sends them. Use for\ncredentials and identity assertions the gateway produces itself."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "RetryConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempts": {
+              "anyOf": [
+                {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Retries *after* the first attempt, so `2` allows three deliveries."
+            },
+            "non_idempotent": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Retry POST and PATCH after an established connection fails.\n\nOff by default. Turning it on asserts the upstream tolerates receiving\nthe same request twice — a claim about that service, not about the\ngateway."
+            },
+            "on": {
+              "anyOf": [
+                {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RetryOn"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "attempts"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Retrying a failed upstream attempt.\n\nSee [`crate::retry`] — a connect failure is safe for any method because\nnothing was delivered, while an error on an established connection is\nretried only for idempotent methods."
+    },
+    "RetryOn": {
+      "anyOf": [
+        {
+          "enum": [
+            "connection_failure",
+            "transport_error"
+          ],
+          "type": "string"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "What kind of failure may be retried."
+    },
+    "RouteConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bind": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": {},
+              "description": "Values the caller must prove they own, as `source: target` pairs:\n\n```yaml\nbind:\n  query.merchantId: identity.company_id\n```\n\nChecked after authentication and before any extension runs. Any failure\n— missing parameter, missing claim, or mismatch — is a 403."
+            },
+            "cache": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Serve this route from the shared response cache.\n\nOff by default. A cache that serves one caller's response to another is\na data leak, not a performance regression, so this is never inferred."
+            },
+            "cache_authenticated": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Permit caching on a tier that verifies tokens.\n\nWithout this, `cache: true` on `optional` or `authenticated` is refused\nat startup. Responses on those tiers are usually personalised, and\nwhether they are safe to share depends entirely on the upstream sending\ncorrect `Cache-Control` — a claim about that service which has to be\nmade deliberately."
+            },
+            "enabled": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": true,
+              "description": "Set `false` to leave the route out of the table. Combined with\ninterpolation this is a rollout switch: `enabled: ${NEW_ROUTES:-false}`."
+            },
+            "extensions": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Names of extensions to run for this route, in order."
+            },
+            "host": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "default": [],
+              "description": "Hosts this route serves. Omit to serve any host.\n\nAccepts one name or a list, exact (`api.example.com`) or a wildcard\nsub-domain (`*.example.com`). See [`HostPattern`]: this separates\ntraffic, it does not secure it."
+            },
+            "id": {
+              "default": "",
+              "description": "Names the route in logs, metrics and `explain` output. Defaults to the\nprefix, which is usually the name you would have chosen anyway.",
+              "type": "string"
+            },
+            "methods": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Allowed methods. Omit to inherit defaults, or allow any if absent; naming them is an extra restriction,\nnot the security boundary — that is the group the route lives in.\nAn explicit empty list allows any method; null is invalid."
+            },
+            "prefix": {
+              "description": "Matched against the canonical sub-path, either exactly or as a\n`/`-delimited prefix.",
+              "type": "string"
+            },
+            "rate_limit": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/RateLimitConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Requests allowed per interval, counted locally.\nOmit to inherit global defaults; null disables; a mapping replaces the whole policy."
+            },
+            "retry": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/RetryConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Retry a failed upstream attempt.\nOmit to inherit global defaults; null disables; a mapping replaces the whole policy."
+            },
+            "sse": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Stream the response without buffering and use the SSE timeout budget."
+            },
+            "upstream": {
+              "description": "Key into `upstreams`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "prefix",
+            "upstream"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "One allowlisted public prefix.\n\n```yaml\n- prefix: /users\n  upstream: users\n  methods: [GET, POST]\n```"
+    },
+    "RouteDefaults": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "methods": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Omit to allow any method; an explicit empty list also allows any."
+            },
+            "rate_limit": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/RateLimitConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            "retry": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/RetryConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Global policies for routes that omit the corresponding field.\nAuth, cache and listener selection are deliberately excluded."
+    },
+    "RoutesConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authenticated": {
+              "anyOf": [
+                {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RouteConfig"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Require a verified bearer token."
+            },
+            "file": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Load the groups below from this file instead of from this document."
+            },
+            "internal": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Path prefixes refused on the public listener outright. Anything here is\nunreachable from the internet even if some other group also matches it."
+            },
+            "machine": {
+              "anyOf": [
+                {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RouteConfig"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Service-to-service endpoints, served only on the internal listener and\nonly to a caller presenting the machine credential."
+            },
+            "optional": {
+              "anyOf": [
+                {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RouteConfig"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Usable signed-out, but personalised when a caller is signed in."
+            },
+            "public": {
+              "anyOf": [
+                {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RouteConfig"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Proxied without a token. Injected credentials still apply."
+            },
+            "reload": {
+              "default": "15s",
+              "description": "How often to re-read `file`. A ConfigMap update shows up as a changed\nmtime, so this is also how long a route change takes to land.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "The route table, either written inline or pointed at another file.\n\nInline is the common case and keeps the whole gateway in one document. A\nseparate file is worth it when routes change on a different schedule from\nthe rest of the configuration — a Kubernetes ConfigMap that operators edit\nwithout touching listeners or credentials — because only that file is\nre-read on the reload interval."
+    },
+    "ServerConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "graceful_shutdown": {
+              "default": "25s",
+              "description": "How long to drain in-flight requests on SIGTERM.\n\nPingora's own default is 300s. Kubernetes SIGKILLs a pod at\n`terminationGracePeriodSeconds` (30s by default), so leaving it at 300\nmeans every rollout ends in a hard kill mid-drain. Keep this a little\nunder whatever the pod spec allows.",
+              "type": "string"
+            },
+            "health_path": {
+              "default": "/health",
+              "description": "Answered locally with `{\"status\":\"ok\"}`; never proxied.",
+              "type": "string"
+            },
+            "internal_listen": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Second listener serving only the `machine` tier.\n\nMachine routes are bound to their own socket rather than gated by a\ncheck on the shared one: an internal endpoint is then unreachable from\nthe public listener as a matter of topology, not of correct code."
+            },
+            "listen": {
+              "default": "0.0.0.0:8080",
+              "type": "string"
+            },
+            "mounts": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [
+                "/"
+              ],
+              "description": "Prefixes stripped from the request path before route matching. The\nremainder is the canonical sub-path.\n\nSeveral are allowed so one gateway can serve both a versioned mount\n(`/api/v1/users/...`) and the bare service paths (`/users/...`) that\npredate it, without clients having to move at the same time. `\"/\"`\nmounts at the root and therefore matches everything. Longest match wins\nregardless of order."
+            },
+            "service_name": {
+              "default": "lagos",
+              "type": "string"
+            },
+            "shutdown_grace": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "How long to wait after SIGTERM before starting to drain.\n\nUnset by default. The window exists so a load balancer notices this\ninstance going away and stops sending it new connections *before* the\nones in flight are cut. Whatever is set here is spent before\n`graceful_shutdown` begins, so the two together must still fit inside\nthe process manager's own kill deadline."
+            },
+            "tcp_keepalive": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/TcpKeepaliveConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Kernel-level keepalive on accepted connections, so a peer that vanished\nwithout closing — a yanked cable, a NAT table entry that expired — is\ndetected and its socket released instead of being held until an\napplication timeout notices. It cannot close a connection whose peer is\nstill answering."
+            },
+            "threads": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 2
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "Target": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UpstreamTargetDetails"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    },
+    "TcpKeepaliveConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 6,
+              "description": "Unanswered probes before the connection is dropped."
+            },
+            "idle": {
+              "default": "1m",
+              "description": "Idle time before the first probe.",
+              "type": "string"
+            },
+            "interval": {
+              "default": "10s",
+              "description": "Gap between probes.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "TCP keepalive probing on accepted connections."
+    },
+    "Timeouts": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "connect": {
+              "default": "5s",
+              "type": "string"
+            },
+            "default": {
+              "default": "30s",
+              "type": "string"
+            },
+            "downstream_drain": {
+              "default": "5s",
+              "description": "How long to spend discarding a request body the gateway is not going to\nread — a rejected request that still has an upload behind it.\n\nUnset in Pingora. Without it, refusing a request with a large body can\ntake longer than serving it would have.",
+              "type": "string"
+            },
+            "downstream_keepalive": {
+              "default": "1m",
+              "description": "How long an idle keepalive connection is held open for the next\nrequest.",
+              "type": "string"
+            },
+            "downstream_read": {
+              "default": "30s",
+              "description": "Absolute deadline for receiving a complete request header, and the\nmaximum gap between reads while receiving the body.\n\nPingora's own default is 60s. 30s is plenty for a real client on a bad\nconnection and halves what a slowloris costs to hold.",
+              "type": "string"
+            },
+            "downstream_write": {
+              "default": "30s",
+              "description": "How long a single write to the client may stall.\n\nPingora leaves this unset, so a client that stops reading mid-response\npins the exchange indefinitely. This is the slow-read half of\nslowloris, and it is the cheaper half to mount.",
+              "type": "string"
+            },
+            "sse": {
+              "default": "2m",
+              "description": "Applied to routes flagged `sse`, which must outlive the default budget.",
+              "type": "string"
+            },
+            "upload": {
+              "default": "2m",
+              "description": "Applied when the request carries a multipart/binary content type.",
+              "type": "string"
+            },
+            "upstream_idle": {
+              "default": "1m",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "TracingConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "otlp": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/OtlpConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Where to send spans. Omit to propagate trace context without exporting\nanything — useful when the upstreams do their own collection."
+            },
+            "sample_ratio": {
+              "anyOf": [
+                {
+                  "format": "double",
+                  "type": "number"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 1.0,
+              "description": "Fraction of *new* traces to sample, 0.0 to 1.0. A request that arrives\nwith a sampling decision already made keeps it, whatever this says —\nre-deciding partway through produces a trace with holes in it."
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Distributed tracing.\n\nEnabling this makes the gateway a *participant* in a trace rather than a\nrelay: it continues an incoming `traceparent` and sends the upstream a new\none naming this hop, so the gateway's own latency stops being attributed to\nthe service behind it."
+    },
+    "UpstreamConfig": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UpstreamDetails"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "description": "A backend, or a pool of them.\n\nThe short form is a bare URL:\n\n```yaml\nupstreams:\n  users: http://users:3000\n```\n\nSeveral backends make it a pool, with optional weights, a balancing\nalgorithm and health checking:\n\n```yaml\nupstreams:\n  users:\n    targets:\n      - http://users-1:3000\n      - url: http://users-2:3000\n        weight: 3\n    balance: round_robin\n    health_check:\n      path: /health\n      interval: 10s\n```\n\nThe two forms behave differently in one way worth knowing: a **single**\ntarget keeps its hostname and is resolved per connection, so a DNS change\nis picked up without a restart. A **pool** resolves its members at startup,\nbecause the balancer works on addresses. In Kubernetes a Service name maps\nto a stable ClusterIP, so this is usually invisible — but a pool pointed at\na headless service would pin the pods it saw at boot."
+    },
+    "UpstreamDetails": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "properties": {
+                "targets": {
+                  "maxItems": 0
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url"
+              ]
+            },
+            {
+              "properties": {
+                "targets": {
+                  "minItems": 1
+                },
+                "url": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "targets"
+              ]
+            }
+          ],
+          "properties": {
+            "balance": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Balance"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            },
+            "circuit_breaker": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/CircuitBreakerConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            "hash_on": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HashKey"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            },
+            "health_check": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HealthCheckConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            "targets": {
+              "anyOf": [
+                {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/Target"
+                      },
+                      {
+                        "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null
+            }
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "UpstreamTargetDetails": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "weight": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 1
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "auth": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AuthConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "cache": {
+      "anyOf": [
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CacheConfig"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "description": "Response cache. Configures the store; routes opt in individually."
+    },
+    "cors": {
+      "anyOf": [
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CorsConfig"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "description": "Cross-origin policy, applied to every route."
+    },
+    "defaults": {
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RouteDefaults"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "description": "Inherited route policies; route values replace each whole field."
+    },
+    "dns": {
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DnsConfig"
+            },
+            {
+              "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "description": "How upstream names are resolved."
+    },
+    "forward": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ForwardConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/IdentityConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "inject": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/InjectConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "limits": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Limits"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "observability": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ObservabilityConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "reject": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RejectConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "routes": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RoutesConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "server": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ServerConfig"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "timeouts": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Timeouts"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
+    },
+    "upstreams": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/UpstreamConfig"
+              },
+              {
+                "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                "type": "string"
+              }
+            ]
+          },
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Logical backend name to destination. The route table refers to these by\nname, so a URL change never touches a route."
+    }
+  },
+  "title": "GatewayConfig",
+  "type": "object"
+}

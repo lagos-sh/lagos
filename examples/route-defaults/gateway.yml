@@ -1,0 +1,21 @@
+# Optional shared route policies. See docs/route-defaults.md.
+defaults:
+  methods: [GET]
+  retry: {attempts: 2}
+  rate_limit: {requests: 100, interval: 60s, key: ip}
+
+upstreams:
+  catalog: http://catalog:8080
+  events: http://events:8080
+
+routes:
+  public:
+    - id: catalog
+      prefix: /catalog
+      upstream: catalog
+    - id: webhook
+      prefix: /webhook
+      upstream: events
+      methods: [POST]
+      retry: null
+      rate_limit: null

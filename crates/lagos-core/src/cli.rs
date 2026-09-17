@@ -18,7 +18,11 @@ use crate::routes::{
     file::{FileRouteProvider, InlineRouteProvider},
 };
 
+mod diagnostics;
+mod effective;
+mod explanation;
 mod policy;
+mod vars;
 
 const DEFAULT_CONFIG: &str = "gateway.yml";
 
@@ -81,8 +85,43 @@ pub struct Cli {
     command: Option<Command>,
 }
 
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum Listener {
+    #[default]
+    Public,
+    Internal,
+}
+
+impl Listener {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Show a redacted offline configuration view, unsuitable for deployment
+    Config {
+        #[arg(long, required = true)]
+        effective: bool,
+        #[arg(value_name = "CONFIG")]
+        path: Option<String>,
+    },
+    /// List environment references without printing values or defaults
+    Vars {
+        #[arg(value_name = "CONFIG")]
+        path: Option<String>,
+    },
+    /// Write JSON Schema to stdout without loading configuration or extensions
+    Schema {
+        /// Describe a standalone routes file instead of gateway.yml
+        #[arg(long)]
+        routes: bool,
+    },
     /// Write a starter gateway.yml in the current directory
     Init {
         /// Where to write it
@@ -97,6 +136,9 @@ enum Command {
         /// Include a conventional ext/ crate compiled into the gateway image
         #[arg(long, requires = "docker")]
         extensions: bool,
+        /// Editor schema path or URL; official release images use a pinned URL
+        #[arg(long, value_name = "PATH_OR_URL")]
+        schema: Option<String>,
     },
     /// Serve traffic
     Run {
@@ -146,6 +188,12 @@ enum Command {
     },
     /// Show how one request would be handled
     Explain {
+        /// List prefix candidates and the constraints that exclude them
+        #[arg(long)]
+        why_not: bool,
+        /// Listener whose route table should handle this request
+        #[arg(long, value_enum, default_value = "public")]
+        listener: Listener,
         #[arg(short, long, default_value = "GET")]
         method: String,
         #[arg(short, long)]
@@ -269,7 +317,23 @@ impl Cli {
                 force,
                 docker,
                 extensions,
-            }) => init(&path, force, docker, extensions),
+                schema,
+            }) => init(&path, force, docker, extensions, schema.as_deref()),
+            Some(Command::Schema { routes }) => {
+                use std::io::Write;
+                std::io::stdout()
+                    .lock()
+                    .write_all(crate::config::schema::formatted(routes)?.as_bytes())?;
+                Ok(())
+            }
+            Some(Command::Config {
+                effective: true,
+                path,
+            }) => effective::run(path),
+            Some(Command::Config {
+                effective: false, ..
+            }) => anyhow::bail!("config requires --effective"),
+            Some(Command::Vars { path }) => vars::run(path),
             Some(Command::Routes { path }) => routes(path),
             Some(Command::Test {
                 config,
@@ -282,11 +346,13 @@ impl Cli {
                 allow_unset,
             }) => policy::diff(&old, &new, allow_unset),
             Some(Command::Explain {
+                why_not,
+                listener,
                 method,
                 path,
                 host,
                 config,
-            }) => explain(config, &method, &path, host.as_deref()),
+            }) => explain(config, &method, &path, host.as_deref(), listener, why_not),
         }
     }
 }
@@ -353,13 +419,16 @@ fn load_with_fallback(
 
     let provider: Box<dyn RouteProvider> = match &cfg.raw.routes.file {
         Some(f) => {
-            let p = FileRouteProvider::new(f.clone());
+            let p = FileRouteProvider::new(f.clone()).with_defaults(cfg.raw.defaults.clone());
             Box::new(match fallback {
                 Some(f) => p.allowing_unset(f),
                 None => p,
             })
         }
-        None => Box::new(InlineRouteProvider::new(cfg.raw.routes.groups())),
+        None => Box::new(
+            InlineRouteProvider::new(cfg.raw.routes.groups())
+                .with_defaults(cfg.raw.defaults.clone()),
+        ),
     };
     let table = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -597,6 +666,12 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
         if let Some(rt) = &r.retry {
             notes.push(format!("retry x{}", rt.attempts));
         }
+        notes.push(format!(
+            "origins: methods={}, retry={}, rate_limit={}",
+            r.policy_origins.methods.label(),
+            r.policy_origins.retry.label(),
+            r.policy_origins.rate_limit.label()
+        ));
         let note = if notes.is_empty() {
             String::new()
         } else {
@@ -663,14 +738,40 @@ fn explain(
     method: &str,
     request_path: &str,
     host: Option<&str>,
+    listener: Listener,
+    why_not: bool,
 ) -> anyhow::Result<()> {
     let path = resolve_config_path(config)?;
     let (cfg, table) = load(&path)?;
-    let (public, _machine) = table.partition_by_listener();
+    let (public, machine) = table.partition_by_listener();
+    let (selected, other) = match listener {
+        Listener::Public => (&public, &machine),
+        Listener::Internal => (&machine, &public),
+    };
 
     match host {
         Some(h) => println!("Request\n\n  {} {h}{request_path}\n", method.to_uppercase()),
         None => println!("Request\n\n  {} {request_path}\n", method.to_uppercase()),
+    }
+
+    println!("Listener\n\n  {}\n", listener.label());
+    println!(
+        "Offline checks\n\n  UNCHECKED: credentials, client-header/body checks, rate limits, ownership,\n  extensions, cache, CORS preflight, and upstream availability.\n  Results describe route selection, not a verified or proxied request.\n"
+    );
+    if matches!(listener, Listener::Internal) && cfg.raw.server.internal_listen.is_none() {
+        println!("Result\n\n  listener unavailable: server.internal_listen is not configured");
+        return Ok(());
+    }
+    // The proxy matches URI.path(), independently of its query string.
+    let request_path = request_path
+        .split_once('?')
+        .map_or(request_path, |(path, _)| path);
+    if request_path == cfg.raw.server.health_path {
+        println!(
+            "Health\n\n  local health response; route matching and authentication are bypassed"
+        );
+        println!("\nResult\n\n  200 (local_health)");
+        return Ok(());
     }
 
     // 1. Mount. Longest first, matching the proxy.
@@ -696,8 +797,11 @@ fn explain(
     }
 
     // 3. Deny-list, before anything else can match.
-    if public.is_denied(&canonical) {
+    if selected.is_denied(&canonical) {
         println!("Deny-list\n\n  ✗ matches an `internal:` prefix");
+        if why_not {
+            explanation::candidates(selected, other, host, &canonical, method, listener, true);
+        }
         println!(
             "\nResult\n\n  404 (deny_list) — refusals are 404, never 403, so the\n  deny-list cannot be enumerated."
         );
@@ -706,18 +810,10 @@ fn explain(
     println!("Deny-list\n\n  ✓ not denied\n");
 
     // 4. Route match.
-    let Some(route) = public.match_request(host, &canonical, method) else {
+    let Some(route) = selected.match_request(host, &canonical, method) else {
         println!("Route\n\n  ✗ no route matches");
-        let any = public
-            .routes()
-            .iter()
-            .find(|r| canonical == r.prefix || canonical.starts_with(&format!("{}/", r.prefix)));
-        if let Some(r) = any {
-            println!(
-                "\n  `{}` matches the path but allows only {}",
-                r.id,
-                r.methods.join(", ")
-            );
+        if why_not {
+            explanation::candidates(selected, other, host, &canonical, method, listener, false);
         }
         println!("\nResult\n\n  404 (not_allowlisted)");
         return Ok(());
@@ -729,6 +825,12 @@ fn explain(
         route.auth.group()
     );
 
+    println!(
+        "Policy origins\n\n  methods: {}\n  retry: {}\n  rate_limit: {}\n",
+        route.policy_origins.methods.label(),
+        route.policy_origins.retry.label(),
+        route.policy_origins.rate_limit.label()
+    );
     println!("Authentication\n");
     match route.auth {
         crate::routes::AuthTier::Public => {
@@ -754,7 +856,7 @@ fn explain(
         println!("  up to {} after the first attempt", rt.attempts);
         if rt.non_idempotent {
             println!("  including POST and PATCH (non_idempotent: true)");
-        } else if !crate::retry::is_idempotent(&route.methods.join(",")) {
+        } else if !crate::retry::is_idempotent(&method.to_ascii_uppercase()) {
             println!(
                 "  a connect failure retries any method; after connecting,\n\
                  \x20 only idempotent methods are repeated"
@@ -828,13 +930,18 @@ fn explain(
         if route.sse { " (sse)" } else { "" }
     );
 
-    if !cfg.injected_headers.is_empty() {
+    let injected = match listener {
+        Listener::Public => &cfg.injected_headers,
+        Listener::Internal => &cfg.machine_injected_headers,
+    };
+    if !injected.is_empty() {
         println!("\nInjected headers\n");
-        for (name, _) in &cfg.injected_headers {
+        for (name, _) in injected {
             // Values are credentials; the point is which headers appear.
             println!("  {name}: <redacted>");
         }
     }
+    println!("\nResult\n\n  route selected (request outcome unchecked)");
     Ok(())
 }
 
@@ -846,7 +953,69 @@ const EXTENSION_DOCKERFILE_TEMPLATE: &str = include_str!("../templates/extension
 const EXTENSION_MANIFEST: &str = include_str!("../templates/extension-Cargo.toml");
 const EXTENSION_SOURCE: &str = include_str!("../templates/extension-lib.rs");
 
-fn init(path: &str, force: bool, docker: bool, extensions: bool) -> anyhow::Result<()> {
+fn editor_schema_reference(
+    given: Option<&str>,
+    release: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    if let Some(reference) = given {
+        if reference.trim().is_empty() || reference.chars().any(char::is_control) {
+            anyhow::bail!("--schema needs a nonempty single-line path or URL");
+        }
+        return Ok(Some(reference.trim().to_string()));
+    }
+    // Local/source builds cannot assume that a matching version has been
+    // published. Only the official tag build opts into the remote artifact.
+    Ok(release.filter(|v| *v == env!("CARGO_PKG_VERSION")).map(|version| {
+        format!("https://raw.githubusercontent.com/lagos-sh/lagos/v{version}/schemas/gateway.schema.json")
+    }))
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::editor_schema_reference;
+
+    #[test]
+    fn remote_reference_requires_matching_release_build() {
+        assert_eq!(editor_schema_reference(None, None).unwrap(), None);
+        assert_eq!(
+            editor_schema_reference(None, Some("unpublished")).unwrap(),
+            None
+        );
+        let version = env!("CARGO_PKG_VERSION");
+        let expected = format!(
+            "https://raw.githubusercontent.com/lagos-sh/lagos/v{version}/schemas/gateway.schema.json"
+        );
+        assert_eq!(
+            editor_schema_reference(None, Some(version)).unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            editor_schema_reference(Some("./local.json"), Some(version)).unwrap(),
+            Some("./local.json".into())
+        );
+    }
+
+    #[test]
+    fn editor_reference_cannot_inject_another_line() {
+        for reference in [
+            "",
+            "  ",
+            "file.json\ninject: {}",
+            "file.json\r",
+            "file.json\t",
+        ] {
+            assert!(editor_schema_reference(Some(reference), None).is_err());
+        }
+    }
+}
+
+fn init(
+    path: &str,
+    force: bool,
+    docker: bool,
+    extensions: bool,
+    schema: Option<&str>,
+) -> anyhow::Result<()> {
     if docker && path != DEFAULT_CONFIG {
         anyhow::bail!(
             "--docker writes gateway.yml and a Dockerfile beside it; omit PATH or use gateway.yml"
@@ -855,17 +1024,33 @@ fn init(path: &str, force: bool, docker: bool, extensions: bool) -> anyhow::Resu
     let dockerfile = DOCKERFILE_TEMPLATE.replace("{{LAGOS_VERSION}}", env!("CARGO_PKG_VERSION"));
     let extension_dockerfile =
         EXTENSION_DOCKERFILE_TEMPLATE.replace("{{LAGOS_VERSION}}", env!("CARGO_PKG_VERSION"));
+    let starter = if extensions {
+        EXTENSION_STARTER
+    } else if docker {
+        DOCKER_STARTER
+    } else {
+        STARTER
+    };
+    let reference = editor_schema_reference(schema, option_env!("LAGOS_SCHEMA_RELEASE"))?;
+    let gateway = if let Some(reference) = reference {
+        format!("# yaml-language-server: $schema={reference}\n{starter}")
+    } else {
+        starter.to_string()
+    };
     let files = if extensions {
         vec![
-            (path, EXTENSION_STARTER),
+            (path, gateway.as_str()),
             ("Dockerfile", extension_dockerfile.as_str()),
             ("ext/Cargo.toml", EXTENSION_MANIFEST),
             ("ext/src/lib.rs", EXTENSION_SOURCE),
         ]
     } else if docker {
-        vec![(path, DOCKER_STARTER), ("Dockerfile", dockerfile.as_str())]
+        vec![
+            (path, gateway.as_str()),
+            ("Dockerfile", dockerfile.as_str()),
+        ]
     } else {
-        vec![(path, STARTER)]
+        vec![(path, gateway.as_str())]
     };
     // Check every destination before writing any of them. A directory that
     // already contains either file must stay untouched unless --force is

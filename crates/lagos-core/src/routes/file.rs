@@ -4,6 +4,7 @@ use super::{RouteGroups, RouteProvider, RouteTable};
 
 pub struct FileRouteProvider {
     path: String,
+    defaults: crate::config::RouteDefaults,
     /// Substituted for `${VAR}`s the environment does not set, instead of
     /// failing. Set only by `validate --allow-unset`; `None` everywhere a
     /// server is actually started.
@@ -15,7 +16,15 @@ impl FileRouteProvider {
         Self {
             path: path.into(),
             unset_fallback: None,
+            defaults: Default::default(),
         }
+    }
+
+    /// Freeze startup defaults for every subsequent route-file reload.
+    #[must_use]
+    pub fn with_defaults(mut self, defaults: crate::config::RouteDefaults) -> Self {
+        self.defaults = defaults;
+        self
     }
 
     /// Expand unset, defaultless variables to `placeholder` rather than
@@ -60,7 +69,7 @@ impl RouteProvider for FileRouteProvider {
             anyhow::anyhow!("{}{at}: {e}", self.path)
         })?;
 
-        Ok(RouteTable::build(groups))
+        Ok(RouteTable::build_with_defaults(groups, &self.defaults))
     }
 }
 
@@ -69,17 +78,29 @@ impl RouteProvider for FileRouteProvider {
 /// only read at startup.
 pub struct InlineRouteProvider {
     groups: RouteGroups,
+    defaults: crate::config::RouteDefaults,
 }
 
 impl InlineRouteProvider {
     pub fn new(groups: RouteGroups) -> Self {
-        Self { groups }
+        Self {
+            groups,
+            defaults: Default::default(),
+        }
+    }
+    #[must_use]
+    pub fn with_defaults(mut self, defaults: crate::config::RouteDefaults) -> Self {
+        self.defaults = defaults;
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl RouteProvider for InlineRouteProvider {
     async fn load(&self) -> anyhow::Result<RouteTable> {
-        Ok(RouteTable::build(self.groups.clone()))
+        Ok(RouteTable::build_with_defaults(
+            self.groups.clone(),
+            &self.defaults,
+        ))
     }
 }

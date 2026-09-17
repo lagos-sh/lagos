@@ -125,6 +125,12 @@ See [native prerequisites](#prerequisites) if the build needs system libraries.
 start is to copy the two example files. The release workflow currently
 publishes Docker images to GHCR, not a separate downloadable CLI binary.
 
+For YAML completion and configuration feedback, see
+[editor setup](docs/configuration-editor.md). The upcoming 0.1.4 CLI adds
+`lagos schema` and `lagos schema --routes`; both also run inside Docker and
+require no configuration or runtime secrets. Local builds support
+`lagos init --docker --schema ./gateway.schema.json` after exporting a schema.
+
 ## Where Lagos sits
 
 Lagos is one layer in a chain, not the whole edge:
@@ -1020,10 +1026,14 @@ logs and emits its own contextual failure records.
 | `lagos init [PATH]` | Generate a minimal native configuration; defaults to `gateway.yml` |
 | `lagos init --docker` | Generate root-level `gateway.yml` and `Dockerfile`; refuses to overwrite either unless `--force` is passed |
 | `lagos init --docker --extensions` | Generate the custom-code starter with `ext/Cargo.toml` and `ext/src/lib.rs` |
+| `lagos init [--docker] --schema PATH_OR_URL` | Add an editor schema comment; official release images default to the matching versioned schema |
+| `lagos schema [--routes]` | Write JSON Schema for gateway YAML or a standalone route file to stdout without loading configuration or extensions |
+| `lagos config --effective [CONFIG]` | Show a redacted JSON view of resolved file/environment settings with provenance and unchecked inputs; unsuitable for deployment |
+| `lagos vars [CONFIG]` | Inventory every environment reference with its state, default/required flags, and source line/column; values and default text stay hidden |
 | `lagos validate [CONFIG]` | Validate configuration, routes, and extension references |
 | `lagos validate --allow-unset` | The same checks where `${VAR}`s are not set, as in a container build |
 | `lagos routes [CONFIG]` | Display routes and upstreams |
-| `lagos explain --path PATH [--method METHOD] [--host HOST] [--config CONFIG]` | Explain routing and configured policy without serving traffic |
+| `lagos explain --path PATH [--method METHOD] [--host HOST] [--config CONFIG] [--listener public\|internal] [--why-not]` | Explain route selection and configured policy; optionally list prefix candidates and refusal reasons |
 | `lagos test [CONFIG] [CASES] [--allow-unset]` | Check request-policy examples; defaults to `gateway.test.yml` beside the config |
 | `lagos diff OLD NEW [--allow-unset]` | Compare effective routes, deny-list, mounts, and upstream targets |
 | `lagos dev [CONFIG]` | Serve with request narration and validated configuration reloads |
@@ -1034,6 +1044,26 @@ For example:
 ```bash
 lagos explain --method GET --host api.example.com --path /users/42
 ```
+
+For unmatched requests, add `--why-not` to list prefix candidates and their host,
+method, listener, or deny-rule exclusions. `--listener internal` examines machine
+routes. Both options are included in unreleased 0.1.4; see
+[route explanations](docs/route-explanations.md) for examples and unchecked work.
+
+To inspect resolved typed settings with redaction, use `lagos config --effective`.
+It describes this invocation's inputs and carries explicit unchecked state; see
+[effective configuration](docs/effective-configuration.md) for the redaction policy
+and Docker usage. This command is included in unreleased 0.1.4.
+
+Use optional top-level `defaults:` to share route methods, retry policies, and
+rate limits. Routes can replace each policy, explicitly disable retry/rate
+limiting with `null`, or allow any method with `methods: []`. See
+[route defaults](docs/route-defaults.md) for precedence, policy origins, and reload
+behavior.
+
+Before supplying environment variables, use `lagos vars` to see what the files
+need; see [variable diagnostics](docs/configuration-vars.md) for Docker usage
+and unchecked-file reporting. This command is included in unreleased 0.1.4.
 
 Use `lagos --help` or `lagos <command> --help` for command options. Running
 `lagos` without a subcommand starts serving with the discovered configuration.

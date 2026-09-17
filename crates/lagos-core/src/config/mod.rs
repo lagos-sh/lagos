@@ -19,11 +19,13 @@
 //! error naming the line, never a silently ignored policy.
 
 pub mod interpolate;
+pub mod schema;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 pub use interpolate::{InterpolateError, Interpolated, interpolate};
@@ -32,9 +34,12 @@ use crate::routes::{RouteConfig, RouteGroups};
 
 // ---------------------------------------------------------------- top level
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
+    /// Inherited route policies; route values replace each whole field.
+    #[serde(default)]
+    pub defaults: RouteDefaults,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -70,29 +75,49 @@ pub struct GatewayConfig {
     pub cache: Option<CacheConfig>,
 }
 
+/// Global policies for routes that omit the corresponding field.
+/// Auth, cache and listener selection are deliberately excluded.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteDefaults {
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
+    #[serde(default)]
+    pub retry: Option<RetryConfig>,
+    /// Omit to allow any method; an explicit empty list also allows any.
+    #[serde(default, deserialize_with = "crate::routes::present_methods")]
+    #[schemars(with = "Vec<String>")]
+    #[schemars(transform = schema::inherited_policy)]
+    pub methods: Option<Vec<String>>,
+}
+
 /// The shared response cache.
 ///
 /// Configuring it does not cache anything — a route must set `cache: true`.
 /// Caching is opt-in per route because the failure mode of caching the wrong
 /// thing (one user's response served to another) is far worse than a cache
 /// miss.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     /// Total bytes held. Bounds the cache by size rather than entry count,
     /// because ten 100 MB objects and ten thousand 10 KB ones are not the same
     /// cache.
     #[serde(default = "default_cache_size", deserialize_with = "de_byte_size")]
+    #[schemars(schema_with = "schema::byte_size")]
     pub max_size: u64,
     /// Largest single object stored. Enforced while the body streams in, so an
     /// oversized response is abandoned rather than buffered and then discarded.
     #[serde(default = "default_max_object", deserialize_with = "de_byte_size")]
+    #[schemars(schema_with = "schema::byte_size")]
     pub max_object_size: u64,
     /// Freshness for a response whose upstream said nothing about caching.
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub default_ttl: Duration,
     /// How long a stale entry may still be served while it revalidates.
     #[serde(with = "humantime_serde", default = "d0")]
+    #[schemars(with = "String")]
     pub stale_while_revalidate: Duration,
 }
 
@@ -107,7 +132,8 @@ fn d0() -> Duration {
 }
 
 /// What kind of failure may be retried.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[schemars(with = "schema::RetryFailure")]
 pub enum RetryOn {
     /// The connection was never established, so nothing was delivered.
     ConnectionFailure,
@@ -151,7 +177,7 @@ impl<'de> Deserialize<'de> for RetryOn {
 /// See [`crate::retry`] — a connect failure is safe for any method because
 /// nothing was delivered, while an error on an established connection is
 /// retried only for idempotent methods.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     /// Retries *after* the first attempt, so `2` allows three deliveries.
@@ -175,7 +201,7 @@ fn default_retry_on() -> Vec<RetryOn> {
 ///
 /// See [`crate::cors`] — `credentials: true` alongside origin `*` is refused at
 /// startup rather than honoured.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CorsConfig {
     /// Exact origins (`https://app.example.com`), wildcard sub-domains
@@ -194,6 +220,7 @@ pub struct CorsConfig {
     pub credentials: bool,
     /// How long a browser may cache the preflight.
     #[serde(with = "humantime_serde", default = "d600")]
+    #[schemars(with = "String")]
     pub max_age: Duration,
 }
 
@@ -216,7 +243,8 @@ fn d600() -> Duration {
 }
 
 /// What a rate limit counts, and against whom.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(with = "schema::RateSelector")]
 pub enum RateLimitKey {
     /// The client address. See `trusted_proxies` — this is the one that is a
     /// bypass if configured wrongly.
@@ -258,11 +286,12 @@ impl<'de> Deserialize<'de> for RateLimitKey {
 ///   key: ip
 ///   trusted_proxies: 1
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
     pub requests: u64,
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub interval: Duration,
     #[serde(default)]
     pub key: RateLimitKey,
@@ -291,7 +320,7 @@ pub struct RateLimitConfig {
 /// Both use the same sliding-window formula — the previous interval weighted by
 /// how much of it is still in view — so a limit means the same thing either
 /// way. They differ in what they trade for memory.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Counter {
     /// One counter per key, in a capacity-bounded cache.
@@ -315,7 +344,7 @@ fn default_max_keys() -> u64 {
     100_000
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     #[serde(default)]
@@ -330,7 +359,7 @@ pub struct ObservabilityConfig {
 /// relay: it continues an incoming `traceparent` and sends the upstream a new
 /// one naming this hop, so the gateway's own latency stops being attributed to
 /// the service behind it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TracingConfig {
     /// Where to send spans. Omit to propagate trace context without exporting
@@ -348,7 +377,7 @@ fn default_sample_ratio() -> f64 {
     1.0
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpConfig {
     /// OTLP/HTTP traces endpoint, e.g. `http://collector:4318/v1/traces`.
@@ -360,18 +389,19 @@ pub struct OtlpConfig {
 /// On a listener of its own, never the traffic port: scrape endpoints are for
 /// operators, and putting one on the public socket makes internal route names
 /// and upstream health readable by anyone who can reach the gateway.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     pub listen: String,
     /// How often pool health is sampled into `gateway_pool_backends`.
     #[serde(with = "humantime_serde", default = "d10")]
+    #[schemars(with = "String")]
     pub pool_sample_interval: Duration,
 }
 
 // ------------------------------------------------------------------- server
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
@@ -415,6 +445,7 @@ pub struct ServerConfig {
     /// `graceful_shutdown` begins, so the two together must still fit inside
     /// the process manager's own kill deadline.
     #[serde(default, with = "humantime_serde::option")]
+    #[schemars(with = "Option<String>")]
     pub shutdown_grace: Option<Duration>,
     /// How long to drain in-flight requests on SIGTERM.
     ///
@@ -423,6 +454,7 @@ pub struct ServerConfig {
     /// means every rollout ends in a hard kill mid-drain. Keep this a little
     /// under whatever the pod spec allows.
     #[serde(with = "humantime_serde", default = "d25")]
+    #[schemars(with = "String")]
     pub graceful_shutdown: Duration,
 }
 
@@ -443,14 +475,16 @@ fn default_threads() -> usize {
 }
 
 /// TCP keepalive probing on accepted connections.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TcpKeepaliveConfig {
     /// Idle time before the first probe.
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub idle: Duration,
     /// Gap between probes.
     #[serde(with = "humantime_serde", default = "d10")]
+    #[schemars(with = "String")]
     pub interval: Duration,
     /// Unanswered probes before the connection is dropped.
     #[serde(default = "default_keepalive_count")]
@@ -479,20 +513,25 @@ impl Default for ServerConfig {
 
 // ----------------------------------------------------------------- timeouts
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Timeouts {
     #[serde(with = "humantime_serde", default = "d5")]
+    #[schemars(with = "String")]
     pub connect: Duration,
     #[serde(with = "humantime_serde", default = "d30")]
+    #[schemars(with = "String")]
     pub default: Duration,
     /// Applied to routes flagged `sse`, which must outlive the default budget.
     #[serde(with = "humantime_serde", default = "d120")]
+    #[schemars(with = "String")]
     pub sse: Duration,
     /// Applied when the request carries a multipart/binary content type.
     #[serde(with = "humantime_serde", default = "d120")]
+    #[schemars(with = "String")]
     pub upload: Duration,
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub upstream_idle: Duration,
 
     // --- downstream (client-facing) budgets ------------------------------
@@ -509,6 +548,7 @@ pub struct Timeouts {
     /// Pingora's own default is 60s. 30s is plenty for a real client on a bad
     /// connection and halves what a slowloris costs to hold.
     #[serde(with = "humantime_serde", default = "d30")]
+    #[schemars(with = "String")]
     pub downstream_read: Duration,
     /// How long a single write to the client may stall.
     ///
@@ -516,6 +556,7 @@ pub struct Timeouts {
     /// pins the exchange indefinitely. This is the slow-read half of
     /// slowloris, and it is the cheaper half to mount.
     #[serde(with = "humantime_serde", default = "d30")]
+    #[schemars(with = "String")]
     pub downstream_write: Duration,
     /// How long to spend discarding a request body the gateway is not going to
     /// read — a rejected request that still has an upload behind it.
@@ -523,10 +564,12 @@ pub struct Timeouts {
     /// Unset in Pingora. Without it, refusing a request with a large body can
     /// take longer than serving it would have.
     #[serde(with = "humantime_serde", default = "d5")]
+    #[schemars(with = "String")]
     pub downstream_drain: Duration,
     /// How long an idle keepalive connection is held open for the next
     /// request.
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub downstream_keepalive: Duration,
 }
 
@@ -578,11 +621,12 @@ impl Default for Timeouts {
 
 /// Caps that exist so a single request cannot hold a connection open forever
 /// or stream an unbounded body. Timeouts cover the clock; this covers bytes.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     /// Maximum request body, e.g. `50MiB`. Default 50 MiB.
     #[serde(default = "default_max_body", deserialize_with = "de_byte_size")]
+    #[schemars(schema_with = "schema::byte_size")]
     pub max_body: u64,
     /// Maximum bearer token accepted, in bytes. Default 8 KiB.
     ///
@@ -592,6 +636,7 @@ pub struct Limits {
     /// the length first bounds what one unauthenticated request can cost.
     /// 8 KiB is far above any real access token, including Firebase's.
     #[serde(default = "default_max_token", deserialize_with = "de_byte_size")]
+    #[schemars(schema_with = "schema::byte_size")]
     pub max_token: u64,
     /// Requests one keepalive connection may serve before the gateway closes
     /// it. Default 1000; `0` means no limit.
@@ -651,7 +696,7 @@ fn default_max_token() -> u64 {
 /// A single-target upstream keeps its hostname so that a record change is
 /// picked up without a restart. That means a name is resolved on the way to
 /// choosing a peer, and the only question is how often and on which thread.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DnsConfig {
     /// How long a resolved name is reused. `0s` resolves on every request.
@@ -663,6 +708,7 @@ pub struct DnsConfig {
     /// Failures are never cached: one bad lookup must not become a TTL-long
     /// outage for that upstream after the resolver has recovered.
     #[serde(with = "humantime_serde", default = "d30")]
+    #[schemars(with = "String")]
     pub cache_ttl: Duration,
     /// Maximum names held. Upstream names come from configuration rather than
     /// from requests, so this cannot be flooded by a caller; it is here because
@@ -699,12 +745,13 @@ fn default_upstream_pool() -> usize {
 /// until it refused everyone. The absolute request-header deadline closes
 /// sockets that never finish a header, but long-lived responses can still
 /// accumulate; this is not a concurrent-connection ceiling.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionLimitConfig {
     /// New connections allowed per `interval` from one address.
     pub connections: u64,
     #[serde(with = "humantime_serde", default = "d1")]
+    #[schemars(with = "String")]
     pub interval: Duration,
     /// Addresses tracked at once. The store is bounded because its keys come
     /// from the network: without a cap, the memory-exhaustion bug this setting
@@ -805,7 +852,8 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 /// because the balancer works on addresses. In Kubernetes a Service name maps
 /// to a stable ClusterIP, so this is usually invisible — but a pool pointed at
 /// a headless service would pin the pods it saw at boot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, JsonSchema)]
+#[schemars(with = "schema::Upstream")]
 pub struct UpstreamConfig {
     /// Always at least one after parsing.
     pub targets: Vec<UpstreamTargetConfig>,
@@ -817,7 +865,8 @@ pub struct UpstreamConfig {
 }
 
 /// The request value a consistent hash is taken over.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(with = "schema::HashSelector")]
 pub enum HashKey {
     /// The client address as seen on the socket. Sticky per caller — but
     /// behind an ingress every client shares the proxy's address, which makes
@@ -858,16 +907,18 @@ impl<'de> Deserialize<'de> for HashKey {
 /// "is this backend up", a breaker asks "is this service working". An upstream
 /// that accepts connections, passes its probe and then returns 500s or takes
 /// 30 seconds to answer is invisible to the former.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CircuitBreakerConfig {
     /// Failures within `window` before the circuit opens.
     #[serde(default = "five")]
     pub failures: u32,
     #[serde(with = "humantime_serde", default = "d30")]
+    #[schemars(with = "String")]
     pub window: Duration,
     /// How long to shed load before trying the upstream again.
     #[serde(with = "humantime_serde", default = "d10")]
+    #[schemars(with = "String")]
     pub cooldown: Duration,
     /// Successful trials needed to close the circuit again.
     #[serde(default = "two_u32")]
@@ -897,14 +948,15 @@ impl UpstreamConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, JsonSchema)]
+#[schemars(with = "schema::Target")]
 pub struct UpstreamTargetConfig {
     pub url: String,
     /// Relative share of traffic. Equal weights by default.
     pub weight: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Balance {
     /// Weighted round robin. Predictable, and the right default: it needs no
@@ -930,14 +982,16 @@ pub enum Balance {
 /// Without `path` this is a TCP connect check, which proves only that
 /// something is listening. Naming a path makes it an HTTP check, which is what
 /// actually tells you the service is able to serve.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
     #[serde(default)]
     pub path: Option<String>,
     #[serde(with = "humantime_serde", default = "d10")]
+    #[schemars(with = "String")]
     pub interval: Duration,
     #[serde(with = "humantime_serde", default = "d2")]
+    #[schemars(with = "String")]
     pub timeout: Duration,
     /// Consecutive successes before an unhealthy backend is used again.
     #[serde(default = "one")]
@@ -954,25 +1008,26 @@ fn two() -> usize {
     2
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(transform = schema::upstream_source)]
+struct UpstreamDetails {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    targets: Vec<UpstreamTargetConfig>,
+    #[serde(default)]
+    balance: Balance,
+    #[serde(default)]
+    hash_on: HashKey,
+    #[serde(default)]
+    health_check: Option<HealthCheckConfig>,
+    #[serde(default)]
+    circuit_breaker: Option<CircuitBreakerConfig>,
+}
+
 impl<'de> Deserialize<'de> for UpstreamConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Long {
-            #[serde(default)]
-            url: Option<String>,
-            #[serde(default)]
-            targets: Vec<UpstreamTargetConfig>,
-            #[serde(default)]
-            balance: Balance,
-            #[serde(default)]
-            hash_on: HashKey,
-            #[serde(default)]
-            health_check: Option<HealthCheckConfig>,
-            #[serde(default)]
-            circuit_breaker: Option<CircuitBreakerConfig>,
-        }
-
         struct V;
         impl<'de> serde::de::Visitor<'de> for V {
             type Value = UpstreamConfig;
@@ -998,7 +1053,8 @@ impl<'de> Deserialize<'de> for UpstreamConfig {
                 self,
                 m: M,
             ) -> Result<Self::Value, M::Error> {
-                let long = Long::deserialize(serde::de::value::MapAccessDeserializer::new(m))?;
+                let long =
+                    UpstreamDetails::deserialize(serde::de::value::MapAccessDeserializer::new(m))?;
                 let targets = match (long.url, long.targets.is_empty()) {
                     (Some(_), false) => {
                         return Err(serde::de::Error::custom(
@@ -1027,16 +1083,16 @@ impl<'de> Deserialize<'de> for UpstreamConfig {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UpstreamTargetDetails {
+    url: String,
+    #[serde(default = "one")]
+    weight: usize,
+}
+
 impl<'de> Deserialize<'de> for UpstreamTargetConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Long {
-            url: String,
-            #[serde(default = "one")]
-            weight: usize,
-        }
-
         struct V;
         impl<'de> serde::de::Visitor<'de> for V {
             type Value = UpstreamTargetConfig;
@@ -1056,7 +1112,9 @@ impl<'de> Deserialize<'de> for UpstreamTargetConfig {
                 self,
                 m: M,
             ) -> Result<Self::Value, M::Error> {
-                let long = Long::deserialize(serde::de::value::MapAccessDeserializer::new(m))?;
+                let long = UpstreamTargetDetails::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(m),
+                )?;
                 Ok(UpstreamTargetConfig {
                     url: long.url,
                     weight: long.weight,
@@ -1070,7 +1128,7 @@ impl<'de> Deserialize<'de> for UpstreamTargetConfig {
 
 // --------------------------------------------------------------------- auth
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     /// Trusted OIDC issuers. Any provider that signs JWTs and publishes a JWKS
@@ -1088,7 +1146,7 @@ pub struct AuthConfig {
 /// These callers are other systems, not people: there is no user token, only a
 /// shared secret. Restricting *which* systems may reach the internal listener
 /// is a network concern and belongs on that listener's ingress, not here.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfig {
     /// Header names to read the caller credential from, in order. Several are
@@ -1135,7 +1193,7 @@ fn default_machine_headers() -> Vec<String> {
 ///       audience: my-api
 ///       jwks_url: https://auth.example.com/.well-known/jwks.json
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JwtConfig {
     /// Must equal the token's `iss` exactly. Also how a token is routed when
@@ -1156,10 +1214,12 @@ pub struct JwtConfig {
     #[serde(default)]
     pub required_claims: Vec<String>,
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub clock_skew: Duration,
     /// Floor on how long fetched keys are cached, whatever the issuer's
     /// `Cache-Control` says.
     #[serde(with = "humantime_serde", default = "d300")]
+    #[schemars(with = "String")]
     pub min_key_ttl: Duration,
 }
 
@@ -1179,7 +1239,7 @@ impl JwtConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FirebaseConfig {
     /// Firebase project IDs whose tokens are accepted. A token is routed to a
@@ -1192,10 +1252,12 @@ pub struct FirebaseConfig {
     #[serde(default = "default_certs_url")]
     pub certs_url: String,
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub clock_skew: Duration,
     /// Floor on how long fetched signing certificates are cached, regardless of
     /// the upstream `Cache-Control` header.
     #[serde(with = "humantime_serde", default = "d300")]
+    #[schemars(with = "String")]
     pub min_cert_ttl: Duration,
 }
 
@@ -1206,7 +1268,7 @@ fn default_certs_url() -> String {
 
 // ---------------------------------------------------------- header policies
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InjectConfig {
     /// Headers added to every upstream request. Any client-supplied copy is
@@ -1222,7 +1284,7 @@ pub struct InjectConfig {
     pub machine: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RejectConfig {
     /// Headers that cause an immediate 403 when a client sends them. Use for
@@ -1231,7 +1293,7 @@ pub struct RejectConfig {
     pub client_headers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ForwardMode {
     /// Drop every client header except those listed. The safe default: a header
@@ -1241,7 +1303,7 @@ pub enum ForwardMode {
     Passthrough,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardConfig {
     #[serde(default = "default_forward_mode")]
@@ -1327,7 +1389,7 @@ impl Default for ForwardConfig {
 /// needs no identity-provider SDK and no token-verification code. Every one of
 /// them is stripped from the client request before being set, so a caller can
 /// never assert its own identity.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityConfig {
     #[serde(default = "default_subject_header")]
@@ -1368,7 +1430,8 @@ pub struct IdentityConfig {
 ///   claim: employerCompanyId
 ///   when_null: none          # explicitly "no employer", not "unknown"
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, JsonSchema)]
+#[schemars(with = "schema::Claim")]
 pub struct ClaimMapping {
     /// Dotted claim path, e.g. `company.id`.
     pub claim: String,
@@ -1377,16 +1440,16 @@ pub struct ClaimMapping {
     pub when_null: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ClaimDetails {
+    claim: String,
+    #[serde(default)]
+    when_null: Option<String>,
+}
+
 impl<'de> Deserialize<'de> for ClaimMapping {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Long {
-            claim: String,
-            #[serde(default)]
-            when_null: Option<String>,
-        }
-
         struct V;
         impl<'de> serde::de::Visitor<'de> for V {
             type Value = ClaimMapping;
@@ -1406,7 +1469,8 @@ impl<'de> Deserialize<'de> for ClaimMapping {
                 self,
                 m: M,
             ) -> Result<Self::Value, M::Error> {
-                let long = Long::deserialize(serde::de::value::MapAccessDeserializer::new(m))?;
+                let long =
+                    ClaimDetails::deserialize(serde::de::value::MapAccessDeserializer::new(m))?;
                 Ok(ClaimMapping {
                     claim: long.claim,
                     when_null: long.when_null,
@@ -1447,7 +1511,7 @@ impl Default for IdentityConfig {
 /// it, the service verifies one short-lived signature using a single local key
 /// — far cheaper than talking to the identity provider, and it does not fall
 /// apart the moment a shared static credential leaks.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityTokenConfig {
     #[serde(default = "default_token_header")]
@@ -1455,6 +1519,7 @@ pub struct IdentityTokenConfig {
     /// HS256 signing secret. Keep it out of the file itself: `${SECRET}`.
     pub secret: String,
     #[serde(with = "humantime_serde", default = "d60")]
+    #[schemars(with = "String")]
     pub ttl: Duration,
     /// `aud` claim, so a token minted for one service cannot be replayed at another.
     #[serde(default)]
@@ -1488,7 +1553,7 @@ fn default_token_header() -> String {
 /// the rest of the configuration — a Kubernetes ConfigMap that operators edit
 /// without touching listeners or credentials — because only that file is
 /// re-read on the reload interval.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RoutesConfig {
     /// Load the groups below from this file instead of from this document.
@@ -1497,6 +1562,7 @@ pub struct RoutesConfig {
     /// How often to re-read `file`. A ConfigMap update shows up as a changed
     /// mtime, so this is also how long a route change takes to land.
     #[serde(with = "humantime_serde", default = "d15")]
+    #[schemars(with = "String")]
     pub reload: Duration,
 
     /// Path prefixes refused on the public listener outright. Anything here is
@@ -1683,7 +1749,7 @@ impl GatewayConfig {
     /// Resolve a relative route file against the document that names it.
     /// Looking in the working directory first could silently load a different
     /// route table (and therefore a different authentication policy).
-    fn resolve_route_file_against(&mut self, config_path: &str) {
+    pub(crate) fn resolve_route_file_against(&mut self, config_path: &str) {
         let Some(file) = self.routes.file.as_ref() else {
             return;
         };
@@ -1779,6 +1845,16 @@ impl GatewayConfig {
     /// with an unresolvable upstream or a route pointing at nothing would serve
     /// a weaker policy than the one that was written down.
     pub fn resolve(self, expanded: &Interpolated) -> Result<ResolvedConfig, ConfigError> {
+        if self
+            .defaults
+            .rate_limit
+            .as_ref()
+            .is_some_and(|rate| rate.requests == 0)
+        {
+            return Err(ConfigError::invalid(
+                "defaults.rate_limit.requests must be greater than zero",
+            ));
+        }
         if self.timeouts.connect.is_zero() || self.timeouts.downstream_read.is_zero() {
             return Err(ConfigError::invalid(
                 "timeouts.connect and timeouts.downstream_read must be greater than zero",

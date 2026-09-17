@@ -61,6 +61,12 @@ jobs:
           docker run --rm lagos-extension:verify validate
           bash tests/extension-smoke.sh lagos-extension:verify
 
+      - name: Route-defaults starter on current source
+        run: |
+          docker build -t lagos-runtime:verify .
+          docker build --build-arg LAGOS_IMAGE=lagos-runtime:verify -t lagos-defaults:verify examples/route-defaults
+          docker run --rm lagos-defaults:verify validate
+
       # Advisories, licences and sources. Was configured but never run, so a
       # licence the allow-list does not cover, or a new advisory, reached a
       # release unnoticed.
@@ -83,6 +89,17 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
             exit 1
           fi
+
+      # Schemas are committed in the version tag, so their raw URLs are
+      # available before images are published. Unit tests above detect drift.
+      - name: Verify versioned editor schemas
+        run: |
+          for schema_file in gateway.schema.json routes.schema.json; do
+            curl --fail --silent --show-error --location \
+              "https://raw.githubusercontent.com/lagos-sh/lagos/${GITHUB_REF_NAME}/schemas/${schema_file}" \
+              --output "/tmp/${schema_file}"
+            cmp "schemas/${schema_file}" "/tmp/${schema_file}"
+          done
 
   build:
     name: Build ${{ matrix.platform }}
@@ -107,6 +124,7 @@ jobs:
         run: |
           platform="${{ matrix.platform }}"
           echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+          echo "LAGOS_SCHEMA_RELEASE=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -131,6 +149,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: LAGOS_SCHEMA_RELEASE=${{ env.LAGOS_SCHEMA_RELEASE }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
@@ -158,6 +177,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: LAGOS_SCHEMA_RELEASE=${{ env.LAGOS_SCHEMA_RELEASE }}
           target: build
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -184,6 +204,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
@@ -266,10 +287,22 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "${GITHUB_REF_NAME#v}"
 
+      - name: Smoke test schemas on published image
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} schema > /tmp/runtime-gateway.schema.json
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} schema --routes > /tmp/runtime-routes.schema.json
+          cmp schemas/gateway.schema.json /tmp/runtime-gateway.schema.json
+          cmp schemas/routes.schema.json /tmp/runtime-routes.schema.json
+
       - name: Smoke test two-file starter on published image
         run: |
           docker build --build-arg LAGOS_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} -t lagos-starter:release examples/minimal
           docker run --rm lagos-starter:release validate
+
+      - name: Smoke test route-defaults starter on published image
+        run: |
+          docker build --build-arg LAGOS_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} -t lagos-defaults:release examples/route-defaults
+          docker run --rm lagos-defaults:release validate
 
       - name: Smoke test extension starter on published images
         run: |

@@ -5,6 +5,37 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## 0.1.4 — Docker starters and policy checks (unreleased)
 
+- Added optional top-level route defaults for `methods`, `retry`, and
+  `rate_limit`, resolved identically for runtime, route-file reloads, and CLI
+  tools. Omitted fields inherit; policy mappings replace whole fields; null
+  disables retries/rate limits; empty methods allow any. Diagnostics show policy
+  origins and defaults-only diffs. Top-level changes require restart. Editor
+  schemas and upgrade guidance cover these semantics.
+
+- Updated the locked `rustls` dependency to 0.23.45 to fix
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html),
+  affecting TLS 1.3 handshake encryption boundaries.
+- Added `lagos config --effective [CONFIG]`, an explicit redacted JSON projection
+  of current input files and environment, with typed policy values, provenance,
+  logical sources, and unchecked extension/runtime work. Credentials, URLs,
+  paths, arbitrary strings, and interpolated settings are hidden. Diagnostic
+  output is unsuitable for deployment and has no raw mode. Value-free errors
+  share the variable-diagnostics policy.
+- Added `lagos explain --why-not` to report all matching-prefix candidates and
+  host, method, listener, or deny-rule exclusions using runtime matcher predicates.
+  `--listener public|internal` selects the route partition (default public).
+  Explanations distinguish route selection from unchecked runtime work, recognize
+  local health paths, ignore query strings for routing, and use the selected
+  listener's injected-header names.
+- Added `lagos vars [CONFIG]` to inventory each environment reference with its
+  set/defaulted/required state, default and required flags, and source line/column.
+  It scans relative external route files, explicitly reports unchecked sources,
+  and hides values, default text, and interpolated filenames in diagnostics.
+- Added `lagos schema` and `lagos schema --routes` for YAML editor completion
+  and input-shape validation, including custom input forms and typed environment
+  interpolation. Committed schemas are checked for drift in CI and verified at
+  versioned URLs before image release. `init --schema` selects a local schema;
+  official release images generate a matching version-pinned editor comment.
 - Fixed pool HTTP health checks to use each backend's Host, port, scheme, and
   TLS server name instead of reusing the first target's settings. Duplicate
   resolved backend addresses now fail startup instead of silently overwriting
@@ -15,7 +46,7 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   pinning the image to the generating CLI's version. It checks both destinations
   before writing and requires `--force` to replace existing files.
 - Added a copyable two-file example and Docker Compose/Kubernetes deployment
-  guidance. No proxy runtime or configuration semantics changed.
+  guidance.
 - `lagos test` checks offline request selection, auth tiers, listener isolation,
   and ownership bindings against a `gateway.test.yml` suite.
 - `lagos diff` reports effective route-surface changes without printing upstream

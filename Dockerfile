@@ -18,6 +18,10 @@ RUN mkdir -p crates/lagos-core/src crates/lagos/src \
     && cargo build --release --locked --bin lagos \
     && rm -rf crates/lagos-core/src crates/lagos/src
 
+# Set only by the version-tag release workflow, after schema verification.
+# Local builds have no remote schema link in init output.
+ARG LAGOS_SCHEMA_RELEASE=
+ENV LAGOS_SCHEMA_RELEASE=${LAGOS_SCHEMA_RELEASE}
 COPY crates crates
 # Every source file, not just the two crate roots: COPY preserves mtimes, so
 # a module older than the stub build's artifacts is one Cargo will consider

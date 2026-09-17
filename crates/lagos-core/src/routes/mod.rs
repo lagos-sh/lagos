@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::binding::Binding;
@@ -144,8 +145,8 @@ pub fn normalize_host(raw: &str) -> &str {
 ///   upstream: users
 ///   methods: [GET, POST]
 /// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(from = "RouteInput")]
 pub struct RouteConfig {
     /// Names the route in logs, metrics and `explain` output. Defaults to the
     /// prefix, which is usually the name you would have chosen anyway.
@@ -157,6 +158,7 @@ pub struct RouteConfig {
     /// sub-domain (`*.example.com`). See [`HostPattern`]: this separates
     /// traffic, it does not secure it.
     #[serde(default, deserialize_with = "string_or_seq")]
+    #[schemars(schema_with = "crate::config::schema::one_or_many_hosts")]
     pub host: Vec<String>,
     /// `host`, parsed. Filled during [`RouteTable::build`].
     #[serde(skip)]
@@ -166,7 +168,7 @@ pub struct RouteConfig {
     pub prefix: String,
     /// Key into `upstreams`.
     pub upstream: String,
-    /// Allowed methods. Omit to allow any; naming them is an extra restriction,
+    /// Allowed methods. Omit to inherit defaults, or allow any if absent; naming them is an extra restriction,
     /// not the security boundary — that is the group the route lives in.
     #[serde(default)]
     pub methods: Vec<String>,
@@ -227,10 +229,187 @@ pub struct RouteConfig {
     /// Derived from the group the route was declared in; never set in the file.
     #[serde(skip)]
     pub auth: AuthTier,
+    /// Source of each effective route policy, filled by deserialization/resolution.
+    #[serde(skip)]
+    pub policy_origins: PolicyOrigins,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RouteInput {
+    /// Names the route in logs, metrics and `explain` output. Defaults to the
+    /// prefix, which is usually the name you would have chosen anyway.
+    #[serde(default)]
+    pub id: String,
+    /// Hosts this route serves. Omit to serve any host.
+    ///
+    /// Accepts one name or a list, exact (`api.example.com`) or a wildcard
+    /// sub-domain (`*.example.com`). See [`HostPattern`]: this separates
+    /// traffic, it does not secure it.
+    #[serde(default, deserialize_with = "string_or_seq")]
+    #[schemars(schema_with = "crate::config::schema::one_or_many_hosts")]
+    pub host: Vec<String>,
+    /// Matched against the canonical sub-path, either exactly or as a
+    /// `/`-delimited prefix.
+    pub prefix: String,
+    /// Key into `upstreams`.
+    pub upstream: String,
+    /// Allowed methods. Omit to inherit defaults, or allow any if absent; naming them is an extra restriction,
+    /// not the security boundary — that is the group the route lives in.
+    /// An explicit empty list allows any method; null is invalid.
+    #[serde(default, deserialize_with = "present_methods")]
+    #[schemars(with = "Vec<String>")]
+    #[schemars(transform = crate::config::schema::inherited_policy)]
+    pub methods: Option<Vec<String>>,
+    /// Stream the response without buffering and use the SSE timeout budget.
+    #[serde(default)]
+    pub sse: bool,
+    /// Set `false` to leave the route out of the table. Combined with
+    /// interpolation this is a rollout switch: `enabled: ${NEW_ROUTES:-false}`.
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    /// Values the caller must prove they own, as `source: target` pairs:
+    ///
+    /// ```yaml
+    /// bind:
+    ///   query.merchantId: identity.company_id
+    /// ```
+    ///
+    /// Checked after authentication and before any extension runs. Any failure
+    /// — missing parameter, missing claim, or mismatch — is a 403.
+    #[serde(default)]
+    pub bind: BTreeMap<String, String>,
+    /// Serve this route from the shared response cache.
+    ///
+    /// Off by default. A cache that serves one caller's response to another is
+    /// a data leak, not a performance regression, so this is never inferred.
+    #[serde(default)]
+    pub cache: bool,
+    /// Permit caching on a tier that verifies tokens.
+    ///
+    /// Without this, `cache: true` on `optional` or `authenticated` is refused
+    /// at startup. Responses on those tiers are usually personalised, and
+    /// whether they are safe to share depends entirely on the upstream sending
+    /// correct `Cache-Control` — a claim about that service which has to be
+    /// made deliberately.
+    #[serde(default)]
+    pub cache_authenticated: bool,
+    /// Retry a failed upstream attempt.
+    /// Omit to inherit global defaults; null disables; a mapping replaces the whole policy.
+    #[serde(default, deserialize_with = "present_nullable")]
+    #[schemars(with = "Option<crate::config::RetryConfig>")]
+    #[schemars(transform = crate::config::schema::inherited_policy)]
+    pub retry: Option<Option<crate::config::RetryConfig>>,
+    /// Requests allowed per interval, counted locally.
+    /// Omit to inherit global defaults; null disables; a mapping replaces the whole policy.
+    #[serde(default, deserialize_with = "present_nullable")]
+    #[schemars(with = "Option<crate::config::RateLimitConfig>")]
+    #[schemars(transform = crate::config::schema::inherited_policy)]
+    pub rate_limit: Option<Option<crate::config::RateLimitConfig>>,
+    /// Names of extensions to run for this route, in order.
+    #[serde(default)]
+    pub extensions: Vec<String>,
+}
+impl From<RouteInput> for RouteConfig {
+    fn from(input: RouteInput) -> Self {
+        Self {
+            id: input.id,
+            host: input.host,
+            prefix: input.prefix,
+            upstream: input.upstream,
+            sse: input.sse,
+            enabled: input.enabled,
+            bind: input.bind,
+            cache: input.cache,
+            cache_authenticated: input.cache_authenticated,
+            extensions: input.extensions,
+            policy_origins: PolicyOrigins {
+                methods: if input.methods.is_some() {
+                    PolicyOrigin::Route
+                } else {
+                    PolicyOrigin::BuiltIn
+                },
+                retry: if input.retry.is_some() {
+                    PolicyOrigin::Route
+                } else {
+                    PolicyOrigin::BuiltIn
+                },
+                rate_limit: if input.rate_limit.is_some() {
+                    PolicyOrigin::Route
+                } else {
+                    PolicyOrigin::BuiltIn
+                },
+            },
+            methods: input.methods.unwrap_or_default(),
+            retry: input.retry.flatten(),
+            rate_limit: input.rate_limit.flatten(),
+            hosts: Vec::new(),
+            bindings: Vec::new(),
+            retry_policy: None,
+            limiter: None,
+            auth: AuthTier::default(),
+        }
+    }
+}
+
+pub(crate) fn present_methods<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    Vec::<String>::deserialize(d).map(Some)
+}
+
+fn present_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// Where a resolved policy was declared. Explicit null/empty values are route overrides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PolicyOrigin {
+    #[default]
+    Route,
+    GlobalDefaults,
+    BuiltIn,
+}
+
+impl PolicyOrigin {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Route => "route",
+            Self::GlobalDefaults => "global defaults",
+            Self::BuiltIn => "built-in",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PolicyOrigins {
+    pub methods: PolicyOrigin,
+    pub retry: PolicyOrigin,
+    pub rate_limit: PolicyOrigin,
 }
 
 fn enabled_by_default() -> bool {
     true
+}
+
+impl RouteConfig {
+    fn matches_method(&self, normalized: &str) -> bool {
+        self.methods.is_empty() || self.methods.iter().any(|method| method == normalized)
+    }
+
+    fn matches_host(&self, normalized: Option<&str>) -> bool {
+        self.hosts.is_empty()
+            || normalized.is_some_and(|host| self.hosts.iter().any(|pattern| pattern.matches(host)))
+    }
+}
+
+/// Diagnostic metadata for an enabled route with a matching path prefix.
+pub(crate) struct RouteCandidate<'a> {
+    pub route: &'a RouteConfig,
+    pub host_matches: bool,
+    pub method_matches: bool,
 }
 
 /// Accept either `host: api.example.com` or `host: [a.example.com, b.example.com]`.
@@ -251,7 +430,7 @@ fn string_or_seq<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, 
 ///
 /// Auth tier comes from the group a route lives in, never from a field on the
 /// route, so a route cannot accidentally be declared public.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RouteGroups {
     /// Path prefixes refused on the public listener outright. Anything here is
@@ -333,6 +512,14 @@ mod prefix_tests {
 
 impl RouteTable {
     pub fn build(groups: RouteGroups) -> Self {
+        Self::build_with_defaults(groups, &crate::config::RouteDefaults::default())
+    }
+
+    /// Resolve policy inheritance before deriving matchers, retry policies and limiters.
+    pub fn build_with_defaults(
+        groups: RouteGroups,
+        defaults: &crate::config::RouteDefaults,
+    ) -> Self {
         let deny_prefixes = groups
             .internal
             .iter()
@@ -360,6 +547,24 @@ impl RouteTable {
             }))
             .filter(|r| r.enabled)
             .map(|mut r| {
+                if r.policy_origins.methods == PolicyOrigin::BuiltIn
+                    && let Some(methods) = &defaults.methods
+                {
+                    r.methods = methods.clone();
+                    r.policy_origins.methods = PolicyOrigin::GlobalDefaults;
+                }
+                if r.policy_origins.retry == PolicyOrigin::BuiltIn
+                    && let Some(retry) = &defaults.retry
+                {
+                    r.retry = Some(retry.clone());
+                    r.policy_origins.retry = PolicyOrigin::GlobalDefaults;
+                }
+                if r.policy_origins.rate_limit == PolicyOrigin::BuiltIn
+                    && let Some(rate) = &defaults.rate_limit
+                {
+                    r.rate_limit = Some(rate.clone());
+                    r.policy_origins.rate_limit = PolicyOrigin::GlobalDefaults;
+                }
                 r.prefix = normalize_proxy_path(&r.prefix).to_string();
                 r.methods = r.methods.iter().map(|m| m.to_ascii_uppercase()).collect();
                 if r.id.trim().is_empty() {
@@ -454,18 +659,30 @@ impl RouteTable {
         let h = host.map(|h| normalize_host(h).to_ascii_lowercase());
 
         self.routes.iter().find(|r| {
-            under_prefix(p, &r.prefix)
-                // An empty list means the route does not restrict methods.
-                && (r.methods.is_empty() || r.methods.contains(&m))
-                && match (r.hosts.is_empty(), &h) {
-                    // No `host:` on the route — serves every host.
-                    (true, _) => true,
-                    // A host-restricted route needs a Host header to compare
-                    // against; without one it cannot match.
-                    (false, None) => false,
-                    (false, Some(got)) => r.hosts.iter().any(|pat| pat.matches(got)),
-                }
+            under_prefix(p, &r.prefix) && r.matches_method(&m) && r.matches_host(h.as_deref())
         })
+    }
+
+    /// Uses the runtime's prefix, host and method predicates. Deny rules and
+    /// listener availability are reported separately by the offline caller.
+    pub(crate) fn prefix_candidates(
+        &self,
+        host: Option<&str>,
+        path: &str,
+        method: &str,
+    ) -> Vec<RouteCandidate<'_>> {
+        let p = normalize_proxy_path(path);
+        let m = method.to_ascii_uppercase();
+        let h = host.map(|host| normalize_host(host).to_ascii_lowercase());
+        self.routes
+            .iter()
+            .filter(|route| under_prefix(p, &route.prefix))
+            .map(|route| RouteCandidate {
+                route,
+                host_matches: route.matches_host(h.as_deref()),
+                method_matches: route.matches_method(&m),
+            })
+            .collect()
     }
 
     pub fn routes(&self) -> &[RouteConfig] {
@@ -935,5 +1152,188 @@ public:
         let t = table();
         // `productsfoo` must not match the `products` route.
         assert!(t.match_route("productsfoo", "GET").is_none());
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_predicates_agree_with_runtime_selection() {
+        let groups: RouteGroups = serde_yaml_ng::from_str(
+            r#"
+public:
+  - id: exact
+    prefix: /users
+    host: api.example.com
+    methods: [GET]
+    upstream: users
+  - id: wildcard
+    prefix: /users
+    host: '*.example.net'
+    methods: [POST]
+    upstream: users
+  - id: any
+    prefix: /any
+    upstream: users
+  - id: disabled
+    prefix: /users
+    enabled: false
+    upstream: users
+machine:
+  - id: machine
+    prefix: /users
+    upstream: users
+"#,
+        )
+        .unwrap();
+        let (public, internal) = RouteTable::build(groups).partition_by_listener();
+        for table in [&public, &internal] {
+            for (host, path, method) in [
+                (Some("API.EXAMPLE.COM:443"), "users/42", "get"),
+                (Some("a.example.net"), "users", "POST"),
+                (Some("example.net"), "users", "POST"),
+                (None, "users", "GET"),
+                (None, "users-admin", "GET"),
+                (None, "any/42", "PATCH"),
+            ] {
+                let candidates = table.prefix_candidates(host, path, method);
+                assert!(!candidates.iter().any(|c| c.route.id == "disabled"));
+                let eligible = candidates
+                    .iter()
+                    .find(|c| c.host_matches && c.method_matches)
+                    .map(|c| c.route.id.as_str());
+                assert_eq!(
+                    eligible,
+                    table
+                        .match_request(host, path, method)
+                        .map(|r| r.id.as_str())
+                );
+            }
+        }
+        assert!(
+            public
+                .prefix_candidates(None, "users-admin", "GET")
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod defaults_tests {
+    use super::*;
+    use crate::config::RouteDefaults;
+
+    fn defaults() -> RouteDefaults {
+        serde_yaml_ng::from_str("methods: [get]\nretry: {attempts: 2, non_idempotent: true}\nrate_limit: {requests: 1, interval: 120s, key: route}\n").unwrap()
+    }
+
+    #[test]
+    fn inheritance_applies_to_every_group_before_runtime_policy_construction() {
+        for group in ["public", "optional", "authenticated", "machine"] {
+            let groups =
+                serde_yaml_ng::from_str(&format!("{group}: [{{prefix: /items, upstream: u}}]"))
+                    .unwrap();
+            let table = RouteTable::build_with_defaults(groups, &defaults());
+            let route = &table.routes()[0];
+            assert_eq!(route.methods, ["GET"]);
+            assert!(table.match_request(None, "items", "POST").is_none());
+            assert!(table.match_request(None, "items", "get").is_some());
+            assert_eq!(route.retry.as_ref().unwrap().attempts, 2);
+            assert!(route.retry_policy.is_some());
+            let limiter = route.limiter.as_ref().unwrap();
+            assert!(limiter.check("caller").allowed);
+            assert!(!limiter.check("caller").allowed);
+            assert_eq!(route.policy_origins.methods, PolicyOrigin::GlobalDefaults);
+            assert_eq!(route.policy_origins.retry, PolicyOrigin::GlobalDefaults);
+            assert_eq!(
+                route.policy_origins.rate_limit,
+                PolicyOrigin::GlobalDefaults
+            );
+            assert!(!route.cache);
+            assert!(!route.cache_authenticated);
+        }
+    }
+
+    #[test]
+    fn explicit_null_and_empty_methods_disable_inherited_policies() {
+        let groups = serde_yaml_ng::from_str(
+            "public: [{prefix: /items, upstream: u, methods: [], retry: null, rate_limit: null}]",
+        )
+        .unwrap();
+        let table = RouteTable::build_with_defaults(groups, &defaults());
+        let route = &table.routes()[0];
+        assert!(table.match_request(None, "items", "PATCH").is_some());
+        assert!(route.retry.is_none());
+        assert!(route.retry_policy.is_none());
+        assert!(route.rate_limit.is_none());
+        assert!(route.limiter.is_none());
+        assert_eq!(route.policy_origins, PolicyOrigins::default());
+    }
+
+    #[test]
+    fn replacements_do_not_merge_with_global_fields() {
+        let groups = serde_yaml_ng::from_str("public: [{prefix: /items, upstream: u, methods: [post], retry: {attempts: 0}, rate_limit: {requests: 5}}]").unwrap();
+        let table = RouteTable::build_with_defaults(groups, &defaults());
+        let route = &table.routes()[0];
+        assert_eq!(route.methods, ["POST"]);
+        assert_eq!(route.retry.as_ref().unwrap().attempts, 0);
+        assert!(!route.retry.as_ref().unwrap().non_idempotent);
+        let rate = route.rate_limit.as_ref().unwrap();
+        assert_eq!(rate.interval, std::time::Duration::from_secs(60));
+        assert!(matches!(rate.key, crate::config::RateLimitKey::Ip));
+        assert_eq!(route.policy_origins, PolicyOrigins::default());
+        for policy in [
+            "retry: {non_idempotent: false}",
+            "rate_limit: {key: ip}",
+            "methods: null",
+        ] {
+            assert!(
+                serde_yaml_ng::from_str::<RouteGroups>(&format!(
+                    "public: [{{prefix: /items, upstream: u, {policy}}}]"
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn no_defaults_preserves_builtin_behavior_and_explicit_policies() {
+        let groups = serde_yaml_ng::from_str("public: [{prefix: /any, upstream: u}, {prefix: /get, upstream: u, methods: [GET], retry: {attempts: 1}, rate_limit: {requests: 2}}]").unwrap();
+        let table = RouteTable::build(groups);
+        let any = table.match_request(None, "any", "PATCH").unwrap();
+        assert!(any.retry.is_none() && any.limiter.is_none());
+        assert_eq!(any.policy_origins.methods, PolicyOrigin::BuiltIn);
+        assert_eq!(any.policy_origins.retry, PolicyOrigin::BuiltIn);
+        assert_eq!(any.policy_origins.rate_limit, PolicyOrigin::BuiltIn);
+        let explicit = table.match_request(None, "get", "GET").unwrap();
+        assert_eq!(explicit.retry.as_ref().unwrap().attempts, 1);
+        assert!(explicit.limiter.is_some());
+    }
+
+    #[test]
+    fn each_route_gets_its_own_limiter_even_when_inheriting_the_same_default() {
+        let groups = serde_yaml_ng::from_str(
+            "public: [{prefix: /one, upstream: u}, {prefix: /two, upstream: u}]",
+        )
+        .unwrap();
+        let table = RouteTable::build_with_defaults(groups, &defaults());
+        let one = table
+            .match_request(None, "one", "GET")
+            .unwrap()
+            .limiter
+            .as_ref()
+            .unwrap();
+        let two = table
+            .match_request(None, "two", "GET")
+            .unwrap()
+            .limiter
+            .as_ref()
+            .unwrap();
+        assert!(one.check("same-key").allowed);
+        assert!(!one.check("same-key").allowed);
+        assert!(two.check("same-key").allowed);
     }
 }

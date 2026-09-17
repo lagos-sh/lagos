@@ -66,8 +66,13 @@ impl Runtime {
         // listeners and credentials, which cannot change without a restart.
         let route_file = cfg.raw.routes.file.clone();
         let provider: Arc<dyn RouteProvider> = match &route_file {
-            Some(path) => Arc::new(FileRouteProvider::new(path.clone())),
-            None => Arc::new(InlineRouteProvider::new(cfg.raw.routes.groups())),
+            Some(path) => Arc::new(
+                FileRouteProvider::new(path.clone()).with_defaults(cfg.raw.defaults.clone()),
+            ),
+            None => Arc::new(
+                InlineRouteProvider::new(cfg.raw.routes.groups())
+                    .with_defaults(cfg.raw.defaults.clone()),
+            ),
         };
 
         // A small runtime just for startup I/O; Pingora owns the serving ones.

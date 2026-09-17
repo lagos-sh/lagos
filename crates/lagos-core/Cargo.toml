@@ -18,6 +18,7 @@ http.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 serde_yaml_ng.workspace = true
 clap.workspace = true
 thiserror.workspace = true
@@ -49,3 +50,6 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", 
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.28", default-features = false }

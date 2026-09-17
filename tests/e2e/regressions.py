@@ -369,6 +369,138 @@ def run(binary, work):
         log.close()
 
 
+class DefaultsHandler(Handler):
+    def respond(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path in ("/dx-retry", "/dx-no-retry"):
+            with self.server.count_lock:
+                if self.server.counts[path] == 0:
+                    self.server.counts[path] += 1
+                    self.close_connection = True
+                    return  # An established connection fails before a response.
+        super().respond()
+
+
+def run_defaults(binary, work):
+    checks = Checks()
+    server = Fixture(("127.0.0.1", 0), DefaultsHandler)
+    server.counts = collections.Counter()
+    server.count_lock = threading.Lock()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for external in (False, True):
+            server.counts.clear()
+            port = free_port()
+            groups = {"public": [
+                {"prefix": "/inherit", "upstream": "origin"},
+                {"prefix": "/other", "upstream": "origin"},
+                {"prefix": "/disable", "upstream": "origin", "methods": [],
+                 "rate_limit": None, "retry": None},
+                {"prefix": "/dx-retry", "upstream": "origin"},
+                {"prefix": "/dx-no-retry", "upstream": "origin", "retry": None},
+            ]}
+            route_file = work / "defaults-routes.yml"
+
+            def publish(value):
+                temporary = route_file.with_suffix(".tmp")
+                temporary.write_text(json.dumps(value))
+                temporary.replace(route_file)
+
+            publish(groups)
+            config = {
+                "server": {"listen": f"127.0.0.1:{port}", "threads": 1},
+                "defaults": {"methods": ["GET"],
+                             "rate_limit": {"requests": 1, "interval": "120s", "key": "route"},
+                             "retry": {"attempts": 1, "on": ["transport_error"]}},
+                "upstreams": {"origin": f"http://127.0.0.1:{server.server_port}"},
+                "routes": {"file": str(route_file), "reload": "100ms"} if external else groups,
+            }
+            config_path = work / "defaults-gateway.yml"
+            config_path.write_text(json.dumps(config))
+            log_path = work / "defaults-gateway.log"
+            with log_path.open("w") as log:
+                proc = subprocess.Popen([str(binary), "run", str(config_path)], stdout=log, stderr=log)
+                try:
+                    def request(path, method="GET"):
+                        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                        try:
+                            conn.request(method, path)
+                            response = conn.getresponse()
+                            response.read()
+                            return response.status
+                        finally:
+                            conn.close()
+
+                    def wait_until(predicate, description, timeout=10):
+                        deadline = time.monotonic() + timeout
+                        while time.monotonic() < deadline:
+                            if proc.poll() is not None:
+                                raise AssertionError("gateway exited: " + log_path.read_text())
+                            try:
+                                if predicate():
+                                    return
+                            except (OSError, http.client.HTTPException):
+                                pass
+                            time.sleep(0.05)
+                        raise AssertionError("timed out: " + description + "\n" + log_path.read_text())
+
+                    wait_until(lambda: request("/health") == 200, "defaults startup", 30)
+                    mode = "external" if external else "inline"
+                    checks.check(request("/inherit", "POST") == 404, f"{mode}: inherited methods reject POST")
+                    checks.check(request("/inherit") == 200 and request("/inherit") == 429,
+                                 f"{mode}: inherited limiter enforces quota")
+                    checks.check(request("/other") == 200, f"{mode}: inherited counters are separate per route")
+                    checks.check(all(request("/disable", "PATCH") == 200 for _ in range(3)),
+                                 f"{mode}: empty methods and null policies disable inheritance")
+                    checks.check(request("/dx-retry") == 200 and server.counts["/dx-retry"] == 2,
+                                 f"{mode}: inherited retry recovers from a transport failure")
+                    retry_events = log_path.read_text().count("gateway.upstream.retry")
+                    checks.check(retry_events > 0, f"{mode}: inherited policy records the retry")
+                    checks.check(request("/dx-no-retry") == 200 and server.counts["/dx-no-retry"] == 2
+                                 and log_path.read_text().count("gateway.upstream.retry") == retry_events,
+                                 f"{mode}: null removes the inherited policy while preserving built-in keepalive recovery")
+                    if external:
+                        config["defaults"]["methods"] = ["POST"]
+                        config["defaults"]["rate_limit"]["requests"] = 10000
+                        config_path.write_text(json.dumps(config))
+                        groups["public"].append({"prefix": "/fresh", "upstream": "origin"})
+                        publish(groups)
+                        wait_until(lambda: request("/fresh", "POST") == 404 and "gateway.routes.reloaded" in log_path.read_text(),
+                                   "defaults route reload")
+                        checks.check(request("/fresh") == 200 and request("/fresh") == 429,
+                                     "reload retains captured startup defaults despite main-file edits")
+                        groups["public"][0].update(methods=["POST"], rate_limit=None, retry=None)
+                        publish(groups)
+                        wait_until(lambda: request("/inherit", "POST") == 200, "explicit policy reload")
+                        checks.check(request("/inherit", "POST") == 200,
+                                     "route-file overrides reload and disable the inherited limiter")
+                        invalid = json.loads(json.dumps(groups))
+                        invalid["public"][0]["rate_limit"] = {"requests": 0}
+                        publish(invalid)
+                        wait_until(lambda: "gateway.routes.reload_rejected" in log_path.read_text(), "invalid resolved policy rejection")
+                        checks.check(request("/inherit", "POST") == 200,
+                                     "invalid replacement preserves the last valid route snapshot")
+                        invalid["public"][0]["methods"] = None
+                        publish(invalid)
+                        wait_until(lambda: "gateway.routes.reload_failed" in log_path.read_text(), "null methods rejection")
+                        checks.check(request("/inherit", "POST") == 200,
+                                     "null methods on reload preserve the last valid snapshot")
+                finally:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+        print(f"{checks.passed} route-default regression checks passed", flush=True)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="lagos-regressions-") as directory:
         run(pathlib.Path(sys.argv[1]).resolve(), pathlib.Path(directory))
+        run_defaults(pathlib.Path(sys.argv[1]).resolve(), pathlib.Path(directory))

@@ -23,6 +23,12 @@ jobs:
           docker run --rm lagos-extension:ci validate
           bash tests/extension-smoke.sh lagos-extension:ci
 
+      - name: Route-defaults starter on current source
+        run: |
+          docker build -t lagos-runtime:ci .
+          docker build --build-arg LAGOS_IMAGE=lagos-runtime:ci -t lagos-defaults:ci examples/route-defaults
+          docker run --rm lagos-defaults:ci validate
+
   check:
     runs-on: ubuntu-latest
     steps:
