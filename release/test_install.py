@@ -97,7 +97,8 @@ else:
     def test_shasum_verifies_archives_without_coreutils(self):
         # Stock macOS has shasum but not sha256sum. Limit PATH to exercise
         # that environment while retaining the real extraction/install tools.
-        for name in ['sh', 'tar', 'awk', 'grep', 'mktemp', 'chmod', 'cp', 'mv', 'mkdir', 'rm', 'shasum']:
+        # GNU tar invokes gzip from PATH; macOS's BSD tar decompresses itself.
+        for name in ['sh', 'tar', 'gzip', 'awk', 'grep', 'mktemp', 'chmod', 'cp', 'mv', 'mkdir', 'rm', 'shasum']:
             (self.mock / name).symlink_to(shutil.which(name))
         self.env['PATH'] = str(self.mock)
         self.env.update(MOCK_OS='Darwin', MOCK_ARCH='arm64')
