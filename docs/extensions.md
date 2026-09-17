@@ -69,6 +69,12 @@ Keep network lookups bounded by a timeout and cache only answers whose freshness
 is acceptable for the policy. If the lookup cannot verify authority, reject
 the request instead of forwarding an unverified tenant or permission header.
 
+Lagos 0.1.4 does not enforce an execution timeout around `on_request` itself.
+Native extensions must bound their own work and remain trusted code. Gateway
+execution budgets, a simpler decision API, and language-independent HTTP checks
+are proposed in [Extension hardening](extension-hardening.md); they are not
+available configuration options yet.
+
 The Dockerfile pins **both** `ghcr.io/lagos-sh/lagos-builder` and the Lagos
 runtime image to the same version. The builder carries the matching
 `lagos-core` source, Rust toolchain and system libraries. It compiles `ext/`

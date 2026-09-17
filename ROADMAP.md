@@ -29,6 +29,7 @@ Ordered roughly by how often the absence bites.
 | **Distributed rate limiting** | Counters are per process today: 100/min across three replicas admits 300/min. Fits behind the existing `Limiter` interface |
 | **Stale-while-error on JWKS** | An identity provider outage currently stops authenticated traffic, even though the cached keys were almost certainly still valid |
 | **Total request deadline** | Timeouts are per read, per write and per connect. A client making slow but steady progress stays inside all of them indefinitely |
+| **Extension execution budgets** | Lagos must bound each request hook and the complete extension chain, reject on timeout, and report which policy exceeded its budget. Native hooks remain trusted code; asynchronous timeouts cannot preempt blocking code. See the [extension proposal](docs/extension-hardening.md) |
 | **In-flight concurrency cap** | Bound the requests being worked on at once, independently of rate, and shed load rather than queue it when saturated |
 | **Request header size limit** | Whatever Pingora's parser accepts, the gateway accepts. Should be ours to bound |
 
@@ -42,9 +43,11 @@ Real direction, no commitment. Each needs the layer beneath it to settle first.
 - **Traffic splitting** — weighted routing across *services* for canary and blue/green. Weights exist within a pool today; splitting across two upstreams does not
 - **OpenAPI import** — generate routes, methods and security requirements from a contract. The strongest single differentiator available to this project, and the largest piece of work
 - **Request validation** — query, header and body schemas, so invalid requests never reach an application
+- **Simple policy decisions** — an optional allow/deny API for checks, with errors distinct from denial; retain the existing extension API for trusted header enrichment. See the [extension proposal](docs/extension-hardening.md)
+- **Language-independent HTTP checks** — invoke an application-owned policy endpoint written in any language, using a versioned context/decision contract and gateway-enforced deadlines and concurrency limits. This is an optional service, not arbitrary scripts loaded into the gateway. See the [extension proposal](docs/extension-hardening.md)
 - **Route providers beyond files** — the `RouteProvider` seam already exists; a provider watching Kubernetes `Ingress`/`HTTPRoute` would not change the proxy path
 - **Downstream TLS and HTTP/2** — today termination belongs at an ingress. Enabling h2 here means tuning Pingora's `H2Options` for the Rapid Reset family
-- **WASM policies** — only once the extension API is stable enough to freeze into an ABI. Native dynamic plugins are not the answer; a half-designed WASM interface is not either
+- **WASM policies** — only once the policy contract is stable enough to freeze into an ABI, with execution and memory limits and bounded host calls. Language support depends on compatible toolchains; HTTP checks come first. Native dynamic plugins are not the answer; a half-designed WASM interface is not either
 - **Optional control plane** — central config, revisions, rollback, fleet status. Hard rule if it ever exists: **gateway traffic must continue when the control plane is unavailable**, and it must never sit on the request path
 - **Secret zeroization** — `Debug` is redacted, but secrets are ordinary `String`s in memory
 
