@@ -1,7 +1,7 @@
 # Building a gateway with custom extensions
 
-This convention is in the unreleased 0.1.4 work. The versioned builder image
-will become pullable when that release is published.
+The `ext/` convention and versioned builder image are available starting with
+0.1.4.
 
 Most gateways need only `Dockerfile` and `gateway.yml`. When a policy must run
 application code, use the optional [extension example](../examples/extension/):
@@ -18,6 +18,19 @@ myapp/
 Generate it with `lagos init --docker --extensions`, or copy the example. The
 regular two-file starter remains the default. Add any extra Rust dependencies
 to `ext/Cargo.toml`; you do not need a root Cargo workspace or a `main.rs`.
+
+## Which image does what?
+
+| Image | Role |
+|---|---|
+| `ghcr.io/lagos-sh/lagos:0.1.4` | Runtime for the standard gateway and final base image for a custom gateway |
+| `ghcr.io/lagos-sh/lagos-builder:0.1.4` | Optional build toolchain for compiling and testing `ext/` |
+
+For YAML-only configuration, use the runtime image. Custom extensions use both
+images in one multi-stage Dockerfile: the builder compiles your code, and the
+runtime stage receives the resulting executable and `gateway.yml`. Build and
+deploy one application image; the builder is not a service in your Compose
+project or Kubernetes deployment. Pin both base images to the same version.
 
 ## When to use `ext/`
 

@@ -10,11 +10,11 @@ gaps are in [SECURITY.md](SECURITY.md).
 
 Configuration DX includes [editor setup](docs/configuration-editor.md), schema
 generation, variable inventory, route explanations, redacted effective output,
-and route defaults, all implemented for unreleased 0.1.4.
+and route defaults, all available starting with 0.1.4.
 Optional partner credentials are a separate feature.
 
-Standalone Linux/macOS binaries and an automatic installer are prepared for
-unreleased 0.1.4; see [installation](docs/installation.md). Windows native
+Standalone Linux/macOS binaries and an automatic installer are available
+starting with 0.1.4; see [installation](docs/installation.md). Windows native
 support remains future work.
 
 ---

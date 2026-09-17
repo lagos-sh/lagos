@@ -4,14 +4,13 @@ Lagos provides JSON Schema for `gateway.yml` and standalone route files. Editors
 with YAML language-server support can use these schemas for completion, field
 descriptions, and feedback on unknown fields and incorrect input shapes.
 
-Schema commands are part of the unreleased 0.1.4 CLI and its upcoming Docker
-image. The published 0.1.3 image does not provide them. Until release, build a
-local image from this repository:
+Schema commands are available in the CLI and runtime Docker image starting
+with 0.1.4. The 0.1.3 image does not provide them. Export schemas directly
+from the published runtime image:
 
 ```bash
-docker build -t lagos-local .
-docker run --rm lagos-local schema > gateway.schema.json
-docker run --rm lagos-local schema --routes > routes.schema.json
+docker run --rm ghcr.io/lagos-sh/lagos:0.1.4 schema > gateway.schema.json
+docker run --rm ghcr.io/lagos-sh/lagos:0.1.4 schema --routes > routes.schema.json
 ```
 
 These commands write JSON to your host terminal through Docker. They do not need
@@ -42,12 +41,12 @@ The equivalent Docker command needs a writable mount and a working directory:
 
 ```bash
 docker run --rm --user "$(id -u):$(id -g)" \
-  -v "$PWD:/work" -w /work lagos-local \
+  -v "$PWD:/work" -w /work ghcr.io/lagos-sh/lagos:0.1.4 \
   init --docker --schema ./gateway.schema.json
 ```
 
 Local/source builds omit remote schema comments unless you supply `--schema`.
-Official version-tag image builds generate a comment pointing to
+Official release binaries and version-tag images generate a comment pointing to
 `schemas/gateway.schema.json` in the matching Git tag, and pin the starter's Docker
 image to that version. Release verification checks the committed schema against
 the compiled types and checks the versioned URL before publishing images. The

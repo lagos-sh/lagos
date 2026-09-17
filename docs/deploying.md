@@ -6,6 +6,13 @@ structure. Keep both files at the application root. Each config change makes a
 new image; deploy that image by an immutable version or digest. Restarting an
 unchanged image does not pick up a file edited on your laptop.
 
+This setup uses `ghcr.io/lagos-sh/lagos:0.1.4`, the gateway runtime image.
+`ghcr.io/lagos-sh/lagos-builder:0.1.4` is needed only to compile or test optional
+custom `ext/` policies. An extension build uses both images as build stages,
+then produces one application image to deploy. See
+[the image comparison](../README.md#which-docker-image-should-i-use) and
+[building with extensions](extensions.md).
+
 ## Docker Compose
 
 Add Lagos to the Compose project that already runs your application. Given a

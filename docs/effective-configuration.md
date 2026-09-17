@@ -1,6 +1,6 @@
 # Redacted effective configuration
 
-`lagos config --effective [CONFIG]` is implemented for **unreleased 0.1.4**.
+`lagos config --effective [CONFIG]` is available starting with **0.1.4**.
 It produces a JSON diagnostic view of configuration resolved from this
 invocation's files and environment. It does not inspect a serving gateway's
 in-memory snapshot, even when run inside the same pod.
@@ -109,24 +109,20 @@ handling.
 
 ## Docker usage
 
-For the unpublished changes, build the repository image:
-
-```bash
-docker build -t lagos-local .
-```
-
-From your gateway project directory, pass the variables required by your files:
+Use the published runtime image from your gateway project directory, passing
+the variables required by your files:
 
 ```bash
 docker run --rm \
   -v "$PWD:/app:ro" -w /app \
   -e USERS_URL \
-  lagos-local config --effective gateway.yml
+  ghcr.io/lagos-sh/lagos:0.1.4 config --effective gateway.yml
 ```
 
 Mount the directory so external route files are available beside the gateway
-file. After release, replace `lagos-local` with your matching pinned gateway
-image. This command is not available in the published 0.1.3 image.
+file. Use the pinned gateway image matching your deployment, including your
+custom application image if you use extensions. This command is not available
+in the 0.1.3 image.
 
 Effective route policies include `policy_origin` (`route`, `global defaults`, or
 `built-in`). Inherited policies use the corresponding `CONFIG.defaults` source

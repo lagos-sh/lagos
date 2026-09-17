@@ -36,6 +36,10 @@ lagos run gateway.yml
 
 ## Quick start: two files, no Rust
 
+Start with `ghcr.io/lagos-sh/lagos:0.1.4`. The optional `lagos-builder` image
+is used only to compile custom `ext/` policies; see
+[Which Docker image should I use?](#which-docker-image-should-i-use).
+
 Create an empty `myapp/` directory with these two files (or copy them from
 [`examples/minimal/`](examples/minimal/)):
 
@@ -83,16 +87,36 @@ The image build checks the YAML before producing an image. An unset required
 refuses to start unless that value is supplied. Add routes and policy to this
 same file. Split them into `routes.yml` only when the table becomes hard to
 read. An `ext/` directory is not a supported drop-in mechanism: Rust
-extensions require a custom binary today. See [Extensions](#extensions).
+extensions require a custom binary today. See
+[Architecture and extensions](#architecture-and-extensions).
 
 For custom request policy, the optional [extension starter](examples/extension/)
 adds an `ext/` folder. Lagos supplies a version-matched builder image that
 compiles it into the gateway binary; see [Building with extensions](docs/extensions.md).
 
-The unreleased 0.1.4 CLI in this repository provides `lagos init --docker` to
+The 0.1.4 CLI provides `lagos init --docker` to
 create the same two-file starter and `lagos init --docker --extensions` to
 create the optional custom-code starter. Plain `lagos init` creates a minimal
 YAML file for native use.
+
+### Which Docker image should I use?
+
+Lagos publishes two Docker images as separate packages on GitHub Container
+Registry. **Use `lagos` for the standard YAML-only gateway.**
+
+| Image | Purpose | When you need it |
+|---|---|---|
+| `ghcr.io/lagos-sh/lagos:0.1.4` | Small runtime image containing the gateway and CLI | Run the standard gateway, or use it as the final base image for a custom gateway |
+| `ghcr.io/lagos-sh/lagos-builder:0.1.4` | Build image containing Rust, Cargo, matching Lagos source, and `lagos-build` | Compile or test custom Rust policy in an optional `ext/` directory |
+
+An extension Dockerfile uses the builder to compile a custom executable, then
+copies that executable into the runtime stage. Deploy the resulting application
+image as one gateway container. The builder is used during builds and extension
+tests; it does not run alongside the deployed gateway. Pin both image tags to
+the same version; see [Building with extensions](docs/extensions.md).
+
+Standalone macOS/Linux CLI binaries are downloads under GitHub Releases,
+separate from these container packages; see [installation](docs/installation.md).
 
 ### Where the `lagos` command runs
 
@@ -108,17 +132,17 @@ docker run --rm -v "$PWD:/app" my-gateway diff old.yml gateway.yml
 
 The last two commands read files from your current directory. `test` expects
 `gateway.test.yml` beside `gateway.yml`. The `test` and `diff` commands require
-the upcoming 0.1.4 image; the published 0.1.3 image does not include them.
+version 0.1.4 or later; the 0.1.3 image does not include them.
 
 Standalone Linux/macOS downloads and an automatic platform-detecting installer
-are prepared for unreleased 0.1.4. Once published, install the CLI without Rust
+are available starting with 0.1.4. Install the CLI without Rust
 or Cargo; see [installation](docs/installation.md) for commands, version
 pinning, checksums, and manual downloads. The release binary provides both
-terminal commands and native serving. Source installation remains available
-for contributors; Docker commands above require no host CLI installation.
+terminal commands and native serving. Docker commands above require no host
+CLI installation.
 
 For YAML completion and configuration feedback, see
-[editor setup](docs/configuration-editor.md). The upcoming 0.1.4 CLI adds
+[editor setup](docs/configuration-editor.md). The 0.1.4 CLI includes
 `lagos schema` and `lagos schema --routes`; both also run inside Docker and
 require no configuration or runtime secrets. Local builds support
 `lagos init --docker --schema ./gateway.schema.json` after exporting a schema.
@@ -316,8 +340,8 @@ to freeze into one.
 ### Install a release binary
 
 Linux and macOS users can install a prebuilt `lagos` executable without a
-compiler or language toolchain. **These commands become available when 0.1.4
-is published; that version remains unreleased.**
+compiler or language toolchain. Standalone downloads are available starting
+with 0.1.4.
 
 ```sh
 curl -fsSL https://github.com/lagos-sh/lagos/releases/latest/download/install.sh -o install-lagos.sh
@@ -330,26 +354,6 @@ The installer supports Intel/AMD and ARM64 Linux, and Intel/Apple silicon
 macOS 14+. It verifies checksums and installs to your user directory without
 sudo or shell-profile edits. For pinned versions, other directories, and
 manual archive installation, see [installation](docs/installation.md).
-
-### Install from source
-
-Contributors can build and install the CLI locally with Rust and Cargo.
-
-#### Prerequisites
-
-- Rust and Cargo, with the toolchain specified in [rust-toolchain.toml](rust-toolchain.toml).
-- A native build environment suitable for the dependencies; the [Dockerfile](Dockerfile)
-  lists the tools used by the container build.
-
-```bash
-git clone https://github.com/lagos-sh/lagos.git
-cd lagos
-cargo install --path crates/lagos --locked
-```
-
-Ensure Cargo's binary directory is on your `PATH`, then check `lagos --help`.
-The gateway requires no database, Redis, or separate control plane. The example
-below uses an HTTP service exposing `/users` on `127.0.0.1:3000`.
 
 ### Create a gateway configuration
 
@@ -1051,13 +1055,13 @@ lagos explain --method GET --host api.example.com --path /users/42
 
 For unmatched requests, add `--why-not` to list prefix candidates and their host,
 method, listener, or deny-rule exclusions. `--listener internal` examines machine
-routes. Both options are included in unreleased 0.1.4; see
+routes. Both options are available starting with 0.1.4; see
 [route explanations](docs/route-explanations.md) for examples and unchecked work.
 
 To inspect resolved typed settings with redaction, use `lagos config --effective`.
 It describes this invocation's inputs and carries explicit unchecked state; see
 [effective configuration](docs/effective-configuration.md) for the redaction policy
-and Docker usage. This command is included in unreleased 0.1.4.
+and Docker usage. This command is available starting with 0.1.4.
 
 Use optional top-level `defaults:` to share route methods, retry policies, and
 rate limits. Routes can replace each policy, explicitly disable retry/rate
@@ -1067,7 +1071,7 @@ behavior.
 
 Before supplying environment variables, use `lagos vars` to see what the files
 need; see [variable diagnostics](docs/configuration-vars.md) for Docker usage
-and unchecked-file reporting. This command is included in unreleased 0.1.4.
+and unchecked-file reporting. This command is available starting with 0.1.4.
 
 Use `lagos --help` or `lagos <command> --help` for command options. Running
 `lagos` without a subcommand starts serving with the discovered configuration.
@@ -1212,10 +1216,10 @@ shell for the usual `RUN lagos ...`. If you later split routes into a separate
 `routes.yml`, add `COPY routes.yml /etc/lagos/routes.yml` before `RUN`; relative
 route paths are resolved beside `gateway.yml`.
 
-This path covers a deployment whose policy is entirely declarative. Compiled-in
-[extensions](#extensions) cannot be added this way — the image holds a built
-binary and no toolchain — so a deployment that needs one builds its own binary
-against `lagos-core` and ships that instead.
+This path covers a deployment whose policy is entirely declarative. For custom
+[extensions](#architecture-and-extensions), use the
+[`ext/` starter](docs/extensions.md) and matching `lagos-builder` image to
+compile your application binary, then copy it into the runtime stage.
 
 The image uses a distroless Debian runtime and runs as a nonroot user. Pass any
 required configuration environment variables to the container. Mount separate
@@ -1386,9 +1390,8 @@ checks verify specific behavior; they do not establish production readiness.
 
 [ROADMAP.md](ROADMAP.md) records what is being worked toward and what is
 deliberately out of scope — including the items that most often come up as
-missing: distributed rate limiting, `lagos diff` and `lagos test`, OpenAPI
-import, traffic splitting, and a control plane that would never sit on the
-request path.
+missing: distributed rate limiting, OpenAPI import, traffic splitting, and a
+control plane that would never sit on the request path.
 
 What already works is in [Features](#features) above.
 

@@ -1,8 +1,8 @@
 # Environment variable diagnostics
 
-`lagos vars [CONFIG]` is implemented for **unreleased 0.1.4**. It is not
-available in the published 0.1.3 image. It runs in the gateway image or in a
-locally built CLI, including binaries with custom extensions. It does not
+`lagos vars [CONFIG]` is available starting with **0.1.4**. It is not
+available in the 0.1.3 image. It runs in the gateway image or in an
+installed CLI, including binaries with custom extensions. It does not
 construct extensions, contact services, or start a server.
 
 Run it before filling in all your environment variables:
@@ -58,18 +58,12 @@ paths from indentation or print arbitrary configuration keys.
 
 ## Run inside Docker
 
-For the current unpublished changes, first build an image from the repository:
-
-```bash
-docker build -t lagos-local .
-```
-
-From your gateway project directory:
+Use the published runtime image from your gateway project directory:
 
 ```bash
 docker run --rm \
   -v "$PWD:/app:ro" -w /app \
-  lagos-local vars gateway.yml
+  ghcr.io/lagos-sh/lagos:0.1.4 vars gateway.yml
 ```
 
 Pass the variables you want the inventory to check in the container. For
@@ -79,10 +73,11 @@ example, if your local `USERS_URL` is already exported:
 docker run --rm \
   -v "$PWD:/app:ro" -w /app \
   -e USERS_URL \
-  lagos-local vars gateway.yml
+  ghcr.io/lagos-sh/lagos:0.1.4 vars gateway.yml
 ```
 
-After release, use your matching pinned gateway image in place of `lagos-local`.
+Use the pinned gateway image matching your deployment, including your custom
+application image if you use extensions.
 Mount the directory when using external route files, so paths relative to
 `gateway.yml` are also available inside the container.
 

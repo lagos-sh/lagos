@@ -5,10 +5,11 @@ Installing a release binary requires no Rust, Cargo, Git, or Docker. Your
 backend services can use any language. Docker remains an alternative, and
 custom extensions remain optional.
 
-**Availability:** standalone downloads are prepared for unreleased 0.1.4.
-The release URLs below become usable after that version is published. Earlier
-image releases do not provide these native downloads. Until then, use Docker
-or [build from source](../README.md#install-from-source).
+Standalone downloads are available starting with 0.1.4. Earlier image releases
+do not provide these native downloads. These CLI archives and the installer
+are assets under GitHub Releases; the `lagos` and `lagos-builder` packages on
+GitHub Container Registry are Docker images. See
+[which image to use](../README.md#which-docker-image-should-i-use).
 
 ## Linux and macOS
 
@@ -103,8 +104,10 @@ the same version-matched editor schema convention as official release images.
 
 For custom functionality, `lagos init --docker --extensions` adds the optional
 `ext/` starter. The extension builder image contains the Rust toolchain, so
-users can compile it through Docker without installing Rust locally. Writing
-those extensions still uses Rust; see [extensions](extensions.md).
+users can compile it through Docker without installing Rust locally. Use
+`lagos-builder` during builds and extension tests, then deploy the application
+image based on the `lagos` runtime. Writing those extensions still uses Rust;
+see [extensions](extensions.md).
 
 ## Release verification
 
@@ -117,5 +120,5 @@ On version tags, schema references are enabled only after version and schema
 checks pass. After native checks and Docker image smoke checks succeed, the
 workflow assembles all four archives, the installer, and `SHA256SUMS`, uploads
 them to a draft GitHub Release, and publishes it. No native assets are attached
-to existing published releases. These workflows are release preparation;
-editing them does not publish 0.1.4.
+to existing published releases. Publishing is triggered by a version tag;
+editing workflow files alone does not publish a new version.

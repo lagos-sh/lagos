@@ -1,7 +1,7 @@
 # Explain route selection
 
-`lagos explain --why-not` and `--listener public|internal` are implemented for
-**unreleased 0.1.4**. The new options are not in the published 0.1.3 image.
+`lagos explain --why-not` and `--listener public|internal` are available starting
+with **0.1.4**. These options are not in the 0.1.3 image.
 The command uses the current files and environment, without starting a server,
 constructing extensions, fetching verification keys, or contacting upstreams.
 It does not inspect a running gateway's route snapshot.
@@ -82,23 +82,18 @@ adds no HTTP route-inventory or refusal-details endpoint.
 
 ## Use the Docker CLI
 
-For the unpublished changes, build the repository image:
-
-```bash
-docker build -t lagos-local .
-```
-
-From your gateway project directory:
+Use the published runtime image from your gateway project directory:
 
 ```bash
 docker run --rm \
   -v "$PWD:/app:ro" -w /app \
-  lagos-local explain --config gateway.yml \
+  ghcr.io/lagos-sh/lagos:0.1.4 explain --config gateway.yml \
   --path /v1/users/42 --host api.example.com --why-not
 ```
 
 Pass the environment variables needed to load your configuration with Docker's
 `-e VARIABLE` options. `lagos vars` can inventory those dependencies first;
 see [variable diagnostics](configuration-vars.md). Mount the configuration
-directory to make relative external route files available. After release,
-replace `lagos-local` with the matching pinned gateway image.
+directory to make relative external route files available. Use the pinned
+gateway image matching your deployment, including your custom application
+image if you use extensions.
