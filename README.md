@@ -110,20 +110,12 @@ The last two commands read files from your current directory. `test` expects
 `gateway.test.yml` beside `gateway.yml`. The `test` and `diff` commands require
 the upcoming 0.1.4 image; the published 0.1.3 image does not include them.
 
-To type `lagos` directly in your host terminal, install it from source with
-Rust and Cargo:
-
-```bash
-git clone https://github.com/lagos-sh/lagos.git
-cd lagos
-cargo install --path crates/lagos --locked
-lagos --help
-```
-
-See [native prerequisites](#prerequisites) if the build needs system libraries.
-`lagos init --docker` runs wherever that binary runs, so the simplest no-Rust
-start is to copy the two example files. The release workflow currently
-publishes Docker images to GHCR, not a separate downloadable CLI binary.
+Standalone Linux/macOS downloads and an automatic platform-detecting installer
+are prepared for unreleased 0.1.4. Once published, install the CLI without Rust
+or Cargo; see [installation](docs/installation.md) for commands, version
+pinning, checksums, and manual downloads. The release binary provides both
+terminal commands and native serving. Source installation remains available
+for contributors; Docker commands above require no host CLI installation.
 
 For YAML completion and configuration feedback, see
 [editor setup](docs/configuration-editor.md). The upcoming 0.1.4 CLI adds
@@ -321,19 +313,33 @@ to freeze into one.
 
 ## Native use
 
-### Prerequisites
+### Install a release binary
+
+Linux and macOS users can install a prebuilt `lagos` executable without a
+compiler or language toolchain. **These commands become available when 0.1.4
+is published; that version remains unreleased.**
+
+```sh
+curl -fsSL https://github.com/lagos-sh/lagos/releases/latest/download/install.sh -o install-lagos.sh
+sh install-lagos.sh
+export PATH="$HOME/.local/bin:$PATH"
+lagos --help
+```
+
+The installer supports Intel/AMD and ARM64 Linux, and Intel/Apple silicon
+macOS 14+. It verifies checksums and installs to your user directory without
+sudo or shell-profile edits. For pinned versions, other directories, and
+manual archive installation, see [installation](docs/installation.md).
+
+### Install from source
+
+Contributors can build and install the CLI locally with Rust and Cargo.
+
+#### Prerequisites
 
 - Rust and Cargo, with the toolchain specified in [rust-toolchain.toml](rust-toolchain.toml).
 - A native build environment suitable for the dependencies; the [Dockerfile](Dockerfile)
   lists the tools used by the container build.
-- An HTTP service exposing `/users` on `127.0.0.1:3000` to test proxy requests.
-
-The gateway itself does not require a database, Redis, or a separate control plane.
-
-### Install from source
-
-This builds and installs the same `lagos` binary that is inside the Docker
-image. There is currently no standalone binary download in releases.
 
 ```bash
 git clone https://github.com/lagos-sh/lagos.git
@@ -341,11 +347,9 @@ cd lagos
 cargo install --path crates/lagos --locked
 ```
 
-Ensure Cargo's binary directory is on your `PATH`, then check the CLI:
-
-```bash
-lagos --help
-```
+Ensure Cargo's binary directory is on your `PATH`, then check `lagos --help`.
+The gateway requires no database, Redis, or separate control plane. The example
+below uses an HTTP service exposing `/users` on `127.0.0.1:3000`.
 
 ### Create a gateway configuration
 

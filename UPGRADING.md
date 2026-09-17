@@ -8,6 +8,14 @@ moved forward deliberately rather than discovered in production.
 
 ## 0.1.3 → 0.1.4 — CLI developer experience and pool health checks
 
+Standalone Linux/macOS CLI downloads are prepared for this release, alongside
+existing Docker images. The optional installer requires no Rust or Cargo;
+prebuilt Linux targets use static musl linkage and macOS targets require 14+.
+Version pinning and SHA-256 verification are included. Installation URLs become
+available after publication; no Windows native download is included. See
+[installation](docs/installation.md). Source builds and Docker use remain
+available, and binary distribution does not change gateway configuration.
+
 Existing gateway configuration remains valid without `defaults:`. `lagos init`
 now generates a minimal one-route file; use `examples/gateway.yml` for the full reference. The new
 `lagos init --docker`, `lagos test`, and `lagos diff` commands are optional.

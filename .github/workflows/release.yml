@@ -6,7 +6,7 @@ name: Release
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Produces lagos and lagos-builder images tagged 0.1.0, 0.1 and latest.
+# Produces lagos and lagos-builder images plus native Linux/macOS downloads.
 on:
   push:
     tags: ['v*']
@@ -31,6 +31,8 @@ jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release_version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -80,6 +82,7 @@ jobs:
       # 0.1.0 and every bug report cites the wrong version. Cheap to check here,
       # unfixable once pushed.
       - name: Tag matches crate version
+        id: release_version
         run: |
           crate=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "lagos") | .version')
@@ -89,6 +92,7 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
             exit 1
           fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
 
       # Schemas are committed in the version tag, so their raw URLs are
       # available before images are published. Unit tests above detect drift.
@@ -101,9 +105,15 @@ jobs:
             cmp "schemas/${schema_file}" "/tmp/${schema_file}"
           done
 
+  native:
+    needs: verify
+    uses: ./.github/workflows/native-binaries.yml
+    with:
+      schema_release: ${{ needs.verify.outputs.version }}
+
   build:
     name: Build ${{ matrix.platform }}
-    needs: verify
+    needs: [verify, native]
     strategy:
       fail-fast: false
       matrix:
@@ -323,3 +333,40 @@ jobs:
             echo "    docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
             echo "    docker pull ${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}:${{ steps.builder_meta.outputs.version }}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+
+  downloads:
+    name: Publish standalone downloads
+    needs: [native, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: release-assets
+      - name: Prepare complete release assets
+        run: |
+          cp install.sh release-assets/install.sh
+          python3 release/package.py checksums --directory release-assets --version "${GITHUB_REF_NAME#v}"
+      - name: Publish GitHub Release after all smoke checks
+        run: |
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft'); then
+            if [ "$draft" != true ]; then
+              echo 'Release already published; refusing to replace its standalone downloads.' >&2
+              exit 1
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          case "$GITHUB_REF_NAME" in
+            *-*) gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease ;;
+            *) gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false ;;
+          esac
