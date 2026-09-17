@@ -3,14 +3,14 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## 0.1.4 — Docker starters and policy checks (unreleased)
+## 0.1.4 — Docker starters and policy checks
 
 - Prepared standalone stock CLI downloads for Linux/macOS on x86_64 and ARM64,
   packaged with licenses and SHA-256 checksums. A POSIX installer detects the
   platform, supports version pinning and custom destinations, and verifies
   downloads before replacing an existing executable. Native build/linkage,
   installer, schema, and proxy smoke checks run before publishing GitHub Release
-  assets. Users need no Rust or Cargo; 0.1.4 remains unreleased.
+  assets.
 
 - Added optional top-level route defaults for `methods`, `retry`, and
   `rate_limit`, resolved identically for runtime, route-file reloads, and CLI
