@@ -47,6 +47,15 @@ routes:
       upstream: users
       methods: [POST]
 
+    # `strip_prefix` forwards the path beneath the prefix, so services can
+    # share one hostname under their own prefixes: /svc/search/q?term=x
+    # reaches `search` as /q?term=x. Every gateway decision still sees the
+    # full path.
+    #
+    # - prefix: /svc/search
+    #   upstream: search
+    #   strip_prefix: true
+
     # `host:` separates traffic between tenants or environments. It is routing,
     # not a security boundary — the client picks its own Host header. Use the
     # `machine` group or `internal:` for anything that must be unreachable.

@@ -82,6 +82,10 @@ struct Expected {
     tier: Option<String>,
     #[serde(default)]
     upstream: Option<String>,
+    /// The path the upstream receives, with a leading `/` and without the
+    /// query — what `strip_prefix` changes.
+    #[serde(default)]
+    upstream_path: Option<String>,
     /// Whether every ownership binding permits the synthetic identity.
     #[serde(default)]
     bindings: Option<bool>,
@@ -93,6 +97,7 @@ struct Actual {
     route: Option<String>,
     tier: Option<String>,
     upstream: Option<String>,
+    upstream_path: Option<String>,
     bindings: Option<bool>,
 }
 
@@ -103,6 +108,7 @@ impl Actual {
             route: None,
             tier: None,
             upstream: None,
+            upstream_path: None,
             bindings: None,
         }
     }
@@ -191,10 +197,19 @@ fn validate_case(case: &TestCase) -> anyhow::Result<()> {
     } else if case.expect.route.is_some()
         || case.expect.tier.is_some()
         || case.expect.upstream.is_some()
+        || case.expect.upstream_path.is_some()
         || case.expect.bindings.is_some()
     {
         bail!(
-            "test `{}`: route, tier, upstream, and bindings apply only to a route result",
+            "test `{}`: route, tier, upstream, upstream_path, and bindings apply only to a route result",
+            case.name
+        );
+    }
+    if let Some(path) = &case.expect.upstream_path
+        && (!path.starts_with('/') || path.contains('?'))
+    {
+        bail!(
+            "test `{}`: expect.upstream_path must start with / and exclude the query",
             case.name
         );
     }
@@ -244,6 +259,7 @@ fn decide(cfg: &ResolvedConfig, table: &RouteTable, request: &TestRequest) -> Ac
         route: Some(route.id.clone()),
         tier: Some(route.auth.group().to_string()),
         upstream: Some(route.upstream.clone()),
+        upstream_path: Some(format!("/{}", route.upstream_path(&canonical))),
         bindings,
     }
 }
@@ -269,6 +285,11 @@ fn compare(expected: &Expected, actual: &Actual) -> Vec<String> {
             "upstream",
             expected.upstream.as_ref(),
             actual.upstream.as_ref(),
+        ),
+        (
+            "upstream_path",
+            expected.upstream_path.as_ref(),
+            actual.upstream_path.as_ref(),
         ),
     ] {
         if let Some(want) = want
@@ -311,6 +332,7 @@ fn route_fields(route: &RouteConfig) -> BTreeMap<&'static str, String> {
         ("cache", route.cache.to_string()),
         ("cache_authenticated", route.cache_authenticated.to_string()),
         ("sse", route.sse.to_string()),
+        ("strip_prefix", route.strip_prefix.to_string()),
     ])
 }
 

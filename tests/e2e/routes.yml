@@ -1,6 +1,8 @@
 internal:
   - loyalty/wallets
   - products/internal
+  # Beneath a strip_prefix route: denied on the full path, not the stripped one.
+  - svc/echo/secret
 
 optional:
   - id: browse
@@ -78,6 +80,11 @@ public:
     prefix: products
     upstream: echo
     methods: [GET]
+  - id: svc-echo
+    prefix: svc/echo
+    upstream: echo
+    methods: [GET]
+    strip_prefix: true
   - id: sse
     prefix: events
     upstream: sse

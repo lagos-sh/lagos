@@ -220,7 +220,7 @@ fn project(
             "group": group, "id": rs.hidden(&path), "prefix": rs.hidden(&path), "host": rs.hidden(&path),
             "upstream": rs.safe(&path, json!(upstream_ids.get(&route.upstream))),
             "methods": policy(s, rs, &path, "methods", route.policy_origins.methods, json!(methods)), "enabled": rs.safe(&path, json!(route.enabled)),
-            "sse": rs.safe(&path, json!(route.sse)), "cache": rs.safe(&path, json!(route.cache)),
+            "sse": rs.safe(&path, json!(route.sse)), "strip_prefix": rs.safe(&path, json!(route.strip_prefix)), "cache": rs.safe(&path, json!(route.cache)),
             "retry": policy(s, rs, &path, "retry", route.policy_origins.retry, json!(retry)), "rate_limit": policy(s, rs, &path, "rate_limit", route.policy_origins.rate_limit, json!(rate)),
             "bind": rs.hidden(&path), "extensions": {"value": REDACTED, "status": "unchecked", "origin": format!("{}.{}", rs.label, path)}
         })

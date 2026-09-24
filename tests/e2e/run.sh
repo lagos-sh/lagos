@@ -169,6 +169,7 @@ routes:
   internal: [/admin]
   public:
     - { id: catalog, prefix: /products, upstream: users, methods: [GET], host: api.example.com }
+    - { id: svc-users, prefix: /svc/users, upstream: users, strip_prefix: true }
   authenticated:
     - id: orders
       prefix: /orders
@@ -181,7 +182,13 @@ cat >"$POLICYDIR/gateway.test.yml" <<'YAML'
 tests:
   - name: public catalog on its host
     request: { path: /api/products/1, host: api.example.com }
-    expect: { result: route, route: catalog, tier: public, upstream: users }
+    expect: { result: route, route: catalog, tier: public, upstream: users, upstream_path: /products/1 }
+  - name: strip_prefix forwards the path beneath the prefix
+    request: { path: /api/svc/users/42/pets }
+    expect: { result: route, route: svc-users, upstream: users, upstream_path: /42/pets }
+  - name: strip_prefix sends the bare prefix as the root
+    request: { path: /api/svc/users }
+    expect: { result: route, route: svc-users, upstream_path: / }
   - name: host restriction
     request: { path: /api/products/1, host: other.example.com }
     expect: { result: no_route }
@@ -217,10 +224,19 @@ tests:
     expect: { result: route, route: jobs, tier: machine }
 YAML
 if ( cd "$POLICYDIR" && ./lagos test >"$WORK/policy-test.log" 2>&1 ) \
-  && grep -q '10 passed, 0 failed' "$WORK/policy-test.log"; then
-  ok "lagos test checks routes, tiers, binds, and listener isolation"
+  && grep -q '12 passed, 0 failed' "$WORK/policy-test.log"; then
+  ok "lagos test checks routes, tiers, binds, upstream paths, and listener isolation"
 else
-  bad "lagos test checks routes, tiers, binds, and listener isolation" "$(tail -3 "$WORK/policy-test.log")"
+  bad "lagos test checks routes, tiers, binds, upstream paths, and listener isolation" "$(tail -3 "$WORK/policy-test.log")"
+fi
+
+sed 's#upstream_path: /42/pets#upstream_path: /svc/users/42/pets#' "$POLICYDIR/gateway.test.yml" >"$POLICYDIR/stripfail.test.yml"
+if ( cd "$POLICYDIR" && ./lagos test gateway.yml stripfail.test.yml >"$WORK/policy-strip.log" 2>&1 ); then
+  bad "lagos test catches a wrong upstream path"
+elif grep -q 'upstream_path: expected "/svc/users/42/pets", got Some("/42/pets")' "$WORK/policy-strip.log"; then
+  ok "lagos test catches a wrong upstream path"
+else
+  bad "lagos test catches a wrong upstream path" "$(tail -3 "$WORK/policy-strip.log")"
 fi
 
 sed 's#http://localhost:3000#${POLICY_UPSTREAM_URL}#' "$POLICYDIR/gateway.yml" >"$POLICYDIR/unset.yml"
@@ -250,6 +266,8 @@ upstreams:
   users: http://localhost:3000
   accounts: http://localhost:3001
 routes:
+  public:
+    - { id: svc-users, prefix: /svc/users, upstream: users }
   authenticated:
     - { id: catalog, prefix: /products, upstream: users, methods: [GET], host: api.example.com }
     - { id: accounts, prefix: /accounts, upstream: accounts, methods: [GET] }
@@ -263,10 +281,11 @@ YAML
 if ( cd "$POLICYDIR" && ./lagos diff gateway.yml new.yml >"$WORK/policy-diff.log" 2>&1 ) \
   && grep -q 'route catalog: tier: public → authenticated' "$WORK/policy-diff.log" \
   && grep -q 'route accounts' "$WORK/policy-diff.log" \
-  && grep -q 'denied /admin' "$WORK/policy-diff.log"; then
-  ok "lagos diff reports tier changes, added routes, and removed denies"
+  && grep -q 'denied /admin' "$WORK/policy-diff.log" \
+  && grep -q 'route svc-users: strip_prefix: true → false' "$WORK/policy-diff.log"; then
+  ok "lagos diff reports tier, route, deny, and strip_prefix changes"
 else
-  bad "lagos diff reports tier changes, added routes, and removed denies" "$(tail -5 "$WORK/policy-diff.log")"
+  bad "lagos diff reports tier, route, deny, and strip_prefix changes" "$(tail -5 "$WORK/policy-diff.log")"
 fi
 
 # The same name has to reach the error path, not just the happy path.
@@ -546,6 +565,26 @@ say "single entry point"
 expect "bare service path is served too"       200 "$G/products/42"
 expect "deny-list applies at the bare path"    404 "$G/loyalty/wallets/7"
 expect "deny-list applies at the mounted path" 404 "$G/bff/v1/loyalty/wallets/7"
+
+say "prefix stripping"
+# What the upstream actually received, from the echo fixture's reflection.
+# Usage: upstream_path <desc> <want> <url>
+upstream_path() {
+  local desc=$1 want=$2 url=$3
+  curl -s -m 5 --path-as-is "$url" > "$WORK/strip.json"
+  local got
+  got=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$WORK/strip.json" 2>/dev/null)
+  if [ "$got" = "$want" ]; then ok "$desc" "$got"
+  else bad "$desc" "got '$got' want '$want'"; fi
+}
+upstream_path "prefix removed, rest and query kept"    "/items/7?x=1" "$G/bff/v1/svc/echo/items/7?x=1"
+upstream_path "stripped at the bare mount as well"     "/items/7"     "$G/svc/echo/items/7"
+upstream_path "the bare prefix becomes the root"       "/"            "$G/bff/v1/svc/echo"
+upstream_path "encoded characters survive stripping"   "/a%20b"       "$G/bff/v1/svc/echo/a%20b"
+upstream_path "a route without it keeps its prefix"    "/products/42" "$G/bff/v1/products/42"
+expect "deny-list sees the full path, not the stripped one" 404 "$G/bff/v1/svc/echo/secret/x"
+expect "stripping does not loosen the segment boundary"     404 "$G/bff/v1/svc/echox/1"
+expect "traversal is refused before any stripping"          404 "$G/bff/v1/svc/echo/%2e%2e/products/internal/x"
 
 say "machine tier isolation"
 # Two separate refusals: the route is simply not in the public table (404),

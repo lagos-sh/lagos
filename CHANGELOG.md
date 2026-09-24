@@ -3,6 +3,19 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## 0.1.5
+
+- Added per-route `strip_prefix`. When set, the matched route prefix is removed
+  from the path sent upstream (`prefix: /svc/users` forwards `/svc/users/42` as
+  `/42`, and the bare prefix as `/`); the query string is unchanged. It is off by
+  default, so existing routes still preserve their prefix. Only the upstream
+  request line changes: the deny-list, matching, bindings, cache keys, logs and
+  metrics keep using the full canonical path, and matching stays on a segment
+  boundary. `lagos explain` shows the forwarded path, `lagos routes` marks the
+  route, `lagos diff` and `lagos config --effective` report the field, `lagos
+  dev` narrates the forwarded path, and `lagos test` can assert it with
+  `expect.upstream_path`. Editor schemas include the field.
+
 ## 0.1.4 — Docker starters and policy checks
 
 - Prepared standalone stock CLI downloads for Linux/macOS on x86_64 and ARM64,
