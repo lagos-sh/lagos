@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "lagos"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "lagos-core",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "lagos-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
