@@ -25,7 +25,6 @@ Ordered roughly by how often the absence bites.
 
 | | Why |
 |---|---|
-| **Production validation** | Load and soak testing, memory behaviour under sustained traffic. The single biggest gap between "tested" and "trustworthy" — see [Project status](README.md#project-status) |
 | **Distributed rate limiting** | Counters are per process today: 100/min across three replicas admits 300/min. Fits behind the existing `Limiter` interface |
 | **Stale-while-error on JWKS** | An identity provider outage currently stops authenticated traffic, even though the cached keys were almost certainly still valid |
 | **Total request deadline** | Timeouts are per read, per write and per connect. A client making slow but steady progress stays inside all of them indefinitely |
@@ -71,7 +70,6 @@ them**. It does not inspect what is sent through it.
 1.0 means the configuration format is stable and breaking changes get a
 deprecation period. Getting there needs:
 
-- A real production deployment, and load/soak results to go with it
 - The configuration surface reviewed once, deliberately, for things that would be painful to keep
 - `validate` / `explain` / `diff` covering enough that a config change can be reviewed without reading Rust
 - Security review of the request path by someone who did not write it

@@ -28,12 +28,6 @@ Redis, no control plane, no sidecar, no operator:
 lagos run gateway.yml
 ```
 
-> [!IMPORTANT]
-> **Early development, pre-1.0.** Lagos has not been deployed in production or
-> validated through load or soak testing. Configuration may change without a
-> deprecation period before 1.0. Evaluate it in development and test environments;
-> it is not yet recommended for production traffic. See [Project status](#project-status).
-
 ## Quick start: two files, no Rust
 
 Start with `ghcr.io/lagos-sh/lagos:0.1.4`. The optional `lagos-builder` image
@@ -280,7 +274,6 @@ metrics; sampled requests also produce trace data.
 - [Architecture and extensions](#architecture-and-extensions)
 - [Development and testing](#development-and-testing)
 - [Contributing](#contributing)
-- [Project status](#project-status)
 - [Roadmap](#roadmap)
 - [Security](#security)
 - [License](#license)
@@ -1398,19 +1391,6 @@ changes are welcome.
    change and how it was validated.
 
 Use the private reporting process below for suspected vulnerabilities.
-
-## Project status
-
-Lagos is an early-stage, pre-1.0 project. The current test suites include 251
-unit tests, 134 end-to-end cases, and 38 additional regression checks. These
-checks verify specific behavior; they do not establish production readiness.
-
-- No production deployment has been reported by the project.
-- Load and soak testing have not been completed; no throughput or latency
-  benchmark claims are made.
-- The configuration format may change without a deprecation period before 1.0.
-- Memory limits are covered by implementation checks and tests, but have not
-  been validated under sustained production traffic.
 
 ## Roadmap
 
