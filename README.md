@@ -389,7 +389,8 @@ curl http://127.0.0.1:8080/users
 
 `/health` reports gateway status. `/users` forwards to the configured service,
 so its response depends on that service being available. The route prefix is
-preserved: `/users/42` is forwarded as `/users/42`.
+preserved: `/users/42` is forwarded as `/users/42` (see
+[Stripping a route prefix](#stripping-a-route-prefix) to remove it).
 
 For a generated minimal configuration, run `lagos init` in a directory without
 an existing `gateway.yml`. See [examples/gateway.yml](examples/gateway.yml) for
@@ -494,6 +495,29 @@ server:
 
 The longest matching mount is removed before route matching. With the `/users`
 route above, `/api/v1/users/42` and `/users/42` both forward as `/users/42`.
+
+### Stripping a route prefix
+
+A mount applies to every request. To remove a prefix for one route only — so
+several services can share one hostname under their own prefixes while each
+keeps serving from its root — set `strip_prefix`:
+
+```yaml
+routes:
+  public:
+    - prefix: /svc/users
+      upstream: users
+      strip_prefix: true   # /svc/users/42 → /42, /svc/users → /
+    - prefix: /orders
+      upstream: orders     # /orders/7 → /orders/7 (the default)
+```
+
+Only the path sent upstream changes. The deny-list, route matching, bindings,
+cache keys, logs and metrics all use the full path, so `internal: [/svc/users/admin]`
+still denies `/svc/users/admin/x` even though the upstream would have seen
+`/admin/x`. The query string is forwarded unchanged, and a mount is removed
+first, then the route prefix. `lagos explain` shows the path the upstream
+receives, and `lagos test` can assert it with `expect.upstream_path`.
 
 Routes can also live in a separate file:
 
@@ -1096,6 +1120,8 @@ Run `lagos test gateway.yml`. A failing expectation exits nonzero and names the
 field that differed. For an ownership rule, supply `request.query`, optional
 `request.headers`, and a synthetic `request.identity` with `subject` and
 `claims`; `expect.bindings: true` or `false` checks all configured bindings.
+`expect.upstream_path` checks the path the upstream receives, which differs
+from the request path on a `strip_prefix` route.
 `request.listener: internal` checks machine-tier routing. Other results are
 `denied`, `outside_mount`, and `unsafe_path`.
 Use `--allow-unset` in CI when deployment-only variables are unavailable; the

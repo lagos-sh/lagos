@@ -1781,6 +1781,19 @@
               "default": false,
               "description": "Stream the response without buffering and use the SSE timeout budget."
             },
+            "strip_prefix": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Remove the matched `prefix` before forwarding, so the upstream sees the\npath beneath it: `prefix: /svc/users` sends `/svc/users/42` as `/42`,\nand the bare prefix as `/`.\n\nOff by default, so the prefix is preserved as before. Every gateway\ndecision — deny-list, matching, bindings, cache, logs — still uses the\nfull canonical path; only the request line sent upstream changes. The\nquery string is kept as is."
+            },
             "upstream": {
               "description": "Key into `upstreams`.",
               "type": "string"

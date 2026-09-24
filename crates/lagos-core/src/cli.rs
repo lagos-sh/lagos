@@ -654,6 +654,9 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
         if r.sse {
             notes.push("sse".to_string());
         }
+        if r.strip_prefix {
+            notes.push("strip-prefix".to_string());
+        }
         if !r.extensions.is_empty() {
             notes.push(r.extensions.join("+"));
         }
@@ -918,7 +921,14 @@ fn explain(
                 .join(", ")
         })
         .unwrap_or_else(|| "<undefined>".to_string());
-    println!("  {}  {urls}/{canonical}", route.upstream);
+    println!(
+        "  {}  {urls}/{}",
+        route.upstream,
+        route.upstream_path(&canonical)
+    );
+    if route.strip_prefix {
+        println!("  prefix `/{}` stripped before forwarding", route.prefix);
+    }
 
     let timeout = if route.sse {
         cfg.raw.timeouts.sse

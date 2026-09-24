@@ -87,6 +87,29 @@ fn choose_dns_address(
     addrs.get(index).copied()
 }
 
+/// The request target sent upstream: the target's own base path, then the
+/// canonical sub-path (percent-encoded per segment), then the original query.
+///
+/// An empty `path` — the bare prefix of a `strip_prefix` route — addresses the
+/// upstream's root: `/` for a bare target, and the base path itself, without a
+/// trailing slash, for one with a base path (`http://svc/api` gets `/api`).
+fn upstream_uri(base_path: &str, path: &str, query: Option<&str>) -> String {
+    let mut uri = String::with_capacity(base_path.len() + path.len() + 32);
+    if !base_path.is_empty() {
+        uri.push('/');
+        uri.push_str(base_path);
+    }
+    if !path.is_empty() || base_path.is_empty() {
+        uri.push('/');
+        uri.push_str(&encode_path_segments(path));
+    }
+    if let Some(q) = query {
+        uri.push('?');
+        uri.push_str(q);
+    }
+    uri
+}
+
 /// Whether a new trace should be sampled.
 ///
 /// A request that already carries a sampling decision keeps it; this only
@@ -111,6 +134,10 @@ pub struct Ctx {
     pub method: String,
     /// Canonical, decoded sub-path used for every authorization decision.
     pub path: String,
+    /// What is sent upstream in place of `path`, when the matched route has
+    /// `strip_prefix`. `None` means `path` itself, so a route without it
+    /// costs no allocation.
+    pub upstream_path: Option<String>,
     pub query: Option<String>,
     pub route_id: String,
     pub upstream_name: String,
@@ -357,6 +384,9 @@ impl Gateway {
                 ctx.upstream_name,
                 if ctx.sse { "  (sse)" } else { "" }
             );
+            if let Some(path) = &ctx.upstream_path {
+                let _ = writeln!(out, "    as         /{path}  (prefix stripped)");
+            }
         }
 
         if let Some(t) = &ctx.trace {
@@ -1205,6 +1235,9 @@ impl ProxyHttp for Gateway {
         ctx.route_id = route.id.clone();
         ctx.upstream_name = route.upstream.clone();
         ctx.sse = route.sse;
+        if route.strip_prefix {
+            ctx.upstream_path = Some(route.upstream_path(&ctx.path).to_string());
+        }
         if route.sse {
             // An event stream is a long-lived response by design. The write
             // timeout only fires on a *stalled* write, but a stream with sparse
@@ -1339,17 +1372,11 @@ impl ProxyHttp for Gateway {
             pingora::Error::explain(pingora::ErrorType::InternalError, "no backend was selected")
         })?;
 
-        let mut uri = String::with_capacity(ctx.path.len() + 32);
-        if !target.base_path.is_empty() {
-            uri.push('/');
-            uri.push_str(&target.base_path);
-        }
-        uri.push('/');
-        uri.push_str(&encode_path_segments(&ctx.path));
-        if let Some(q) = &ctx.query {
-            uri.push('?');
-            uri.push_str(q);
-        }
+        let uri = upstream_uri(
+            &target.base_path,
+            ctx.upstream_path.as_deref().unwrap_or(&ctx.path),
+            ctx.query.as_deref(),
+        );
         let parsed: http::Uri = uri.parse().map_err(|_| {
             pingora::Error::explain(
                 pingora::ErrorType::InternalError,
@@ -1851,6 +1878,27 @@ impl ProxyHttp for Gateway {
 mod tests {
     use super::*;
     use crate::config::GatewayConfig;
+
+    #[test]
+    fn upstream_uri_joins_base_path_path_and_query() {
+        // Unchanged shapes: every non-empty path, with and without a base.
+        assert_eq!(upstream_uri("", "users/42", None), "/users/42");
+        assert_eq!(upstream_uri("api", "users/42", None), "/api/users/42");
+        assert_eq!(
+            upstream_uri("api", "users/42", Some("x=1")),
+            "/api/users/42?x=1"
+        );
+        assert_eq!(upstream_uri("", "a b", None), "/a%20b");
+    }
+
+    #[test]
+    fn a_stripped_bare_prefix_addresses_the_upstream_root() {
+        assert_eq!(upstream_uri("", "", None), "/");
+        assert_eq!(upstream_uri("", "", Some("x=1")), "/?x=1");
+        // No trailing slash appended to the target's own base path.
+        assert_eq!(upstream_uri("api", "", None), "/api");
+        assert_eq!(upstream_uri("api/v2", "", Some("x=1")), "/api/v2?x=1");
+    }
 
     #[test]
     fn dns_retries_use_the_next_address() {

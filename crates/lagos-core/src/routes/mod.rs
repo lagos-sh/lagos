@@ -175,6 +175,16 @@ pub struct RouteConfig {
     /// Stream the response without buffering and use the SSE timeout budget.
     #[serde(default)]
     pub sse: bool,
+    /// Remove the matched `prefix` before forwarding, so the upstream sees the
+    /// path beneath it: `prefix: /svc/users` sends `/svc/users/42` as `/42`,
+    /// and the bare prefix as `/`.
+    ///
+    /// Off by default, so the prefix is preserved as before. Every gateway
+    /// decision — deny-list, matching, bindings, cache, logs — still uses the
+    /// full canonical path; only the request line sent upstream changes. The
+    /// query string is kept as is.
+    #[serde(default)]
+    pub strip_prefix: bool,
     /// Set `false` to leave the route out of the table. Combined with
     /// interpolation this is a rollout switch: `enabled: ${NEW_ROUTES:-false}`.
     #[serde(default = "enabled_by_default")]
@@ -264,6 +274,16 @@ struct RouteInput {
     /// Stream the response without buffering and use the SSE timeout budget.
     #[serde(default)]
     pub sse: bool,
+    /// Remove the matched `prefix` before forwarding, so the upstream sees the
+    /// path beneath it: `prefix: /svc/users` sends `/svc/users/42` as `/42`,
+    /// and the bare prefix as `/`.
+    ///
+    /// Off by default, so the prefix is preserved as before. Every gateway
+    /// decision — deny-list, matching, bindings, cache, logs — still uses the
+    /// full canonical path; only the request line sent upstream changes. The
+    /// query string is kept as is.
+    #[serde(default)]
+    pub strip_prefix: bool,
     /// Set `false` to leave the route out of the table. Combined with
     /// interpolation this is a rollout switch: `enabled: ${NEW_ROUTES:-false}`.
     #[serde(default = "enabled_by_default")]
@@ -318,6 +338,7 @@ impl From<RouteInput> for RouteConfig {
             prefix: input.prefix,
             upstream: input.upstream,
             sse: input.sse,
+            strip_prefix: input.strip_prefix,
             enabled: input.enabled,
             bind: input.bind,
             cache: input.cache,
@@ -402,6 +423,25 @@ impl RouteConfig {
     fn matches_host(&self, normalized: Option<&str>) -> bool {
         self.hosts.is_empty()
             || normalized.is_some_and(|host| self.hosts.iter().any(|pattern| pattern.matches(host)))
+    }
+
+    /// The canonical sub-path to send upstream for a request this route
+    /// matched: `path` itself, or with `strip_prefix` the part beneath the
+    /// prefix, without a leading `/` (empty for the bare prefix).
+    ///
+    /// `path` must be a canonical path the route matched. Because matching is
+    /// on a segment boundary, what follows the prefix is either nothing or a
+    /// `/`; anything else means the caller broke that contract, and the path is
+    /// returned untouched rather than cut mid-segment.
+    pub fn upstream_path<'a>(&self, path: &'a str) -> &'a str {
+        if !self.strip_prefix {
+            return path;
+        }
+        match path.strip_prefix(self.prefix.as_str()) {
+            Some("") => "",
+            Some(rest) => rest.strip_prefix('/').unwrap_or(path),
+            None => path,
+        }
     }
 }
 
@@ -861,6 +901,44 @@ authenticated:
     fn an_omitted_id_defaults_to_the_prefix() {
         let t = RouteTable::build(groups("public:\n  - { prefix: /users, upstream: u }\n"));
         assert_eq!(t.match_route("users/1", "GET").unwrap().id, "users");
+    }
+
+    #[test]
+    fn strip_prefix_forwards_the_path_beneath_the_prefix() {
+        let t = RouteTable::build(groups(
+            r#"
+public:
+  - { id: stripped, prefix: /svc/users, upstream: u, strip_prefix: true }
+  - { id: kept, prefix: /orders, upstream: u }
+"#,
+        ));
+        let stripped = t.match_route("svc/users/42/pets", "GET").unwrap();
+        assert_eq!(stripped.upstream_path("svc/users/42/pets"), "42/pets");
+        // The bare prefix becomes the upstream's root.
+        assert_eq!(stripped.upstream_path("svc/users"), "");
+        // Matching itself is unchanged: still the full path, still on a
+        // segment boundary.
+        assert!(t.match_route("svc/usersx/1", "GET").is_none());
+
+        let kept = t.match_route("orders/7", "GET").unwrap();
+        assert!(
+            !kept.strip_prefix,
+            "preserving the prefix stays the default"
+        );
+        assert_eq!(kept.upstream_path("orders/7"), "orders/7");
+    }
+
+    #[test]
+    fn upstream_path_never_cuts_mid_segment() {
+        // Not reachable through match_request, which only matches on a segment
+        // boundary; guarded anyway so a future caller cannot turn `users-admin`
+        // into `-admin`.
+        let t = RouteTable::build(groups(
+            "public:\n  - { prefix: users, upstream: u, strip_prefix: true }\n",
+        ));
+        let r = &t.routes()[0];
+        assert_eq!(r.upstream_path("users-admin/1"), "users-admin/1");
+        assert_eq!(r.upstream_path("other/1"), "other/1");
     }
 
     #[test]
