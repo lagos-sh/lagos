@@ -1268,6 +1268,8 @@ pub struct AuthConfig {
     pub firebase: Option<FirebaseConfig>,
     #[serde(default)]
     pub machine: Option<MachineConfig>,
+    #[serde(default)]
+    pub client_keys: Option<ClientKeysConfig>,
 }
 
 /// Credential for service-to-service callers on the `machine` tier.
@@ -1311,6 +1313,121 @@ impl std::fmt::Debug for Redacted {
 
 fn default_machine_headers() -> Vec<String> {
     vec!["x-internal-api-key".into(), "x-api-key".into()]
+}
+
+/// Keys every caller of the public listener must present.
+///
+/// ```yaml
+/// auth:
+///   client_keys:
+///     header: x-client-key
+///     forward_as: x-client-id
+///     keys:
+///       storefront: ${STOREFRONT_CLIENT_KEY}
+///       mobile: ${MOBILE_CLIENT_KEY}
+/// ```
+///
+/// Configuring this turns the requirement on for *every* route on the public
+/// listener, whatever its group: a key is checked before any token is read.
+/// The health path is never keyed, and a route opts out only by saying so
+/// (`client_key: false`) — for a caller that cannot send one, such as a payment
+/// provider's webhook. The internal listener keeps the machine credential.
+///
+/// Unlike the machine credential, these are checked on the public listener, so
+/// anything that can reach the gateway can try to guess one. That is why they
+/// have a minimum length and why the check runs after the IP rate limit.
+///
+/// A key that a browser sends is readable by anyone who opens that page. It
+/// tells honest clients apart and keeps out scanners that do not have it; it is
+/// not a secret from a determined visitor, and user authorization still belongs
+/// to the user's token.
+#[derive(Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClientKeysConfig {
+    /// Header the caller presents its key in. Removed before the request is
+    /// proxied, so an upstream never sees a client key.
+    #[serde(default = "default_client_key_header")]
+    pub header: String,
+    /// Header that tells the upstream which client called, set to the key's id.
+    /// A client-supplied copy is always removed, including on exempt routes.
+    /// Unset, the upstream is not told.
+    #[serde(default)]
+    pub forward_as: Option<String>,
+    /// Key id → secret. The id names the caller in logs, in `forward_as` and in
+    /// `key: identity` rate limits. Several keys may be live at once, which is
+    /// how a key is rotated: add the new one, move callers over, remove the old.
+    pub keys: BTreeMap<String, String>,
+    /// Path prefixes that never need a key, matched on segment boundaries the
+    /// same way `routes.internal` is: `/webhooks` covers `/webhooks/xendit` but
+    /// not `/webhooksx`.
+    #[serde(default)]
+    pub exempt: Vec<String>,
+    /// Route groups whose routes never need a key: `public`, `optional` or
+    /// `authenticated`.
+    #[serde(default)]
+    pub exempt_groups: Vec<String>,
+}
+
+/// Hand-written for the same reason as [`MachineConfig`]: every value in
+/// `keys` is a credential. The ids are safe to print, and useful.
+impl std::fmt::Debug for ClientKeysConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let keys: BTreeMap<&str, Redacted> = self
+            .keys
+            .iter()
+            .map(|(id, secret)| (id.as_str(), Redacted(secret.len())))
+            .collect();
+        f.debug_struct("ClientKeysConfig")
+            .field("header", &self.header)
+            .field("forward_as", &self.forward_as)
+            .field("keys", &keys)
+            .field("exempt", &self.exempt)
+            .field("exempt_groups", &self.exempt_groups)
+            .finish()
+    }
+}
+
+fn default_client_key_header() -> String {
+    "x-client-key".into()
+}
+
+/// Shorter keys are refused at startup. Client keys are checked on the public
+/// listener, so their only protection against guessing is their length.
+pub const MIN_CLIENT_KEY_LEN: usize = 16;
+
+/// A client key, resolved for the request path.
+///
+/// Held as a SHA-256 digest, not as the key. Comparing two 32-byte digests
+/// takes the same time whatever the keys' lengths, where comparing the keys
+/// themselves stops early on a length mismatch and tells a guesser how long a
+/// key is.
+#[derive(Clone)]
+pub struct ClientKey {
+    pub id: String,
+    pub digest: [u8; 32],
+}
+
+impl ClientKey {
+    pub fn digest_of(key: &[u8]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(ring::digest::digest(&ring::digest::SHA256, key).as_ref());
+        out
+    }
+
+    /// Whether `presented` is this key, in constant time.
+    pub fn matches(&self, presented_digest: &[u8; 32]) -> bool {
+        use subtle::ConstantTimeEq;
+        presented_digest.ct_eq(&self.digest).unwrap_u8() == 1
+    }
+}
+
+impl std::fmt::Debug for ClientKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientKey")
+            .field("id", &self.id)
+            .field("digest", &"<redacted>")
+            .finish()
+    }
 }
 
 /// One trusted OIDC issuer.
@@ -1750,6 +1867,16 @@ pub struct ResolvedConfig {
     pub machine_secret: Option<String>,
     /// Injection set for the internal listener.
     pub machine_injected_headers: Vec<(String, String)>,
+    /// `auth.client_keys.header`, lowercased. `None` when client keys are not configured.
+    pub client_key_header: Option<String>,
+    /// `auth.client_keys.forward_as`, lowercased.
+    pub client_key_forward_as: Option<String>,
+    /// Every client key, checked in full on each request that needs one.
+    pub client_keys: Vec<ClientKey>,
+    /// `auth.client_keys.exempt`, normalized like the deny-list.
+    pub client_key_exempt: Vec<String>,
+    /// `auth.client_keys.exempt_groups`.
+    pub client_key_exempt_groups: Vec<String>,
     /// `server.mounts`, normalized and sorted longest-first.
     pub base_paths: Vec<String>,
     /// Compiled cross-origin policy.
@@ -2084,6 +2211,30 @@ impl GatewayConfig {
             .as_ref()
             .map(|t| t.secret.clone().into_bytes());
         let machine_secret = self.auth.machine.as_ref().map(|m| m.secret.clone());
+        let resolved_keys = match &self.auth.client_keys {
+            Some(ck) => Some(resolve_client_keys(
+                ck,
+                &self.reject.client_headers,
+                &self.gateway_owned_headers(),
+            )?),
+            None => None,
+        };
+        let (
+            client_key_header,
+            client_key_forward_as,
+            client_keys,
+            client_key_exempt,
+            client_key_exempt_groups,
+        ) = match resolved_keys {
+            Some(r) => (
+                Some(r.header),
+                r.forward_as,
+                r.keys,
+                r.exempt,
+                r.exempt_groups,
+            ),
+            None => (None, None, Vec::new(), Vec::new(), Vec::new()),
+        };
 
         let mut base_paths: Vec<String> = self
             .server
@@ -2179,6 +2330,11 @@ impl GatewayConfig {
             identity_secret,
             machine_secret,
             machine_injected_headers,
+            client_key_header,
+            client_key_forward_as,
+            client_keys,
+            client_key_exempt,
+            client_key_exempt_groups,
             base_paths,
             referenced_env: expanded.referenced.clone(),
             defaulted_env: expanded.defaulted.clone(),
@@ -2215,6 +2371,281 @@ pub fn parse_algorithm(name: &str) -> Option<jsonwebtoken::Algorithm> {
         "PS512" => Some(PS512),
         "EDDSA" => Some(EdDSA),
         _ => None,
+    }
+}
+
+/// Headers a client key may not be read from or forwarded as. The gateway reads
+/// or rewrites each of these itself, so sharing a name would either leak the key
+/// onward or let it be confused with another credential.
+const RESERVED_CLIENT_KEY_HEADERS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "host",
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "x-forwarded-host",
+    "forwarded",
+    "x-real-ip",
+    "x-request-id",
+    "traceparent",
+    "tracestate",
+    // Framing and hop-by-hop: stripping or writing one of these changes how
+    // the request itself is read, not just what it says.
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "upgrade",
+    "expect",
+];
+
+/// Validates `auth.client_keys` and precomputes what the request path needs:
+/// the lowercased header names and the keys as bytes.
+struct ResolvedClientKeys {
+    header: String,
+    forward_as: Option<String>,
+    keys: Vec<ClientKey>,
+    exempt: Vec<String>,
+    exempt_groups: Vec<String>,
+}
+
+/// Groups `exempt_groups` may name. `machine` is absent on purpose: its routes
+/// are on the internal listener, where client keys are never checked.
+const EXEMPTIBLE_GROUPS: &[&str] = &["public", "optional", "authenticated"];
+
+impl GatewayConfig {
+    /// Every header the gateway itself writes to an upstream request, lowercased:
+    /// identity headers, the identity token, injected credentials and the
+    /// machine credential names. A client key header or `forward_as` sharing one
+    /// of these would overwrite a verified value, or be overwritten by it.
+    fn gateway_owned_headers(&self) -> Vec<String> {
+        let id = &self.identity;
+        let mut owned: Vec<String> = [&id.subject_header, &id.issuer_header, &id.claims_header]
+            .into_iter()
+            .cloned()
+            .chain(id.claims.keys().cloned())
+            .chain(id.token.iter().map(|t| t.header.clone()))
+            .chain(self.inject.headers.keys().cloned())
+            .chain(self.inject.machine.keys().cloned())
+            .chain(
+                self.auth
+                    .machine
+                    .iter()
+                    .flat_map(|m| m.headers.iter().cloned()),
+            )
+            .map(|h| h.trim().to_ascii_lowercase())
+            .collect();
+        owned.sort();
+        owned.dedup();
+        owned
+    }
+}
+
+fn resolve_client_keys(
+    ck: &ClientKeysConfig,
+    rejected: &[String],
+    owned: &[String],
+) -> Result<ResolvedClientKeys, ConfigError> {
+    let header_name = |field: &str, raw: &str| -> Result<String, ConfigError> {
+        let name = raw.trim().to_ascii_lowercase();
+        if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.{field}: `{raw}` is not a valid header name"
+            )));
+        }
+        if RESERVED_CLIENT_KEY_HEADERS.contains(&name.as_str()) {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.{field}: `{name}` is a header the gateway reads or sets \
+                 itself; use a dedicated name such as `x-client-key`"
+            )));
+        }
+        if owned.contains(&name) {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.{field}: `{name}` is already an identity, injected or machine \
+                 header in this configuration; sharing it would let a client key overwrite a \
+                 verified value, or be overwritten by one"
+            )));
+        }
+        Ok(name)
+    };
+
+    let header = header_name("header", &ck.header)?;
+    if rejected.iter().any(|r| r.eq_ignore_ascii_case(&header)) {
+        return Err(ConfigError::invalid(format!(
+            "auth.client_keys.header `{header}` is also listed in reject.client_headers, which \
+             refuses any request carrying it; every keyed request would be a 403"
+        )));
+    }
+
+    let forward_as = match &ck.forward_as {
+        Some(raw) => {
+            let name = header_name("forward_as", raw)?;
+            if name == header {
+                return Err(ConfigError::invalid(format!(
+                    "auth.client_keys.forward_as is the same header as auth.client_keys.header \
+                     (`{name}`); the upstream would receive the key's id where the key was"
+                )));
+            }
+            Some(name)
+        }
+        None => None,
+    };
+
+    if ck.keys.is_empty() {
+        return Err(ConfigError::invalid(
+            "auth.client_keys.keys is empty; every keyed route would refuse every request",
+        ));
+    }
+    let mut keys: Vec<ClientKey> = Vec::with_capacity(ck.keys.len());
+    for (id, secret) in &ck.keys {
+        // The id becomes a header value (`forward_as`) and a rate-limit key, so
+        // it is held to a plain token alphabet.
+        let id_ok = !id.is_empty()
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        if !id_ok {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.keys: id `{id}` must be non-empty and use only letters, \
+                 digits, `-`, `_` and `.`"
+            )));
+        }
+        // A trailing newline from `echo secret > file` or a padded variable
+        // would otherwise produce a key no client ever sends.
+        if secret.trim() != secret {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.keys.{id}: the key has leading or trailing whitespace"
+            )));
+        }
+        if secret.len() < MIN_CLIENT_KEY_LEN {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.keys.{id}: the key is {} bytes; at least {MIN_CLIENT_KEY_LEN} \
+                 are required, because anything that can reach the public listener can try to \
+                 guess it",
+                secret.len()
+            )));
+        }
+        let digest = ClientKey::digest_of(secret.as_bytes());
+        if let Some(other) = keys.iter().find(|k| k.digest == digest) {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.keys: `{id}` and `{}` have the same key, so the gateway \
+                 could not tell which client called",
+                other.id
+            )));
+        }
+        keys.push(ClientKey {
+            id: id.clone(),
+            digest,
+        });
+    }
+
+    let mut exempt = Vec::with_capacity(ck.exempt.len());
+    for raw in &ck.exempt {
+        let prefix = crate::path::normalize_proxy_path(raw.trim());
+        if prefix.is_empty() {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.exempt: `{raw}` is empty; name the path prefix to exempt"
+            )));
+        }
+        // Compared with the canonical request path, so an entry that does not
+        // canonicalize to itself (`a//b`, `%2e`, `..`) could never match and
+        // would leave the route it was meant for demanding a key.
+        if crate::path::canonicalize_proxy_path(prefix).as_deref() != Some(prefix) {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.exempt: `{raw}` is not a canonical path; write it as the \
+                 gateway sees it — decoded, without empty or dot segments, relative to any \
+                 `server.mounts`"
+            )));
+        }
+        exempt.push(prefix.to_string());
+    }
+
+    let mut exempt_groups = Vec::with_capacity(ck.exempt_groups.len());
+    for raw in &ck.exempt_groups {
+        let group = raw.trim().to_ascii_lowercase();
+        if group == "machine" {
+            return Err(ConfigError::invalid(
+                "auth.client_keys.exempt_groups: `machine` routes are on the internal listener, \
+                 where client keys are never checked; there is nothing to exempt",
+            ));
+        }
+        if !EXEMPTIBLE_GROUPS.contains(&group.as_str()) {
+            return Err(ConfigError::invalid(format!(
+                "auth.client_keys.exempt_groups: `{raw}` is not a route group; use one of {}",
+                EXEMPTIBLE_GROUPS.join(", ")
+            )));
+        }
+        exempt_groups.push(group);
+    }
+
+    Ok(ResolvedClientKeys {
+        header,
+        forward_as,
+        keys,
+        exempt,
+        exempt_groups,
+    })
+}
+
+/// Whether a request to a route needs a client key, and if not, why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientKeyRule {
+    /// `auth.client_keys` is not configured, or the route is on the internal
+    /// listener.
+    Off,
+    Required,
+    Exempt(ClientKeyExemption),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientKeyExemption {
+    /// `client_key: false` on the route.
+    Route,
+    /// Under one of `auth.client_keys.exempt`.
+    Prefix(String),
+    /// The route's group is in `auth.client_keys.exempt_groups`.
+    Group(String),
+}
+
+impl ClientKeyExemption {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Route => "client_key: false on the route".into(),
+            Self::Prefix(p) => format!("under auth.client_keys.exempt `/{p}`"),
+            Self::Group(g) => format!("group `{g}` is in auth.client_keys.exempt_groups"),
+        }
+    }
+}
+
+impl ResolvedConfig {
+    /// The one place that decides whether a request needs a client key. The
+    /// proxy, `explain` and `lagos test` all ask here, so they cannot disagree.
+    ///
+    /// `path` is the canonical request path, the one the deny-list sees.
+    pub fn client_key_rule(&self, route: &RouteConfig, path: &str) -> ClientKeyRule {
+        if self.client_key_header.is_none() || route.auth.is_machine() {
+            return ClientKeyRule::Off;
+        }
+        if route.client_key == Some(false) {
+            return ClientKeyRule::Exempt(ClientKeyExemption::Route);
+        }
+        let path = crate::path::normalize_proxy_path(path);
+        if let Some(prefix) = self
+            .client_key_exempt
+            .iter()
+            .find(|p| crate::routes::under_prefix(path, p))
+        {
+            return ClientKeyRule::Exempt(ClientKeyExemption::Prefix(prefix.clone()));
+        }
+        let group = route.auth.group();
+        if self.client_key_exempt_groups.iter().any(|g| g == group) {
+            return ClientKeyRule::Exempt(ClientKeyExemption::Group(group.to_string()));
+        }
+        ClientKeyRule::Required
     }
 }
 
@@ -2421,6 +2852,27 @@ impl ResolvedConfig {
                      it, add `cache_authenticated: true`.",
                     r.id,
                     r.auth.group(),
+                )));
+            }
+        }
+
+        // A `client_key` that cannot take effect reads like a control and does
+        // nothing — `true` would look enforced, `false` would look exempted.
+        // Refuse it either way so nobody relies on it.
+        for r in routes.iter().filter(|r| r.client_key.is_some()) {
+            if r.auth.is_machine() {
+                return Err(ConfigError::invalid(format!(
+                    "route `{}` is in the `machine` group and sets `client_key`. Client keys \
+                     are checked on the public listener only; the machine credential still \
+                     applies",
+                    r.id
+                )));
+            }
+            if self.raw.auth.client_keys.is_none() {
+                return Err(ConfigError::invalid(format!(
+                    "route `{}` sets `client_key` but `auth.client_keys` is not configured, so \
+                     no route needs a key and the field would have no effect",
+                    r.id
                 )));
             }
         }
@@ -3077,5 +3529,347 @@ routes:
             Some("loyalty")
         );
         assert_eq!(did_you_mean("completely-different", ["users"]), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod client_key_tests {
+    use super::*;
+
+    const KEY_A: &str = "storefront-key-0123456789";
+    const KEY_B: &str = "admin-web-key-0123456789";
+
+    /// A gateway with client keys on and one route per group. `extra` is
+    /// spliced into `auth.client_keys`, `routes` replaces the route table.
+    fn doc(extra: &str, routes: &str) -> String {
+        format!(
+            r#"
+server: {{ internal_listen: 127.0.0.1:8081 }}
+upstreams: {{ api: http://api:8080 }}
+auth:
+  machine: {{ secret: machine-secret }}
+  client_keys:
+    keys: {{ storefront: {KEY_A}, admin-web: {KEY_B} }}
+{extra}
+routes:
+{routes}
+"#
+        )
+    }
+
+    const ROUTES: &str = r#"
+  public:
+    - { id: books, prefix: books, upstream: api }
+    - { id: webhooks, prefix: webhooks, upstream: api }
+    - { id: xendit, prefix: pay/xendit, upstream: api, client_key: false }
+  optional:
+    - { id: catalog, prefix: catalog, upstream: api }
+  authenticated:
+    - { id: orders, prefix: orders, upstream: api }
+  machine:
+    - { id: sync, prefix: sync, upstream: api }
+"#;
+
+    fn load(text: &str) -> Result<(ResolvedConfig, crate::routes::RouteTable), ConfigError> {
+        let (cfg, expanded) = GatewayConfig::parse("test.yml", text)?;
+        let resolved = cfg.resolve(&expanded)?;
+        let table = crate::routes::RouteTable::build(resolved.raw.routes.groups());
+        resolved.validate_table(&table)?;
+        Ok((resolved, table))
+    }
+
+    fn rule(cfg: &ResolvedConfig, table: &crate::routes::RouteTable, path: &str) -> ClientKeyRule {
+        let route = table
+            .routes()
+            .iter()
+            .find(|r| crate::routes::under_prefix(path, &r.prefix))
+            .unwrap();
+        cfg.client_key_rule(route, path)
+    }
+
+    fn refused(text: &str, needle: &str) {
+        let err = load(text)
+            .expect_err("configuration should be refused")
+            .to_string();
+        assert!(err.contains(needle), "`{needle}` not in: {err}");
+    }
+
+    #[test]
+    fn keys_resolve_with_default_header_and_ids() {
+        let (cfg, _) = load(&doc("", ROUTES)).unwrap();
+        assert_eq!(cfg.client_key_header.as_deref(), Some("x-client-key"));
+        assert_eq!(cfg.client_key_forward_as, None);
+        let ids: Vec<_> = cfg.client_keys.iter().map(|k| k.id.as_str()).collect();
+        assert_eq!(ids, ["admin-web", "storefront"]);
+    }
+
+    #[test]
+    fn every_public_listener_group_requires_a_key_by_default() {
+        let (cfg, table) = load(&doc("", ROUTES)).unwrap();
+        for path in ["books/1", "catalog", "orders/9"] {
+            assert_eq!(rule(&cfg, &table, path), ClientKeyRule::Required, "{path}");
+        }
+    }
+
+    #[test]
+    fn machine_routes_are_never_keyed() {
+        let (cfg, table) = load(&doc("", ROUTES)).unwrap();
+        assert_eq!(rule(&cfg, &table, "sync/run"), ClientKeyRule::Off);
+    }
+
+    #[test]
+    fn nothing_is_keyed_without_client_keys() {
+        let (cfg, table) = load(
+            "upstreams: {api: http://api:8080}\nroutes:\n  public:\n    - {id: books, prefix: books, upstream: api}\n",
+        )
+        .unwrap();
+        assert!(cfg.client_key_header.is_none());
+        assert_eq!(rule(&cfg, &table, "books/1"), ClientKeyRule::Off);
+    }
+
+    #[test]
+    fn a_route_can_opt_out() {
+        let (cfg, table) = load(&doc("", ROUTES)).unwrap();
+        assert_eq!(
+            rule(&cfg, &table, "pay/xendit/callback"),
+            ClientKeyRule::Exempt(ClientKeyExemption::Route)
+        );
+    }
+
+    #[test]
+    fn exempt_prefixes_match_on_segment_boundaries() {
+        let routes = ROUTES.replace(
+            "    - { id: webhooks, prefix: webhooks, upstream: api }\n",
+            "    - { id: webhooks, prefix: webhooks, upstream: api }\n    - { id: webhooksx, prefix: webhooksx, upstream: api }\n",
+        );
+        let (cfg, table) = load(&doc("    exempt: [/webhooks/]", &routes)).unwrap();
+        assert_eq!(
+            rule(&cfg, &table, "webhooks/xendit"),
+            ClientKeyRule::Exempt(ClientKeyExemption::Prefix("webhooks".into()))
+        );
+        assert_eq!(
+            rule(&cfg, &table, "webhooks"),
+            ClientKeyRule::Exempt(ClientKeyExemption::Prefix("webhooks".into()))
+        );
+        assert_eq!(rule(&cfg, &table, "webhooksx/1"), ClientKeyRule::Required);
+    }
+
+    #[test]
+    fn an_exempt_prefix_can_sit_beneath_a_route() {
+        let (cfg, table) = load(&doc("    exempt: [books/covers]", ROUTES)).unwrap();
+        assert_eq!(
+            rule(&cfg, &table, "books/covers/1.jpg"),
+            ClientKeyRule::Exempt(ClientKeyExemption::Prefix("books/covers".into()))
+        );
+        assert_eq!(rule(&cfg, &table, "books/1"), ClientKeyRule::Required);
+    }
+
+    #[test]
+    fn exempt_groups_cover_every_route_in_them() {
+        let (cfg, table) = load(&doc("    exempt_groups: [Optional]", ROUTES)).unwrap();
+        assert_eq!(
+            rule(&cfg, &table, "catalog"),
+            ClientKeyRule::Exempt(ClientKeyExemption::Group("optional".into()))
+        );
+        assert_eq!(rule(&cfg, &table, "books/1"), ClientKeyRule::Required);
+        assert_eq!(rule(&cfg, &table, "orders/1"), ClientKeyRule::Required);
+    }
+
+    #[test]
+    fn the_route_opt_out_is_reported_before_any_list() {
+        let (cfg, table) = load(&doc(
+            "    exempt: [pay]\n    exempt_groups: [public]",
+            ROUTES,
+        ))
+        .unwrap();
+        assert_eq!(
+            rule(&cfg, &table, "pay/xendit"),
+            ClientKeyRule::Exempt(ClientKeyExemption::Route)
+        );
+    }
+
+    #[test]
+    fn short_keys_are_refused() {
+        refused(
+            &doc("", ROUTES).replace(KEY_A, "short"),
+            "at least 16 are required",
+        );
+    }
+
+    #[test]
+    fn padded_keys_are_refused() {
+        refused(
+            &doc("", ROUTES).replace(KEY_A, &format!("\"{KEY_A} \"")),
+            "leading or trailing whitespace",
+        );
+    }
+
+    #[test]
+    fn two_ids_sharing_a_key_are_refused() {
+        refused(&doc("", ROUTES).replace(KEY_B, KEY_A), "have the same key");
+    }
+
+    #[test]
+    fn an_empty_key_set_is_refused() {
+        refused(
+            &doc("", ROUTES).replace(
+                &format!("{{ storefront: {KEY_A}, admin-web: {KEY_B} }}"),
+                "{}",
+            ),
+            "keys is empty",
+        );
+    }
+
+    #[test]
+    fn ids_are_held_to_a_header_safe_alphabet() {
+        refused(
+            &doc("", ROUTES).replace("admin-web:", "\"admin web\":"),
+            "must be non-empty and use only",
+        );
+    }
+
+    #[test]
+    fn reserved_header_names_are_refused() {
+        refused(
+            &doc("    header: Authorization", ROUTES),
+            "reads or sets itself",
+        );
+        refused(
+            &doc("    forward_as: x-request-id", ROUTES),
+            "reads or sets itself",
+        );
+    }
+
+    #[test]
+    fn forward_as_must_differ_from_the_key_header() {
+        refused(
+            &doc("    header: x-reko-key\n    forward_as: X-Reko-Key", ROUTES),
+            "same header",
+        );
+    }
+
+    #[test]
+    fn a_key_header_on_the_reject_list_is_refused() {
+        let text = doc("", ROUTES) + "reject:\n  client_headers: [X-Client-Key]\n";
+        refused(&text, "reject.client_headers");
+    }
+
+    #[test]
+    fn exempting_machine_or_unknown_groups_is_refused() {
+        refused(
+            &doc("    exempt_groups: [machine]", ROUTES),
+            "internal listener",
+        );
+        refused(
+            &doc("    exempt_groups: [admins]", ROUTES),
+            "is not a route group",
+        );
+    }
+
+    #[test]
+    fn an_empty_exempt_prefix_is_refused() {
+        refused(&doc("    exempt: [/]", ROUTES), "is empty");
+    }
+
+    #[test]
+    fn client_key_without_client_keys_is_refused_either_way() {
+        for value in ["false", "true"] {
+            refused(
+                &format!(
+                    "upstreams: {{api: http://api:8080}}\nroutes:\n  public:\n    - {{id: hooks, prefix: hooks, upstream: api, client_key: {value}}}\n"
+                ),
+                "would have no effect",
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_true_is_the_same_as_unset() {
+        let routes = ROUTES.replace(
+            "{ id: books, prefix: books, upstream: api }",
+            "{ id: books, prefix: books, upstream: api, client_key: true }",
+        );
+        let (cfg, table) = load(&doc("", &routes)).unwrap();
+        assert_eq!(rule(&cfg, &table, "books/1"), ClientKeyRule::Required);
+    }
+
+    #[test]
+    fn headers_the_gateway_already_writes_are_refused() {
+        // Identity: a key id must never be mistaken for a verified subject.
+        refused(
+            &doc("    forward_as: X-Auth-Subject", ROUTES),
+            "already an identity",
+        );
+        let with_inject = doc("    header: x-api-key", ROUTES)
+            + "inject:\n  headers:\n    x-api-key: upstream-secret\n";
+        refused(&with_inject, "already an identity, injected or machine");
+        // The machine credential names default to x-internal-api-key and x-api-key.
+        refused(
+            &doc("    forward_as: x-internal-api-key", ROUTES),
+            "already an identity",
+        );
+    }
+
+    #[test]
+    fn framing_headers_are_refused() {
+        for name in [
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "expect",
+        ] {
+            refused(
+                &doc(&format!("    header: {name}"), ROUTES),
+                "reads or sets itself",
+            );
+            refused(
+                &doc(&format!("    forward_as: {name}"), ROUTES),
+                "reads or sets itself",
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_canonical_exempt_prefix_is_refused() {
+        for raw in ["hooks//x", "hooks/../books", "%68ooks"] {
+            refused(
+                &doc(&format!("    exempt: [\"{raw}\"]"), ROUTES),
+                "not a canonical path",
+            );
+        }
+    }
+
+    #[test]
+    fn keys_are_held_as_digests() {
+        let (cfg, _) = load(&doc("", ROUTES)).unwrap();
+        let storefront = cfg
+            .client_keys
+            .iter()
+            .find(|k| k.id == "storefront")
+            .unwrap();
+        assert!(storefront.matches(&ClientKey::digest_of(KEY_A.as_bytes())));
+        assert!(!storefront.matches(&ClientKey::digest_of(KEY_B.as_bytes())));
+        assert!(!storefront.matches(&ClientKey::digest_of(&KEY_A.as_bytes()[..20])));
+    }
+
+    #[test]
+    fn an_opt_out_on_a_machine_route_is_refused() {
+        let routes = ROUTES.replace(
+            "{ id: sync, prefix: sync, upstream: api }",
+            "{ id: sync, prefix: sync, upstream: api, client_key: false }",
+        );
+        refused(&doc("", &routes), "machine credential still applies");
+    }
+
+    #[test]
+    fn debug_output_never_contains_a_key() {
+        let (cfg, _) = load(&doc("", ROUTES)).unwrap();
+        let printed = format!("{cfg:?}");
+        assert!(
+            !printed.contains(KEY_A) && !printed.contains(KEY_B),
+            "{printed}"
+        );
+        assert!(printed.contains("storefront"), "ids stay visible");
     }
 }

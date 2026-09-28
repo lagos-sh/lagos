@@ -3,48 +3,54 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## Unreleased
+## 0.1.6 — client keys
 
-- Added `counter: shared`, putting rate-limit counters in a cache every replica
-  can reach, so a limit of 100/min across three replicas no longer admits
-  300/min. Any RESP server works — Recached, Redis or Valkey — configured under
-  a new top-level `shared_counters` block with `url`, `sync`, `prefix`,
-  `timeout` and `max_keys_per_sync`; `recached://`, `valkey://`, `resp://` and
-  `redis://` schemes are all accepted, each with a trailing `s` for TLS.
-  Routes opt in individually and a block no route uses connects to nothing.
+- Added `auth.client_keys`, an optional gateway-wide key requirement. When it is
+  configured, every route on the public listener — `public`, `optional` and
+  `authenticated` alike — needs one of the configured keys in `x-client-key`
+  (or the configured `header`); without it nothing changes. The health path and
+  CORS preflights never need a key, the internal listener keeps the machine
+  credential, and a missing or unknown key is a `401` with reason
+  `missing_client_key` or `bad_client_key`.
 
-  Two modes. The default `approximate` decides locally and reconciles in the
-  background, so no request waits on the cache; overshoot becomes
-  roughly `replicas x arrival rate x reconciliation period` instead of
-  `replicas x limit`; capped batches rotate across keys. `mode: exact`
-  uses Recached's `RLCHECK` for an authoritative decision in one round trip per
-  limited request; it has no Redis or Valkey counterpart, so the backend is
-  identified at startup and `exact` against anything else refuses to boot rather
-  than degrading a limit silently. Route reloads perform the same capability
-  check before publishing and retain the previous routes on rejection.
+  Keys are named (`keys: {storefront: ..., mobile: ...}`) so several can be live
+  at once for rotation, and the id names the caller in the access log
+  (a new `client` field, `-` when no key was needed) and in an optional
+  `forward_as` header sent upstream. The key header is always removed before
+  proxying, and `forward_as` is always cleared of any client-supplied value,
+  exempt routes included. The internal listener is untouched.
 
-  If the cache is unreachable, traffic continues with limits degraded to
-  per-process counting, reported by the new `gateway_shared_limit_errors_total`
-  and `gateway_shared_limit_keys_synced_total` metrics. `mode: exact` is the one
-  exception and fails the boot, since it cannot be honoured without the backend
-  at all. A shared limit requires `interval` of at least 1s and, in
-  `approximate` mode, `sync` shorter than `interval`. Exact mode also requires
-  whole-second intervals. All are checked at startup and on reloads.
+  Routes are exempted explicitly, never by default: per route with
+  `client_key: false`, by path prefix with `exempt`, or by group with
+  `exempt_groups`. The check runs after IP-keyed rate limits, so key guesses
+  spend the caller's budget, and before any bearer token is read. Keys are held
+  as SHA-256 digests and compared in constant time against every configured
+  key. Startup refuses keys under 16 bytes, keys with surrounding whitespace,
+  two ids sharing a key, a `client_key` field when client keys are off, exempt
+  prefixes that are not canonical, and a `header` or `forward_as` that the
+  gateway already reads or writes (identity, injected, machine, forwarding and
+  framing headers).
 
-  Accept-time connection limits stay per process: that limiter runs before the
-  TLS handshake and before a task exists, and a connection flood is the last
-  moment to be waiting on a cache. The sliding-window arithmetic is now shared
-  by the local and cluster paths so a limit cannot mean two different things.
+  `lagos explain` shows whether a request needs a key and why an exempt one does
+  not, `lagos routes` lists key ids and exemptions and marks exempt routes
+  `no-client-key`, `lagos test` can
+  assert `expect.client_key: required | exempt | off`, `lagos diff` reports each
+  route's requirement plus key ids and exemptions (never key values), and
+  `lagos config --effective` reports the route field. Editor schemas include the
+  new fields.
 
-  Reconciliation publishes outstanding usage from both windows and retries
-  immutable `HSETNX` contributions without double counting after lost replies.
-  Background sync does not refresh request idle timers. Window hashes expire;
-  their storage grows with replicas and nonzero publications per window.
+## 0.1.5
 
-  The RESP client is behind a new `shared-limits` feature on `lagos-core`, off
-  by default there and on for the shipped `lagos` binary and images; a config
-  using `counter: shared` in a build without it is a startup error naming the
-  feature.
+- Added per-route `strip_prefix`. When set, the matched route prefix is removed
+  from the path sent upstream (`prefix: /svc/users` forwards `/svc/users/42` as
+  `/42`, and the bare prefix as `/`); the query string is unchanged. It is off by
+  default, so existing routes still preserve their prefix. Only the upstream
+  request line changes: the deny-list, matching, bindings, cache keys, logs and
+  metrics keep using the full canonical path, and matching stays on a segment
+  boundary. `lagos explain` shows the forwarded path, `lagos routes` marks the
+  route, `lagos diff` and `lagos config --effective` report the field, `lagos
+  dev` narrates the forwarded path, and `lagos test` can assert it with
+  `expect.upstream_path`. Editor schemas include the field.
 
 ## 0.1.4 — Docker starters and policy checks
 

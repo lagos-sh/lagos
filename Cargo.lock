@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "lagos"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "lagos-core",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "lagos-core"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1370,6 +1370,7 @@ dependencies = [
  "prometheus",
  "redis",
  "reqwest",
+ "ring",
  "schemars",
  "serde",
  "serde_json",

@@ -87,6 +87,29 @@ fn choose_dns_address(
     addrs.get(index).copied()
 }
 
+/// The request target sent upstream: the target's own base path, then the
+/// canonical sub-path (percent-encoded per segment), then the original query.
+///
+/// An empty `path` — the bare prefix of a `strip_prefix` route — addresses the
+/// upstream's root: `/` for a bare target, and the base path itself, without a
+/// trailing slash, for one with a base path (`http://svc/api` gets `/api`).
+fn upstream_uri(base_path: &str, path: &str, query: Option<&str>) -> String {
+    let mut uri = String::with_capacity(base_path.len() + path.len() + 32);
+    if !base_path.is_empty() {
+        uri.push('/');
+        uri.push_str(base_path);
+    }
+    if !path.is_empty() || base_path.is_empty() {
+        uri.push('/');
+        uri.push_str(&encode_path_segments(path));
+    }
+    if let Some(q) = query {
+        uri.push('?');
+        uri.push_str(q);
+    }
+    uri
+}
+
 /// Whether a new trace should be sampled.
 ///
 /// A request that already carries a sampling decision keeps it; this only
@@ -111,6 +134,10 @@ pub struct Ctx {
     pub method: String,
     /// Canonical, decoded sub-path used for every authorization decision.
     pub path: String,
+    /// What is sent upstream in place of `path`, when the matched route has
+    /// `strip_prefix`. `None` means `path` itself, so a route without it
+    /// costs no allocation.
+    pub upstream_path: Option<String>,
     pub query: Option<String>,
     pub route_id: String,
     pub upstream_name: String,
@@ -132,6 +159,8 @@ pub struct Ctx {
     pub tier: Option<AuthTier>,
     /// Subject of the verified caller, if the route read a token.
     pub subject: Option<String>,
+    /// Id of the client key the caller presented, when the route needed one.
+    pub client_key_id: Option<String>,
     /// Extensions that ran, in order.
     pub extensions_run: Vec<String>,
     /// Why the request was refused: (event, reason).
@@ -228,6 +257,7 @@ impl Gateway {
         // it in the set so the removal pass does not fight the plan.
         forwardable.extend(cfg.injected_headers.iter().map(|(n, _)| n.clone()));
         forwardable.extend(cfg.machine_injected_headers.iter().map(|(n, _)| n.clone()));
+        forwardable.extend(cfg.client_key_forward_as.iter().cloned());
 
         Self {
             cfg,
@@ -357,6 +387,9 @@ impl Gateway {
                 ctx.upstream_name,
                 if ctx.sse { "  (sse)" } else { "" }
             );
+            if let Some(path) = &ctx.upstream_path {
+                let _ = writeln!(out, "    as         /{path}  (prefix stripped)");
+            }
         }
 
         if let Some(t) = &ctx.trace {
@@ -971,6 +1004,44 @@ impl ProxyHttp for Gateway {
             return Ok(true);
         }
 
+        // --- client key -----------------------------------------------------
+        // After the IP limit, so guessing keys costs the guesser their budget;
+        // before any token is read, so a caller without a key never gets as far
+        // as a signature check.
+        let mut client_key_id: Option<String> = None;
+        if !self.serves_machine
+            && self.cfg.client_key_rule(route, &ctx.path) == crate::config::ClientKeyRule::Required
+        {
+            let header = self.cfg.client_key_header.as_deref().unwrap_or_default();
+            let mut values = session.req_header().headers.get_all(header).iter();
+            let presented = values.next().map(|v| v.as_bytes());
+            let repeated = values.next().is_some();
+            let Some(presented) = presented.filter(|p| !p.is_empty()) else {
+                return self
+                    .reject(session, ctx, Rejection::missing_client_key(header))
+                    .await;
+            };
+            // Digests, not keys, are compared: both sides are 32 bytes, so the
+            // comparison cannot stop early on a length mismatch and reveal how
+            // long a key is. Every key is compared whatever matched first, so
+            // the time does not say how far down the list a guess got either.
+            let presented = crate::config::ClientKey::digest_of(presented);
+            let mut matched: Option<&crate::config::ClientKey> = None;
+            for key in &self.cfg.client_keys {
+                if key.matches(&presented) && matched.is_none() {
+                    matched = Some(key);
+                }
+            }
+            // Two copies of the header is ambiguous about which one was meant,
+            // and refusing it costs an honest client nothing.
+            let Some(key) = matched.filter(|_| !repeated) else {
+                return self
+                    .reject(session, ctx, Rejection::invalid_client_key())
+                    .await;
+            };
+            client_key_id = Some(key.id.clone());
+        }
+
         let mut identity = None;
         if route.auth.verifies() {
             let bearer = authorization.as_deref().and_then(crate::auth::bearer_token);
@@ -1165,6 +1236,23 @@ impl ProxyHttp for Gateway {
             plan.strip("authorization");
         }
 
+        // The key has done its job at the gateway; an upstream never needs it.
+        // The id header is always cleared first, so on an exempt route or
+        // without a key a client cannot claim to be one of ours. Public
+        // listener only: client keys do not exist on the internal one, and a
+        // machine caller's own headers of the same name must pass untouched.
+        if !self.serves_machine {
+            if let Some(header) = &self.cfg.client_key_header {
+                plan.strip(header);
+            }
+            if let Some(forward_as) = &self.cfg.client_key_forward_as {
+                match &client_key_id {
+                    Some(id) => plan.set(forward_as, id.clone()),
+                    None => plan.strip(forward_as),
+                };
+            }
+        }
+
         for name in &route.extensions {
             let Some(ext) = self.extensions.get(name) else {
                 // Startup validation should make this unreachable; failing
@@ -1197,6 +1285,7 @@ impl ProxyHttp for Gateway {
         ctx.plan = plan;
         // Consistent hashing uses the subject in production too.
         ctx.subject = identity.as_ref().map(|i| i.subject.clone());
+        ctx.client_key_id = client_key_id;
         if self.dev {
             ctx.bindings_met = route.bindings.iter().map(Binding::describe).collect();
             ctx.tier = Some(route.auth);
@@ -1208,6 +1297,9 @@ impl ProxyHttp for Gateway {
         ctx.route_id = route.id.clone();
         ctx.upstream_name = route.upstream.clone();
         ctx.sse = route.sse;
+        if route.strip_prefix {
+            ctx.upstream_path = Some(route.upstream_path(&ctx.path).to_string());
+        }
         if route.sse {
             // An event stream is a long-lived response by design. The write
             // timeout only fires on a *stalled* write, but a stream with sparse
@@ -1342,17 +1434,11 @@ impl ProxyHttp for Gateway {
             pingora::Error::explain(pingora::ErrorType::InternalError, "no backend was selected")
         })?;
 
-        let mut uri = String::with_capacity(ctx.path.len() + 32);
-        if !target.base_path.is_empty() {
-            uri.push('/');
-            uri.push_str(&target.base_path);
-        }
-        uri.push('/');
-        uri.push_str(&encode_path_segments(&ctx.path));
-        if let Some(q) = &ctx.query {
-            uri.push('?');
-            uri.push_str(q);
-        }
+        let uri = upstream_uri(
+            &target.base_path,
+            ctx.upstream_path.as_deref().unwrap_or(&ctx.path),
+            ctx.query.as_deref(),
+        );
         let parsed: http::Uri = uri.parse().map_err(|_| {
             pingora::Error::explain(
                 pingora::ErrorType::InternalError,
@@ -1844,6 +1930,7 @@ impl ProxyHttp for Gateway {
             status,
             latency_ms,
             retries = ctx.attempts,
+            client = ctx.client_key_id.as_deref().unwrap_or("-"),
             trace_id = ctx.trace.as_ref().map(|t| t.trace_id_hex()).unwrap_or_default(),
             "request complete",
         );
@@ -1854,6 +1941,27 @@ impl ProxyHttp for Gateway {
 mod tests {
     use super::*;
     use crate::config::GatewayConfig;
+
+    #[test]
+    fn upstream_uri_joins_base_path_path_and_query() {
+        // Unchanged shapes: every non-empty path, with and without a base.
+        assert_eq!(upstream_uri("", "users/42", None), "/users/42");
+        assert_eq!(upstream_uri("api", "users/42", None), "/api/users/42");
+        assert_eq!(
+            upstream_uri("api", "users/42", Some("x=1")),
+            "/api/users/42?x=1"
+        );
+        assert_eq!(upstream_uri("", "a b", None), "/a%20b");
+    }
+
+    #[test]
+    fn a_stripped_bare_prefix_addresses_the_upstream_root() {
+        assert_eq!(upstream_uri("", "", None), "/");
+        assert_eq!(upstream_uri("", "", Some("x=1")), "/?x=1");
+        // No trailing slash appended to the target's own base path.
+        assert_eq!(upstream_uri("api", "", None), "/api");
+        assert_eq!(upstream_uri("api/v2", "", Some("x=1")), "/api/v2?x=1");
+    }
 
     #[test]
     fn dns_retries_use_the_next_address() {

@@ -8,20 +8,6 @@ What already works is in [Features](README.md#features). What changed in each
 release is in [CHANGELOG.md](CHANGELOG.md). Security controls and their known
 gaps are in [SECURITY.md](SECURITY.md).
 
-Configuration DX includes [editor setup](docs/configuration-editor.md), schema
-generation, variable inventory, route explanations, redacted effective output,
-and route defaults, all available starting with 0.1.4.
-Optional partner credentials are a separate feature.
-
-Standalone Linux/macOS binaries and an automatic installer are available
-starting with 0.1.4; see [installation](docs/installation.md). Windows native
-support remains future work.
-
-Rate limits can be shared across replicas over RESP — Recached, Redis or Valkey
-— with `counter: shared`; see [rate limiting](docs/rate-limiting.md). The cache
-stays off the request path by default and its absence degrades limits rather
-than stopping traffic, so the "no mandatory cache" rule below still holds.
-
 ---
 
 ## Next
@@ -30,7 +16,7 @@ Ordered roughly by how often the absence bites.
 
 | | Why |
 |---|---|
-| **Production validation** | Load and soak testing, memory behaviour under sustained traffic. The single biggest gap between "tested" and "trustworthy" — see [Project status](README.md#project-status) |
+| **Distributed rate limiting** | Counters are per process today: 100/min across three replicas admits 300/min. Fits behind the existing `Limiter` interface |
 | **Stale-while-error on JWKS** | An identity provider outage currently stops authenticated traffic, even though the cached keys were almost certainly still valid |
 | **Total request deadline** | Timeouts are per read, per write and per connect. A client making slow but steady progress stays inside all of them indefinitely |
 | **Extension execution budgets** | Lagos must bound each request hook and the complete extension chain, reject on timeout, and report which policy exceeded its budget. Native hooks remain trusted code; asynchronous timeouts cannot preempt blocking code. See the [extension proposal](docs/extension-hardening.md) |
@@ -48,6 +34,7 @@ Real direction, no commitment. Each needs the layer beneath it to settle first.
 - **Traffic splitting** — weighted routing across *services* for canary and blue/green. Weights exist within a pool today; splitting across two upstreams does not
 - **OpenAPI import** — generate routes, methods and security requirements from a contract. The strongest single differentiator available to this project, and the largest piece of work
 - **Request validation** — query, header and body schemas, so invalid requests never reach an application
+- **Signed client requests** — HMAC request signing as a stronger client key for server-to-server callers: the client signs method, path, query and a timestamp with its key, so the key itself never travels and a captured request stops working once its time window closes. Client keys are static bearer values, and a browser can never hold either kind safely; browser apps are better served by short-lived, asymmetrically signed tokens, which the `authenticated` and `optional` tiers already verify. Bodies are not inspected (see below), so a signature cannot cover one without buffering it
 - **Simple policy decisions** — an optional allow/deny API for checks, with errors distinct from denial; retain the existing extension API for trusted header enrichment. See the [extension proposal](docs/extension-hardening.md)
 - **Language-independent HTTP checks** — invoke an application-owned policy endpoint written in any language, using a versioned context/decision contract and gateway-enforced deadlines and concurrency limits. This is an optional service, not arbitrary scripts loaded into the gateway. See the [extension proposal](docs/extension-hardening.md)
 - **Route providers beyond files** — the `RouteProvider` seam already exists; a provider watching Kubernetes `Ingress`/`HTTPRoute` would not change the proxy path
@@ -55,6 +42,7 @@ Real direction, no commitment. Each needs the layer beneath it to settle first.
 - **WASM policies** — only once the policy contract is stable enough to freeze into an ABI, with execution and memory limits and bounded host calls. Language support depends on compatible toolchains; HTTP checks come first. Native dynamic plugins are not the answer; a half-designed WASM interface is not either
 - **Optional control plane** — central config, revisions, rollback, fleet status. Hard rule if it ever exists: **gateway traffic must continue when the control plane is unavailable**, and it must never sit on the request path
 - **Secret zeroization** — `Debug` is redacted, but secrets are ordinary `String`s in memory
+- **Windows native support** — standalone binaries and the installer cover Linux and macOS only; see [installation](docs/installation.md)
 
 ---
 
@@ -76,7 +64,6 @@ them**. It does not inspect what is sent through it.
 1.0 means the configuration format is stable and breaking changes get a
 deprecation period. Getting there needs:
 
-- A real production deployment, and load/soak results to go with it
 - The configuration surface reviewed once, deliberately, for things that would be painful to keep
 - `validate` / `explain` / `diff` covering enough that a config change can be reviewed without reading Rust
 - Security review of the request path by someone who did not write it

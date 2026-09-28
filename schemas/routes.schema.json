@@ -289,6 +289,22 @@
               "default": false,
               "description": "Permit caching on a tier that verifies tokens.\n\nWithout this, `cache: true` on `optional` or `authenticated` is refused\nat startup. Responses on those tiers are usually personalised, and\nwhether they are safe to share depends entirely on the upstream sending\ncorrect `Cache-Control` — a claim about that service which has to be\nmade deliberately."
             },
+            "client_key": {
+              "anyOf": [
+                {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Set `false` to exempt this route from `auth.client_keys`, for a caller\nthat cannot send a key — a payment provider's webhook, say. Unset, the\nroute follows `auth.client_keys`. Without `auth.client_keys` any value\nis refused rather than left to read as a control that does nothing."
+            },
             "enabled": {
               "anyOf": [
                 {
@@ -431,6 +447,19 @@
               ],
               "default": false,
               "description": "Stream the response without buffering and use the SSE timeout budget."
+            },
+            "strip_prefix": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "Remove the matched `prefix` before forwarding, so the upstream sees the\npath beneath it: `prefix: /svc/users` sends `/svc/users/42` as `/42`,\nand the bare prefix as `/`.\n\nOff by default, so the prefix is preserved as before. Every gateway\ndecision — deny-list, matching, bindings, cache, logs — still uses the\nfull canonical path; only the request line sent upstream changes. The\nquery string is kept as is."
             },
             "upstream": {
               "description": "Key into `upstreams`.",

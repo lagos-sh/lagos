@@ -255,6 +255,8 @@ pub fn normalize_reason(reason: &str) -> String {
         | "no_verifier"
         | "no_machine_secret"
         | "bad_machine_credential"
+        | "missing_client_key"
+        | "bad_client_key"
         | "rate_limited"
         | "circuit_open"
         | "binding_refused"
