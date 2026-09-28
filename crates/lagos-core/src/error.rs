@@ -87,7 +87,7 @@ impl Rejection {
                 "statusCode": 401,
                 "message": "Authentication required. Please provide a valid bearer token in the Authorization header.",
                 "error": "Unauthorized",
-                "hint": "Use: Authorization: Bearer <id_token>",
+                "hint": "Use: Authorization: Bearer <token>",
             }),
             "gateway.auth.rejected",
             "missing_bearer",
@@ -101,7 +101,10 @@ impl Rejection {
                 "statusCode": 401,
                 "message": "Invalid token",
                 "error": "Unauthorized",
-                "hint": "Use a fresh ID token from getIdToken().",
+                // Provider-neutral: any configured issuer can reach this, and a
+                // client told to call Firebase's getIdToken() when it signs in
+                // somewhere else is sent looking for a function it does not have.
+                "hint": "Refresh the token or sign in again, then retry.",
             }),
             "gateway.auth.rejected",
             format!("invalid_token: {}", detail.into()),
@@ -177,5 +180,25 @@ impl Rejection {
 
     pub fn body_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(&self.body).unwrap_or_else(|_| b"{}".to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Rejection;
+
+    /// Lagos verifies tokens from any configured issuer, so what it tells a
+    /// client must not assume one identity provider.
+    #[test]
+    fn auth_hints_name_no_identity_provider() {
+        for rej in [
+            Rejection::missing_bearer(),
+            Rejection::invalid_token("expired"),
+        ] {
+            let body = String::from_utf8(rej.body_bytes()).unwrap_or_default();
+            for provider_word in ["getIdToken", "id_token", "ID token", "Firebase"] {
+                assert!(!body.contains(provider_word), "`{provider_word}` in {body}");
+            }
+        }
     }
 }
