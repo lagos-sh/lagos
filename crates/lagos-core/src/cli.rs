@@ -636,6 +636,23 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
         println!();
     }
 
+    if let Some(header) = &cfg.client_key_header {
+        println!("CLIENT KEYS (required on every public-listener route unless exempt)\n");
+        println!("  header      {header}");
+        if let Some(forward_as) = &cfg.client_key_forward_as {
+            println!("  forward_as  {forward_as}");
+        }
+        let ids: Vec<&str> = cfg.client_keys.iter().map(|k| k.id.as_str()).collect();
+        println!("  keys        {}", ids.join(", "));
+        for prefix in &cfg.client_key_exempt {
+            println!("  exempt      /{prefix}");
+        }
+        for group in &cfg.client_key_exempt_groups {
+            println!("  exempt      group {group}");
+        }
+        println!("  (routes marked no-client-key are exempt at their prefix)\n");
+    }
+
     println!("ROUTES (most specific first — the order the matcher tries them)\n");
     let width = table
         .routes()
@@ -656,6 +673,11 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
         }
         if r.strip_prefix {
             notes.push("strip-prefix".to_string());
+        }
+        // Only the exemptions are marked: with client keys on, a key is the
+        // norm, and the routes that skip it are the ones worth reviewing.
+        if let crate::config::ClientKeyRule::Exempt(_) = cfg.client_key_rule(r, &r.prefix) {
+            notes.push("no-client-key".to_string());
         }
         if !r.extensions.is_empty() {
             notes.push(r.extensions.join("+"));
@@ -853,6 +875,28 @@ fn explain(
         }
     }
     println!();
+
+    if let (Listener::Public, Some(header)) = (listener, &cfg.client_key_header) {
+        println!("Client key\n");
+        match cfg.client_key_rule(route, &canonical) {
+            crate::config::ClientKeyRule::Required => {
+                println!(
+                    "  one of {} key(s) in `{header}`; missing or wrong → 401, before any token is read",
+                    cfg.client_keys.len()
+                );
+                println!("  the key is removed before proxying");
+                if let Some(forward_as) = &cfg.client_key_forward_as {
+                    println!("  the key's id is sent upstream as `{forward_as}`");
+                }
+            }
+            crate::config::ClientKeyRule::Exempt(why) => {
+                println!("  exempt: {}", why.describe());
+                println!("  no key is required; one sent anyway is removed before proxying");
+            }
+            crate::config::ClientKeyRule::Off => {}
+        }
+        println!();
+    }
 
     if let Some(rt) = &route.retry {
         println!("Retries\n");

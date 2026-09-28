@@ -170,6 +170,19 @@ routes:
 #     x-user-id:   sub
 #     x-user-type: user_type
 
+# Keys every caller of the public listener must present (0.1.6+). Omit to keep
+# the listener open. Health checks and CORS preflights never need a key; exempt
+# anything else explicitly — a route with `client_key: false`, or:
+#
+# auth:
+#   client_keys:
+#     header: x-client-key
+#     forward_as: x-client-id
+#     keys:
+#       storefront: ${STOREFRONT_CLIENT_KEY}
+#     exempt: [/webhooks]
+#     exempt_groups: []
+
 # Credentials the gateway owns. A client-supplied copy is stripped first, so
 # these can never be spoofed.
 #

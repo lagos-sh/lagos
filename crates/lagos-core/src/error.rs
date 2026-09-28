@@ -108,6 +108,37 @@ impl Rejection {
         )
     }
 
+    /// No client key on a route that needs one. Names the header, since the
+    /// caller is usually one of our own clients missing a configuration value.
+    pub fn missing_client_key(header: &str) -> Self {
+        Self::new(
+            401,
+            json!({
+                "statusCode": 401,
+                "message": "Client key required",
+                "error": "Unauthorized",
+                "hint": format!("Send the key in the {header} header."),
+            }),
+            "gateway.client_key.rejected",
+            "missing_client_key",
+        )
+    }
+
+    /// A client key that matches none of the configured keys. Deliberately
+    /// says nothing about which part was wrong.
+    pub fn invalid_client_key() -> Self {
+        Self::new(
+            401,
+            json!({
+                "statusCode": 401,
+                "message": "Invalid client key",
+                "error": "Unauthorized",
+            }),
+            "gateway.client_key.rejected",
+            "bad_client_key",
+        )
+    }
+
     pub fn forbidden(message: &str, reason: impl Into<String>) -> Self {
         Self::new(
             403,

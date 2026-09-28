@@ -6,6 +6,35 @@ moved forward deliberately rather than discovered in production.
 
 ---
 
+## 0.1.5 → 0.1.6 — client keys
+
+No configuration change is needed: `auth.client_keys` is opt-in, and a gateway
+without it behaves exactly as on 0.1.5.
+
+Turning it on is a deliberate step, because it applies to every route on the
+public listener at once. Before enabling it:
+
+- Give every client that calls the gateway a key, and deploy them with it.
+- Exempt callers that cannot send one — payment or webhook providers, uptime
+  monitors that probe an upstream's own health route — with `exempt`,
+  `exempt_groups` or `client_key: false`. `lagos routes` lists what is exempt
+  and `lagos test` can pin it with `expect.client_key`.
+- If a dashboard or alert keys on rejection reasons, `missing_client_key` and
+  `bad_client_key` are new values of `gateway_rejections_total{reason}`.
+- Under `server.mounts`, write `exempt` prefixes relative to the mount, as for
+  `routes.internal`.
+
+Whether or not client keys are on, every `gateway.access` log line gains a
+`client` field (`-` when no key was presented). A log pipeline with a strict
+schema needs to allow it.
+
+Configuration that uses `auth.client_keys` or a route's `client_key` field is
+refused by 0.1.5 and earlier (unknown fields are an error), so roll the new
+binary out before the new configuration, and roll the configuration back first
+if you downgrade.
+
+---
+
 ## 0.1.3 → 0.1.4 — CLI developer experience and pool health checks
 
 Standalone Linux/macOS CLI downloads are available starting with this release,

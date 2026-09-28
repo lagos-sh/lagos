@@ -189,6 +189,12 @@ pub struct RouteConfig {
     /// interpolation this is a rollout switch: `enabled: ${NEW_ROUTES:-false}`.
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
+    /// Set `false` to exempt this route from `auth.client_keys`, for a caller
+    /// that cannot send a key — a payment provider's webhook, say. Unset, the
+    /// route follows `auth.client_keys`. Without `auth.client_keys` any value
+    /// is refused rather than left to read as a control that does nothing.
+    #[serde(default)]
+    pub client_key: Option<bool>,
     /// Values the caller must prove they own, as `source: target` pairs:
     ///
     /// ```yaml
@@ -288,6 +294,12 @@ struct RouteInput {
     /// interpolation this is a rollout switch: `enabled: ${NEW_ROUTES:-false}`.
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
+    /// Set `false` to exempt this route from `auth.client_keys`, for a caller
+    /// that cannot send a key — a payment provider's webhook, say. Unset, the
+    /// route follows `auth.client_keys`. Without `auth.client_keys` any value
+    /// is refused rather than left to read as a control that does nothing.
+    #[serde(default)]
+    pub client_key: Option<bool>,
     /// Values the caller must prove they own, as `source: target` pairs:
     ///
     /// ```yaml
@@ -340,6 +352,7 @@ impl From<RouteInput> for RouteConfig {
             sse: input.sse,
             strip_prefix: input.strip_prefix,
             enabled: input.enabled,
+            client_key: input.client_key,
             bind: input.bind,
             cache: input.cache,
             cache_authenticated: input.cache_authenticated,
@@ -516,7 +529,7 @@ pub struct RouteTable {
 /// That allocation ran once per candidate route *per request* — on the one code
 /// path every request to the gateway takes, and it grew with the size of the
 /// route table, so the busiest deployment paid the most for it.
-fn under_prefix(path: &str, prefix: &str) -> bool {
+pub(crate) fn under_prefix(path: &str, prefix: &str) -> bool {
     // Exactly `path == prefix || path.starts_with(&format!("{prefix}/"))`:
     // `strip_prefix` succeeds when `path` begins with `prefix`, an empty
     // remainder means the two are equal, and a remainder starting with `/`

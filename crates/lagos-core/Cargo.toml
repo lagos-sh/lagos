@@ -41,6 +41,9 @@ anyhow.workspace = true
 percent-encoding = "2"
 base64 = "0.22"
 subtle = "2.6.1"
+# SHA-256 for client keys, so comparing them takes the same time whatever their
+# length. Already in the graph through the TLS stack; this pins nothing new.
+ring = "0.17"
 
 [features]
 default = ["otel", "cache"]

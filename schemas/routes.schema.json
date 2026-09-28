@@ -253,6 +253,22 @@
               "default": false,
               "description": "Permit caching on a tier that verifies tokens.\n\nWithout this, `cache: true` on `optional` or `authenticated` is refused\nat startup. Responses on those tiers are usually personalised, and\nwhether they are safe to share depends entirely on the upstream sending\ncorrect `Cache-Control` — a claim about that service which has to be\nmade deliberately."
             },
+            "client_key": {
+              "anyOf": [
+                {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Set `false` to exempt this route from `auth.client_keys`, for a caller\nthat cannot send a key — a payment provider's webhook, say. Unset, the\nroute follows `auth.client_keys`. Without `auth.client_keys` any value\nis refused rather than left to read as a control that does nothing."
+            },
             "enabled": {
               "anyOf": [
                 {
