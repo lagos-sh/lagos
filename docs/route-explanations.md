@@ -27,6 +27,11 @@ the route's group and is not a request selector. If `server.internal_listen`
 is absent, an internal explanation reports `listener unavailable`, rather
 than inventing a response from a nonexistent socket.
 
+With `auth.client_keys` configured, a public-listener explanation adds a
+`Client key` section: whether the request needs a key, the header it is read
+from and the `forward_as` header, or, for an exempt request, which exemption
+applies (`client_key: false`, an `exempt` prefix, or an `exempt_groups` group).
+
 ## Read the explanation
 
 Lagos checks the configured mounts in longest-match order, canonicalizes the

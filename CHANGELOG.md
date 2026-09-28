@@ -3,6 +3,42 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## 0.1.6 — client keys
+
+- Added `auth.client_keys`, an optional gateway-wide key requirement. When it is
+  configured, every route on the public listener — `public`, `optional` and
+  `authenticated` alike — needs one of the configured keys in `x-client-key`
+  (or the configured `header`); without it nothing changes. The health path and
+  CORS preflights never need a key, the internal listener keeps the machine
+  credential, and a missing or unknown key is a `401` with reason
+  `missing_client_key` or `bad_client_key`.
+
+  Keys are named (`keys: {storefront: ..., mobile: ...}`) so several can be live
+  at once for rotation, and the id names the caller in the access log
+  (a new `client` field, `-` when no key was needed) and in an optional
+  `forward_as` header sent upstream. The key header is always removed before
+  proxying, and `forward_as` is always cleared of any client-supplied value,
+  exempt routes included. The internal listener is untouched.
+
+  Routes are exempted explicitly, never by default: per route with
+  `client_key: false`, by path prefix with `exempt`, or by group with
+  `exempt_groups`. The check runs after IP-keyed rate limits, so key guesses
+  spend the caller's budget, and before any bearer token is read. Keys are held
+  as SHA-256 digests and compared in constant time against every configured
+  key. Startup refuses keys under 16 bytes, keys with surrounding whitespace,
+  two ids sharing a key, a `client_key` field when client keys are off, exempt
+  prefixes that are not canonical, and a `header` or `forward_as` that the
+  gateway already reads or writes (identity, injected, machine, forwarding and
+  framing headers).
+
+  `lagos explain` shows whether a request needs a key and why an exempt one does
+  not, `lagos routes` lists key ids and exemptions and marks exempt routes
+  `no-client-key`, `lagos test` can
+  assert `expect.client_key: required | exempt | off`, `lagos diff` reports each
+  route's requirement plus key ids and exemptions (never key values), and
+  `lagos config --effective` reports the route field. Editor schemas include the
+  new fields.
+
 ## 0.1.5
 
 - Added per-route `strip_prefix`. When set, the matched route prefix is removed

@@ -89,6 +89,37 @@ struct Expected {
     /// Whether every ownership binding permits the synthetic identity.
     #[serde(default)]
     bindings: Option<bool>,
+    /// Whether the request would need a client key. Only whether one is
+    /// required is checked here; keys themselves are never read offline.
+    #[serde(default)]
+    client_key: Option<ClientKeyState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClientKeyState {
+    Required,
+    Exempt,
+    /// `auth.client_keys` is not configured, or the route is internal.
+    Off,
+}
+
+impl ClientKeyState {
+    fn of(rule: &crate::config::ClientKeyRule) -> Self {
+        match rule {
+            crate::config::ClientKeyRule::Required => Self::Required,
+            crate::config::ClientKeyRule::Exempt(_) => Self::Exempt,
+            crate::config::ClientKeyRule::Off => Self::Off,
+        }
+    }
+
+    fn label(rule: &crate::config::ClientKeyRule) -> String {
+        match rule {
+            crate::config::ClientKeyRule::Required => "required".into(),
+            crate::config::ClientKeyRule::Exempt(why) => format!("exempt ({})", why.describe()),
+            crate::config::ClientKeyRule::Off => "off".into(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -99,6 +130,7 @@ struct Actual {
     upstream: Option<String>,
     upstream_path: Option<String>,
     bindings: Option<bool>,
+    client_key: Option<ClientKeyState>,
 }
 
 impl Actual {
@@ -110,6 +142,7 @@ impl Actual {
             upstream: None,
             upstream_path: None,
             bindings: None,
+            client_key: None,
         }
     }
 }
@@ -199,9 +232,10 @@ fn validate_case(case: &TestCase) -> anyhow::Result<()> {
         || case.expect.upstream.is_some()
         || case.expect.upstream_path.is_some()
         || case.expect.bindings.is_some()
+        || case.expect.client_key.is_some()
     {
         bail!(
-            "test `{}`: route, tier, upstream, upstream_path, and bindings apply only to a route result",
+            "test `{}`: route, tier, upstream, upstream_path, bindings, and client_key apply only to a route result",
             case.name
         );
     }
@@ -261,6 +295,11 @@ fn decide(cfg: &ResolvedConfig, table: &RouteTable, request: &TestRequest) -> Ac
         upstream: Some(route.upstream.clone()),
         upstream_path: Some(format!("/{}", route.upstream_path(&canonical))),
         bindings,
+        client_key: Some(if matches!(request.listener, Listener::Internal) {
+            ClientKeyState::Off
+        } else {
+            ClientKeyState::of(&cfg.client_key_rule(route, &canonical))
+        }),
     }
 }
 
@@ -306,11 +345,25 @@ fn compare(expected: &Expected, actual: &Actual) -> Vec<String> {
             actual.bindings
         ));
     }
+    if let Some(want) = expected.client_key
+        && Some(want) != actual.client_key
+    {
+        differences.push(format!(
+            "client_key: expected {want:?}, got {:?}",
+            actual.client_key
+        ));
+    }
     differences
 }
 
-fn route_fields(route: &RouteConfig) -> BTreeMap<&'static str, String> {
+fn route_fields(cfg: &ResolvedConfig, route: &RouteConfig) -> BTreeMap<&'static str, String> {
     BTreeMap::from([
+        // Evaluated at the route's own prefix. An `exempt` entry deeper than
+        // the prefix shows up in the deny-style list below instead.
+        (
+            "client_key",
+            ClientKeyState::label(&cfg.client_key_rule(route, &route.prefix)),
+        ),
         ("tier", route.auth.group().to_string()),
         ("prefix", route.prefix.clone()),
         ("hosts", format!("{:?}", route.host)),
@@ -345,12 +398,12 @@ pub(super) fn diff(old: &str, new: &str, allow_unset: bool) -> anyhow::Result<()
     let old_routes: BTreeMap<_, _> = old_table
         .routes()
         .iter()
-        .map(|r| (r.id.as_str(), route_fields(r)))
+        .map(|r| (r.id.as_str(), route_fields(&old_cfg, r)))
         .collect();
     let new_routes: BTreeMap<_, _> = new_table
         .routes()
         .iter()
-        .map(|r| (r.id.as_str(), route_fields(r)))
+        .map(|r| (r.id.as_str(), route_fields(&new_cfg, r)))
         .collect();
     let mut changes = 0;
 
@@ -396,6 +449,56 @@ pub(super) fn diff(old: &str, new: &str, allow_unset: bool) -> anyhow::Result<()
     }
     for path in new_denied.difference(&old_denied) {
         println!("+ denied /{path}");
+        changes += 1;
+    }
+    // Client keys: whether they are on, which ids exist, and what is exempt.
+    // Ids only — a changed secret under the same id is a deployment detail,
+    // and printing either value would put a credential in a CI log.
+    let shown = |v: &Option<String>| v.clone().unwrap_or_else(|| "none".into());
+    if old_cfg.client_key_header != new_cfg.client_key_header {
+        println!(
+            "~ client_keys.header: {} → {}",
+            shown(&old_cfg.client_key_header),
+            shown(&new_cfg.client_key_header)
+        );
+        changes += 1;
+    }
+    if old_cfg.client_key_forward_as != new_cfg.client_key_forward_as {
+        println!(
+            "~ client_keys.forward_as: {} → {}",
+            shown(&old_cfg.client_key_forward_as),
+            shown(&new_cfg.client_key_forward_as)
+        );
+        changes += 1;
+    }
+    let old_ids: BTreeSet<_> = old_cfg.client_keys.iter().map(|k| k.id.as_str()).collect();
+    let new_ids: BTreeSet<_> = new_cfg.client_keys.iter().map(|k| k.id.as_str()).collect();
+    for id in old_ids.difference(&new_ids) {
+        println!("- client key {id}");
+        changes += 1;
+    }
+    for id in new_ids.difference(&old_ids) {
+        println!("+ client key {id}");
+        changes += 1;
+    }
+    let old_exempt: BTreeSet<_> = old_cfg.client_key_exempt.iter().collect();
+    let new_exempt: BTreeSet<_> = new_cfg.client_key_exempt.iter().collect();
+    for path in old_exempt.difference(&new_exempt) {
+        println!("- client key exempt /{path}");
+        changes += 1;
+    }
+    for path in new_exempt.difference(&old_exempt) {
+        println!("+ client key exempt /{path}");
+        changes += 1;
+    }
+    let old_groups: BTreeSet<_> = old_cfg.client_key_exempt_groups.iter().collect();
+    let new_groups: BTreeSet<_> = new_cfg.client_key_exempt_groups.iter().collect();
+    for group in old_groups.difference(&new_groups) {
+        println!("- client key exempt group {group}");
+        changes += 1;
+    }
+    for group in new_groups.difference(&old_groups) {
+        println!("+ client key exempt group {group}");
         changes += 1;
     }
     if old_cfg.base_paths != new_cfg.base_paths {

@@ -11,7 +11,8 @@ gaps are in [SECURITY.md](SECURITY.md).
 Configuration DX includes [editor setup](docs/configuration-editor.md), schema
 generation, variable inventory, route explanations, redacted effective output,
 and route defaults, all available starting with 0.1.4.
-Optional partner credentials are a separate feature.
+Optional client keys — a gateway-wide key requirement on the public listener,
+with named keys and explicit exemptions — are available starting with 0.1.6.
 
 Standalone Linux/macOS binaries and an automatic installer are available
 starting with 0.1.4; see [installation](docs/installation.md). Windows native

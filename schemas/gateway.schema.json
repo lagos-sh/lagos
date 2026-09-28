@@ -7,6 +7,32 @@
         {
           "additionalProperties": false,
           "properties": {
+            "client_keys": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ClientKeysConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
             "firebase": {
               "anyOf": [
                 {
@@ -329,6 +355,92 @@
         }
       ],
       "description": "How one claim becomes one header.\n\nThe short form is the claim path. The long form exists for the case where\na JSON `null` is meaningful and distinct from the claim being absent:\n\n```yaml\nx-employer-company-id:\n  claim: employerCompanyId\n  when_null: none          # explicitly \"no employer\", not \"unknown\"\n```"
+    },
+    "ClientKeysConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "exempt": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Path prefixes that never need a key, matched on segment boundaries the\nsame way `routes.internal` is: `/webhooks` covers `/webhooks/xendit` but\nnot `/webhooksx`."
+            },
+            "exempt_groups": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Route groups whose routes never need a key: `public`, `optional` or\n`authenticated`."
+            },
+            "forward_as": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Header that tells the upstream which client called, set to the key's id.\nA client-supplied copy is always removed, including on exempt routes.\nUnset, the upstream is not told."
+            },
+            "header": {
+              "default": "x-client-key",
+              "description": "Header the caller presents its key in. Removed before the request is\nproxied, so an upstream never sees a client key.",
+              "type": "string"
+            },
+            "keys": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Key id → secret. The id names the caller in logs, in `forward_as` and in\n`key: identity` rate limits. Several keys may be live at once, which is\nhow a key is rotated: add the new one, move callers over, remove the old."
+            }
+          },
+          "required": [
+            "keys"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Keys every caller of the public listener must present.\n\n```yaml\nauth:\n  client_keys:\n    header: x-client-key\n    forward_as: x-client-id\n    keys:\n      storefront: ${STOREFRONT_CLIENT_KEY}\n      mobile: ${MOBILE_CLIENT_KEY}\n```\n\nConfiguring this turns the requirement on for *every* route on the public\nlistener, whatever its group: a key is checked before any token is read.\nThe health path is never keyed, and a route opts out only by saying so\n(`client_key: false`) — for a caller that cannot send one, such as a payment\nprovider's webhook. The internal listener keeps the machine credential.\n\nUnlike the machine credential, these are checked on the public listener, so\nanything that can reach the gateway can try to guess one. That is why they\nhave a minimum length and why the check runs after the IP rate limit.\n\nA key that a browser sends is readable by anyone who opens that page. It\ntells honest clients apart and keeps out scanners that do not have it; it is\nnot a secret from a determined visitor, and user authorization still belongs\nto the user's token."
     },
     "ConnectionLimitConfig": {
       "anyOf": [
@@ -1637,6 +1749,22 @@
               ],
               "default": false,
               "description": "Permit caching on a tier that verifies tokens.\n\nWithout this, `cache: true` on `optional` or `authenticated` is refused\nat startup. Responses on those tiers are usually personalised, and\nwhether they are safe to share depends entirely on the upstream sending\ncorrect `Cache-Control` — a claim about that service which has to be\nmade deliberately."
+            },
+            "client_key": {
+              "anyOf": [
+                {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Set `false` to exempt this route from `auth.client_keys`, for a caller\nthat cannot send a key — a payment provider's webhook, say. Unset, the\nroute follows `auth.client_keys`. Without `auth.client_keys` any value\nis refused rather than left to read as a control that does nothing."
             },
             "enabled": {
               "anyOf": [

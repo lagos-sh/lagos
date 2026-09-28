@@ -221,7 +221,7 @@ flowchart TD
     G -- "No route · 404" --> R
     G -- Route --> G2{"Configured upstream exists?"}
     G2 -- "No · 503" --> R
-    G2 -- Yes --> I["Authorization<br/>route ID · auth tier · verified subject and claims<br/>user JWT or machine credential"]
+    G2 -- Yes --> I["Authorization<br/>route ID · auth tier · verified subject and claims<br/>client key · user JWT or machine credential"]
     I -- "Rejected · 401, 404, or 503" --> R
     I --> J["Route policy<br/>rate-limit key and quota · ownership bindings"]
     J -- "Quota exceeded · 429 + Retry-After" --> R
@@ -287,6 +287,7 @@ metrics; sampled requests also produce trace data.
 | Identity forwarding | Verified subject, issuer, mapped claims, and optional signed identity tokens for upstream services |
 | Declarative routing | Path prefixes, host matching, allowed methods, authentication tiers, and internal route restrictions |
 | Service-to-service access | Machine credentials on a separate internal listener |
+| Client keys | Optional gateway-wide key requirement on the public listener, with named keys, rotation, and explicit exemptions |
 | Load balancing | Weighted upstream pools with round robin, random, or consistent hashing and optional health checks |
 | Traffic controls | Per-route rate limits, bounded retries, circuit breakers, request body limits, and configurable timeouts |
 | Response caching | Opt-in memory cache with object limits, authorization checks, `Vary` handling, and route reload isolation |
@@ -669,6 +670,75 @@ routes:
 Machine routes are absent from the public listener. Restrict network access to
 the internal listener. Use `inject.machine` to configure credentials sent to
 machine-tier upstreams independently of the public listener's `inject.headers`.
+
+### Client keys
+
+`auth.client_keys` requires a key on **every** route of the public listener,
+whatever its group, so only your own clients reach your services:
+
+```yaml
+auth:
+  client_keys:
+    header: x-client-key        # default
+    forward_as: x-client-id     # optional: tell the upstream which client called
+    keys:
+      storefront: ${STOREFRONT_CLIENT_KEY}
+      mobile: ${MOBILE_CLIENT_KEY}
+    exempt: [/webhooks]         # path prefixes that never need a key
+    exempt_groups: []           # public, optional, or authenticated
+
+routes:
+  public:
+    - prefix: /books
+      upstream: api                       # key required
+    - prefix: /payments/callback
+      upstream: api
+      client_key: false                   # exempt: the provider cannot send a key
+```
+
+Omit `auth.client_keys` and nothing changes. With it:
+
+| Request | Result |
+|---|---|
+| The health path | Always answered, never keyed |
+| CORS preflight | Answered without a key; browsers cannot attach one to a preflight |
+| Missing or empty key | `401`, reason `missing_client_key` |
+| Unknown key, or the header sent twice | `401`, reason `bad_client_key` |
+| A configured key | Proxied. The key is removed; `forward_as` carries its id |
+| Exempt route | Proxied without a key. Any key sent is still removed |
+| Internal listener | Unaffected; the machine credential applies |
+
+The key is checked after IP-keyed rate limits and before any bearer token is
+read, so guesses spend the caller's budget and a caller without a key never
+reaches a signature check. On routes that verify a token, the user's
+`Authorization` header is still read and forwarded as before: a client key says
+which application is calling, a token says which user. `rate_limit.key:
+identity` still means the user; a key shared by every visitor of one client is
+never used as a rate-limit bucket.
+
+Keys are held as SHA-256 digests and compared in constant time against every
+configured key, so neither a key's length nor its position in the list shows in
+the response time. Each must be at least 16 bytes without surrounding
+whitespace, two ids may not share a key, and neither `header` nor `forward_as`
+may be a header the gateway already reads or writes — identity, injected,
+machine, forwarding or framing headers. Several keys can be live at once, which is how one is rotated: add the new
+key, move callers over, then remove the old one. `forward_as` is always cleared
+of any client-supplied value, including on exempt routes, so a caller cannot
+claim to be one of your clients.
+
+`exempt` prefixes are matched on segment boundaries against the canonical
+path, after any `server.mounts` prefix is removed — the same path
+`routes.internal` sees — so write `/webhooks`, not `/api/webhooks`, under a
+`/api` mount. An entry that is not already canonical is refused. `lagos routes`
+lists the key ids and exemptions and marks exempt routes `no-client-key`.
+
+Cached responses on a keyed route are shared between clients, like any other
+public response. If an upstream answers differently per client, it should send
+`Vary: x-client-id` (or whatever `forward_as` is), which the cache honours.
+
+A key that a browser sends is visible to anyone using that page. Client keys
+keep out scanners and callers you never gave a key to; they do not replace user
+authentication. Keys used only server-side can be treated as secrets.
 
 ## Traffic management
 
@@ -1115,6 +1185,8 @@ field that differed. For an ownership rule, supply `request.query`, optional
 `claims`; `expect.bindings: true` or `false` checks all configured bindings.
 `expect.upstream_path` checks the path the upstream receives, which differs
 from the request path on a `strip_prefix` route.
+`expect.client_key: required`, `exempt`, or `off` checks whether the request
+needs a client key; keys themselves are never read offline.
 `request.listener: internal` checks machine-tier routing. Other results are
 `denied`, `outside_mount`, and `unsafe_path`.
 Use `--allow-unset` in CI when deployment-only variables are unavailable; the
@@ -1127,8 +1199,9 @@ execute extensions, contact upstreams, or simulate rate limits. Use end-to-end
 tests for those behaviours.
 
 `lagos diff old.yml new.yml` shows route additions, removals, tier and policy
-changes, deny-list changes, mounts, and changed upstream definitions. It hides
-upstream target values. It is a route-surface report, not a replacement for the
+changes, whether each route needs a client key, client key ids and exemptions,
+deny-list changes, mounts, and changed upstream definitions. It hides upstream
+target values and never prints a client key. It is a route-surface report, not a replacement for the
 YAML diff: review auth providers, injected headers, listeners, and secrets in
 the original files. `--allow-unset` can compare documents without production
 environment values, and explicitly names any values it left unchecked.

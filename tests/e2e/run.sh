@@ -989,6 +989,123 @@ sleep 4
 expect "bad route file keeps the old table" 200 "$G/bff/v1/products/42"
 cp "$WORK/routes.backup" "$E2E/routes.yml"
 
+say "client keys"
+# A second gateway: client keys switch the requirement on for every route on
+# the public listener, so they cannot share the main gateway without changing
+# every expectation above.
+CK_A=storefront-e2e-key-000000000001
+CK_B=adminweb-e2e-key-0000000000002
+cat > "$WORK/keys.yml" <<EOF
+server:
+  listen: 127.0.0.1:3321
+  internal_listen: 127.0.0.1:3322
+  health_path: /gateway/health
+upstreams:
+  echo: http://127.0.0.1:9401
+forward:
+  headers: [user-agent, x-client-id]
+auth:
+  machine: { secret: keys-e2e-machine-secret }
+  client_keys:
+    forward_as: x-client-id
+    exempt: [/hooks]
+    keys:
+      storefront: $CK_A
+      admin-web: $CK_B
+cors:
+  origins: [https://app.example.com]
+  methods: [GET]
+  headers: [x-client-key, authorization]
+observability:
+  metrics:
+    listen: 127.0.0.1:9391
+routes:
+  public:
+    - { id: books, prefix: books, upstream: echo, methods: [GET] }
+    - { id: hooks, prefix: hooks, upstream: echo, methods: [GET, POST] }
+    - { id: pay, prefix: pay, upstream: echo, methods: [GET], client_key: false }
+    - id: guess
+      prefix: guess
+      upstream: echo
+      methods: [GET]
+      rate_limit: { requests: 3, interval: 1m, key: ip }
+    - id: quota
+      prefix: quota
+      upstream: echo
+      methods: [GET]
+      rate_limit: { requests: 2, interval: 1m, key: identity }
+  machine:
+    - { id: jobs, prefix: jobs, upstream: echo, methods: [GET] }
+EOF
+GATEWAY_CONFIG="$WORK/keys.yml" "$BIN/lagos" > "$WORK/k.log" 2>&1 & PIDS+=($!)
+K=http://127.0.0.1:3321
+wait_ready "client-key gateway" "$K/gateway/health" "$WORK/k.log" || exit 1
+
+expect "health check needs no key"            200 "$K/gateway/health"
+expect "no key is a 401"                      401 "$K/books/1"
+grep -q 'Client key required' "$WORK/body" \
+  && ok "the 401 says a key is required" || bad "missing-key body: $(head -c 120 "$WORK/body")"
+expect "wrong key is a 401"                   401 -H "x-client-key: storefront-e2e-key-000000000009" "$K/books/1"
+expect "empty key is a 401"                   401 -H "x-client-key;" "$K/books/1"
+expect "a valid key is proxied"               200 -H "x-client-key: $CK_A" "$K/books/1"
+expect "a second live key also works"         200 -H "x-client-key: $CK_B" "$K/books/1"
+expect "the key twice is refused"             401 -H "x-client-key: $CK_A" -H "x-client-key: $CK_A" "$K/books/1"
+
+curl -s -m 5 -H "x-client-key: $CK_A" -H "x-client-id: admin-web" \
+  -H "Authorization: Bearer user-token" "$K/books/1" > "$WORK/keyed.json"
+python3 "$E2E/assert_absent.py" "$WORK/keyed.json" x-client-key \
+  && ok "the key never reaches the upstream" || bad "client key forwarded upstream"
+python3 "$E2E/assert_header.py" "$WORK/keyed.json" x-client-id storefront \
+  && ok "the upstream is told which client called" || bad "x-client-id missing or spoofable"
+python3 "$E2E/assert_header.py" "$WORK/keyed.json" authorization "Bearer user-token" \
+  && ok "the user's token still reaches the service" || bad "authorization not forwarded"
+
+expect "an exempt prefix needs no key"        200 "$K/hooks/xendit"
+expect "a route can opt out"                  200 "$K/pay/callback"
+curl -s -m 5 -H "x-client-key: $CK_A" -H "x-client-id: storefront" "$K/hooks/xendit" > "$WORK/exempt.json"
+python3 "$E2E/assert_absent.py" "$WORK/exempt.json" x-client-key \
+  && ok "a key sent to an exempt route is still removed" || bad "key leaked on exempt route"
+python3 "$E2E/assert_absent.py" "$WORK/exempt.json" x-client-id \
+  && ok "nobody can claim a client id on an exempt route" || bad "spoofed x-client-id forwarded"
+
+expect "a preflight needs no key"             204 -X OPTIONS -H "Origin: https://app.example.com" \
+  -H "Access-Control-Request-Method: GET" -H "Access-Control-Request-Headers: x-client-key" "$K/books/1"
+curl -s -o /dev/null -D "$WORK/401.h" -m 5 -H "Origin: https://app.example.com" "$K/books/1"
+grep -qi '^access-control-allow-origin: https://app.example.com' "$WORK/401.h" \
+  && ok "a browser can read the 401" || bad "401 lacks CORS headers"
+
+# Guesses are counted by the IP limit, so a key cannot be brute-forced at line
+# rate: after three wrong keys even the right one waits out the window.
+for n in 1 2 3; do
+  expect "wrong guess $n is a 401" 401 -H "x-client-key: guess-e2e-key-00000000000$n" "$K/guess/1"
+done
+expect "guesses use up the IP limit"          429 -H "x-client-key: $CK_A" "$K/guess/1"
+
+# `key: identity` means the user. A client key is shared by every visitor of
+# that client, so it must not become the bucket: one visitor would 429 them all.
+for n in 1 2 3 4; do
+  expect "anonymous visitor $n is not in a shared bucket" 200 -H "x-client-key: $CK_A" "$K/quota/1"
+done
+
+# The internal listener has no client keys: a machine caller's own header of
+# the same name reaches its upstream untouched.
+curl -s -m 5 -H "x-internal-api-key: keys-e2e-machine-secret" -H "x-client-id: tenant-7" \
+  "http://127.0.0.1:3322/jobs/1" > "$WORK/keys-internal.json"
+python3 "$E2E/assert_header.py" "$WORK/keys-internal.json" x-client-id tenant-7 \
+  && ok "the internal listener leaves x-client-id alone" || bad "client key handling leaked onto the internal listener"
+
+curl -s -m 5 "http://127.0.0.1:9391/" > "$WORK/keymetrics.txt"
+grep -q 'reason="missing_client_key"' "$WORK/keymetrics.txt" \
+  && grep -q 'reason="bad_client_key"' "$WORK/keymetrics.txt" \
+  && ok "refusals are counted by reason" || bad "client key rejection reasons missing from metrics"
+if grep -q -e "$CK_A" -e "$CK_B" "$WORK/k.log" "$WORK/keymetrics.txt"; then
+  bad "a client key appeared in logs or metrics"
+else
+  ok "no key appears in logs or metrics"
+fi
+grep -q 'storefront' "$WORK/k.log" \
+  && ok "the access log names the client" || bad "client id missing from access log"
+
 say "filter interaction regressions"
 if python3 "$E2E/regressions.py" "$BIN/lagos"; then
   ok "filter interaction regression suite"

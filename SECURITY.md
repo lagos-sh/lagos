@@ -85,6 +85,12 @@ reviewer knows what is already covered.
 - Machine credentials compared in constant time
 - Machine routes live on a separate listener, so they are absent from the public
   gateway rather than merely guarded on it
+- Client keys held as SHA-256 digests and compared in constant time against
+  every configured key, after the IP rate limit and before any token is read;
+  the key header is removed before proxying and `forward_as` is always cleared
+  of client-supplied values. Keys under 16 bytes, padded keys, shared keys and
+  header names that collide with identity, injected, machine or framing headers
+  are refused at startup, and routes are exempted only explicitly
 
 **Request surface**
 
@@ -153,6 +159,19 @@ news.
 - **No request-body inspection.** No WAF, no schema validation, no content
   scanning. The gateway decides who may reach a route, not what they may send
   through it.
+- **A client key a browser sends is not a secret.** Anyone using that page can
+  read it and reuse it elsewhere. It separates your clients from callers you
+  never gave a key to; user authentication still belongs to the user's token.
+- **Extensions see the raw client key.** `ExtensionContext.client_headers` is
+  the request as received, key included, and an extension runs after the key is
+  stripped from the plan, so it could put it back or log it. Extensions are
+  trusted code; treat one that logs client headers as handling credentials.
+- **Whoever can write the route file can exempt a route.** `client_key: false`
+  takes effect on reload, while `exempt` and `exempt_groups` need a restart.
+  Protect a separately mounted route file like the main configuration.
+- **A keyed route answers `401`, not `404`, without a key.** A caller without a
+  key can therefore tell a routed prefix from an unrouted one. Deny-listed and
+  unallowlisted paths still answer `404` before the key is looked at.
 - **`forward: passthrough` mode is exactly what it says.** Every client header
   reaches the upstream. The allowlist default exists because that is the safe
   one.
