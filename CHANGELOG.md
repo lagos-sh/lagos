@@ -5,6 +5,13 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## 0.1.6 — client keys
 
+- The `401` hints for a missing or invalid bearer token no longer name Firebase
+  (`Use a fresh ID token from getIdToken().`, `Bearer <id_token>`). They now
+  read `Refresh the token or sign in again, then retry.` and
+  `Use: Authorization: Bearer <token>`, since any configured issuer can produce
+  them. Only the `hint` text changed; status, `message`, `error` and the
+  logged reason are the same.
+
 - Added `auth.client_keys`, an optional gateway-wide key requirement. When it is
   configured, every route on the public listener — `public`, `optional` and
   `authenticated` alike — needs one of the configured keys in `x-client-key`
