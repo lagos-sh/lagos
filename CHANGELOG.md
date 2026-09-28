@@ -3,6 +3,49 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## Unreleased
+
+- Added `counter: shared`, putting rate-limit counters in a cache every replica
+  can reach, so a limit of 100/min across three replicas no longer admits
+  300/min. Any RESP server works — Recached, Redis or Valkey — configured under
+  a new top-level `shared_counters` block with `url`, `sync`, `prefix`,
+  `timeout` and `max_keys_per_sync`; `recached://`, `valkey://`, `resp://` and
+  `redis://` schemes are all accepted, each with a trailing `s` for TLS.
+  Routes opt in individually and a block no route uses connects to nothing.
+
+  Two modes. The default `approximate` decides locally and reconciles in the
+  background, so no request waits on the cache; overshoot becomes
+  roughly `replicas x arrival rate x reconciliation period` instead of
+  `replicas x limit`; capped batches rotate across keys. `mode: exact`
+  uses Recached's `RLCHECK` for an authoritative decision in one round trip per
+  limited request; it has no Redis or Valkey counterpart, so the backend is
+  identified at startup and `exact` against anything else refuses to boot rather
+  than degrading a limit silently. Route reloads perform the same capability
+  check before publishing and retain the previous routes on rejection.
+
+  If the cache is unreachable, traffic continues with limits degraded to
+  per-process counting, reported by the new `gateway_shared_limit_errors_total`
+  and `gateway_shared_limit_keys_synced_total` metrics. `mode: exact` is the one
+  exception and fails the boot, since it cannot be honoured without the backend
+  at all. A shared limit requires `interval` of at least 1s and, in
+  `approximate` mode, `sync` shorter than `interval`. Exact mode also requires
+  whole-second intervals. All are checked at startup and on reloads.
+
+  Accept-time connection limits stay per process: that limiter runs before the
+  TLS handshake and before a task exists, and a connection flood is the last
+  moment to be waiting on a cache. The sliding-window arithmetic is now shared
+  by the local and cluster paths so a limit cannot mean two different things.
+
+  Reconciliation publishes outstanding usage from both windows and retries
+  immutable `HSETNX` contributions without double counting after lost replies.
+  Background sync does not refresh request idle timers. Window hashes expire;
+  their storage grows with replicas and nonzero publications per window.
+
+  The RESP client is behind a new `shared-limits` feature on `lagos-core`, off
+  by default there and on for the shipped `lagos` binary and images; a config
+  using `counter: shared` in a build without it is a startup error naming the
+  feature.
+
 ## 0.1.4 — Docker starters and policy checks
 
 - Prepared standalone stock CLI downloads for Linux/macOS on x86_64 and ARM64,

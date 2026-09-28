@@ -9,6 +9,9 @@ pub struct FileRouteProvider {
     /// failing. Set only by `validate --allow-unset`; `None` everywhere a
     /// server is actually started.
     unset_fallback: Option<fn(&str) -> String>,
+    /// Backend for routes that set `counter: shared`. Held here so every
+    /// reload rebuilds their limiters against the same connection.
+    shared: Option<crate::ratelimit::SharedCounterFactory>,
 }
 
 impl FileRouteProvider {
@@ -17,7 +20,18 @@ impl FileRouteProvider {
             path: path.into(),
             unset_fallback: None,
             defaults: Default::default(),
+            shared: None,
         }
+    }
+
+    /// Reconcile `counter: shared` routes through `factory`.
+    #[must_use]
+    pub fn with_shared_counters(
+        mut self,
+        factory: Option<crate::ratelimit::SharedCounterFactory>,
+    ) -> Self {
+        self.shared = factory;
+        self
     }
 
     /// Freeze startup defaults for every subsequent route-file reload.
@@ -69,7 +83,11 @@ impl RouteProvider for FileRouteProvider {
             anyhow::anyhow!("{}{at}: {e}", self.path)
         })?;
 
-        Ok(RouteTable::build_with_defaults(groups, &self.defaults))
+        Ok(RouteTable::build_with(
+            groups,
+            &self.defaults,
+            self.shared.as_ref(),
+        ))
     }
 }
 
@@ -79,6 +97,7 @@ impl RouteProvider for FileRouteProvider {
 pub struct InlineRouteProvider {
     groups: RouteGroups,
     defaults: crate::config::RouteDefaults,
+    shared: Option<crate::ratelimit::SharedCounterFactory>,
 }
 
 impl InlineRouteProvider {
@@ -86,6 +105,7 @@ impl InlineRouteProvider {
         Self {
             groups,
             defaults: Default::default(),
+            shared: None,
         }
     }
     #[must_use]
@@ -93,14 +113,25 @@ impl InlineRouteProvider {
         self.defaults = defaults;
         self
     }
+
+    /// Reconcile `counter: shared` routes through `factory`.
+    #[must_use]
+    pub fn with_shared_counters(
+        mut self,
+        factory: Option<crate::ratelimit::SharedCounterFactory>,
+    ) -> Self {
+        self.shared = factory;
+        self
+    }
 }
 
 #[async_trait::async_trait]
 impl RouteProvider for InlineRouteProvider {
     async fn load(&self) -> anyhow::Result<RouteTable> {
-        Ok(RouteTable::build_with_defaults(
+        Ok(RouteTable::build_with(
             self.groups.clone(),
             &self.defaults,
+            self.shared.as_ref(),
         ))
     }
 }

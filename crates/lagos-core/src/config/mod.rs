@@ -73,6 +73,10 @@ pub struct GatewayConfig {
     /// Response cache. Configures the store; routes opt in individually.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+    /// Cluster-wide rate-limit counters. Configures the backend; routes opt in
+    /// individually with `counter: shared`.
+    #[serde(default)]
+    pub shared_counters: Option<SharedCountersConfig>,
 }
 
 /// Global policies for routes that omit the corresponding field.
@@ -313,6 +317,9 @@ pub struct RateLimitConfig {
     pub max_keys: u64,
     #[serde(default)]
     pub counter: Counter,
+    /// Only meaningful with `counter: shared`.
+    #[serde(default)]
+    pub mode: LimitMode,
 }
 
 /// How a rate limiter counts.
@@ -338,6 +345,123 @@ pub enum Counter {
     /// the key space is huge and the limit is a blunt abuse control; wrong when
     /// the 429 is a promise to a specific customer.
     Sketch,
+    /// Counters shared across every replica, over RESP.
+    ///
+    /// The reason to choose it: `exact` and `sketch` both count only what
+    /// *this* process saw, so a limit of 100/min across three replicas admits
+    /// up to 300/min. This one makes the limit mean what it says cluster-wide.
+    ///
+    /// Requires a `shared_counters` block, and a build with the
+    /// `shared-limits` feature. How closely it holds the limit — and whether
+    /// anything waits on the cache — is [`LimitMode`].
+    Shared,
+}
+
+/// How hard a `shared` counter tries, and what it spends to do it.
+///
+/// Only meaningful with [`Counter::Shared`]; the local backends have nothing to
+/// trade. The default keeps the request path free of I/O, which is the rule the
+/// rest of this gateway is built to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitMode {
+    /// Decide locally, reconcile in the background.
+    ///
+    /// The local window admits or refuses with no I/O at all; a background task
+    /// publishes this replica's usage every `shared_counters.sync` and reads
+    /// back what the others have used. A decision is therefore made against a
+    /// cluster total from its last reconciliation. Capped batches rotate across
+    /// keys, so a full pass takes roughly `ceil(keys / max_keys_per_sync)` ticks,
+    /// plus backend latency. Overshoot scales with the effective reconciliation
+    /// period: roughly `replicas x arrival_rate x period`.
+    ///
+    /// Portable: it uses `HSETNX`, `HVALS` and `EXPIRE`, which Recached, Redis and
+    /// Valkey all implement identically.
+    #[default]
+    Approximate,
+    /// Ask the cache per request, and believe it.
+    ///
+    /// One `RLCHECK` round trip per limited request returns an authoritative
+    /// decision, so the limit holds cluster-wide with no overshoot and no window
+    /// alignment to reason about. The cost is real and should be chosen
+    /// deliberately: every limited request now waits on the cache, and a slow
+    /// cache is slow requests.
+    ///
+    /// **Recached only.** `RLCHECK` has no Redis or Valkey counterpart, and it
+    /// cannot be emulated without `EVAL`, which Recached does not implement. The
+    /// backend is checked at startup and before publishing route reloads; a
+    /// mismatch rejects the configuration. Intervals must be whole seconds,
+    /// because `RLCHECK` cannot represent fractional windows.
+    Exact,
+}
+
+/// Where cluster-wide rate-limit counters live.
+///
+/// One backend per gateway; routes opt in individually with `counter: shared`.
+/// Omitted, nothing connects and nothing is shared.
+///
+/// ```yaml
+/// shared_counters:
+///   url: redis://recached:6379
+///   sync: 1s
+/// ```
+///
+/// Any RESP server with the handful of commands this uses will do — Recached,
+/// Redis or Valkey. `redis://` and `rediss://` are the protocol's URL schemes
+/// and are what every client uses, so they are accepted whatever is listening;
+/// `recached://`, `valkey://` and `resp://` are accepted as aliases so a config
+/// need not name a product the operator does not run.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SharedCountersConfig {
+    /// `recached://host:6379`, or any of the aliases above. Add `s` to the
+    /// scheme for TLS. Credentials in the URL are redacted everywhere this is
+    /// logged or printed.
+    pub url: String,
+    /// How often [`LimitMode::Approximate`] publishes local usage and reads back
+    /// the cluster's.
+    ///
+    /// This is the accuracy knob, and it buys accuracy with cache traffic, not
+    /// with request latency — nothing on the request path waits for it either
+    /// way. Shorter means a tighter limit and more commands per second; longer
+    /// means more overshoot.
+    #[serde(with = "humantime_serde", default = "d1")]
+    #[schemars(with = "String")]
+    pub sync: Duration,
+    /// Prefix on every key written to the cache, so a shared cache can serve
+    /// this gateway alongside anything else.
+    #[serde(default = "default_counter_prefix")]
+    pub prefix: String,
+    /// Budget for one round trip, connect included.
+    ///
+    /// In `approximate` mode a timeout costs accuracy and nothing else. In
+    /// `exact` mode it is a ceiling on how long a request can be held waiting
+    /// for the cache, which is why it is deliberately short.
+    #[serde(with = "humantime_serde", default = "default_counter_timeout")]
+    #[schemars(with = "String")]
+    pub timeout: Duration,
+    /// Ceiling on keys reconciled per `sync` tick.
+    ///
+    /// The sync task walks the local key store, which is itself bounded by
+    /// `rate_limit.max_keys` — but a wide key space still means a wide pipeline,
+    /// and a tick that cannot finish inside its own interval is a queue that
+    /// grows. Keys are visited in rotation; a full pass takes roughly
+    /// `ceil(keys / max_keys_per_sync)` ticks, plus backend latency. Failed
+    /// publications are retried before taking the next batch.
+    #[serde(default = "default_sync_batch")]
+    pub max_keys_per_sync: usize,
+}
+
+fn default_counter_prefix() -> String {
+    "lagos:rl:".into()
+}
+
+fn default_counter_timeout() -> Duration {
+    Duration::from_millis(250)
+}
+
+fn default_sync_batch() -> usize {
+    4096
 }
 
 fn default_max_keys() -> u64 {
@@ -772,7 +896,12 @@ impl ConnectionLimitConfig {
             key: RateLimitKey::Ip,
             trusted_proxies: 0,
             max_keys: self.max_tracked,
+            // Local, always. This limiter runs in `connection_filter`, before
+            // the TLS handshake and before a task exists -- there is nowhere to
+            // await a round trip, and a connection flood is exactly the moment
+            // a gateway must not be waiting on a cache to decide anything.
             counter: Counter::Exact,
+            mode: LimitMode::Approximate,
         }
     }
 }
@@ -1855,6 +1984,31 @@ impl GatewayConfig {
                 "defaults.rate_limit.requests must be greater than zero",
             ));
         }
+        if let Some(shared) = &self.shared_counters {
+            // Rejected here rather than at connect time: a URL typo that only
+            // surfaces as a failed reconciliation would look like a cache
+            // outage, and the gateway would go on serving with limits quietly
+            // degraded to per-process.
+            crate::ratelimit::shared::normalize_url(&shared.url)
+                .map_err(|e| ConfigError::invalid(format!("shared_counters.url: {e}")))?;
+            if shared.sync.is_zero() {
+                return Err(ConfigError::invalid(
+                    "shared_counters.sync must be greater than zero; it is how often this \
+                     replica publishes its usage, and zero would mean never",
+                ));
+            }
+            if shared.timeout.is_zero() {
+                return Err(ConfigError::invalid(
+                    "shared_counters.timeout must be greater than zero",
+                ));
+            }
+            if shared.max_keys_per_sync == 0 {
+                return Err(ConfigError::invalid(
+                    "shared_counters.max_keys_per_sync must be greater than zero; zero would \
+                     reconcile nothing and leave every limit per-process",
+                ));
+            }
+        }
         if self.timeouts.connect.is_zero() || self.timeouts.downstream_read.is_zero() {
             return Err(ConfigError::invalid(
                 "timeouts.connect and timeouts.downstream_read must be greater than zero",
@@ -2125,11 +2279,68 @@ impl ResolvedConfig {
         self.validate_routes(table.routes())
     }
 
+    /// Everything that must hold before a route may share its counters.
+    ///
+    /// All fatal at boot. A limit somebody configured and is relying on must
+    /// never silently fall back to counting per process — that is the failure
+    /// this whole feature exists to remove, and reintroducing it as a warning
+    /// nobody reads would be worse than refusing to start.
+    fn validate_shared_limit(&self, id: &str, limit: &RateLimitConfig) -> Result<(), ConfigError> {
+        if limit.mode == LimitMode::Exact && limit.counter != Counter::Shared {
+            return Err(ConfigError::invalid(format!(
+                "route `{id}`: rate_limit.mode is `exact`, which only means something with \
+                 `counter: shared` — a per-process counter has nothing to be exact about"
+            )));
+        }
+        if limit.counter != Counter::Shared {
+            return Ok(());
+        }
+
+        if !cfg!(feature = "shared-limits") {
+            return Err(ConfigError::invalid(format!(
+                "route `{id}`: `counter: shared` needs a build with the `shared-limits` \
+                 feature, and this binary was built without it"
+            )));
+        }
+        let Some(shared) = &self.raw.shared_counters else {
+            return Err(ConfigError::invalid(format!(
+                "route `{id}`: `counter: shared` needs a `shared_counters` block saying where \
+                 the counters live"
+            )));
+        };
+        if limit.interval < Duration::from_secs(1) {
+            return Err(ConfigError::invalid(format!(
+                "route `{id}`: a shared rate limit needs `interval` of at least 1s, not {:?}",
+                limit.interval
+            )));
+        }
+        if limit.mode == LimitMode::Exact && limit.interval.subsec_nanos() != 0 {
+            return Err(ConfigError::invalid(format!(
+                "route `{id}`: rate_limit.mode `exact` requires an interval in whole seconds; \
+                 RLCHECK cannot represent {:?}",
+                limit.interval
+            )));
+        }
+        if limit.mode == LimitMode::Approximate && shared.sync >= limit.interval {
+            return Err(ConfigError::invalid(format!(
+                "route `{id}`: shared_counters.sync ({:?}) is not shorter than the limit's \
+                 interval ({:?}), so the cluster's usage would be read at most once per window \
+                 and the limit would be barely shared at all. Lower `sync`, or use \
+                 `mode: exact`.",
+                shared.sync, limit.interval
+            )));
+        }
+        Ok(())
+    }
+
     pub fn validate_routes(&self, routes: &[RouteConfig]) -> Result<(), ConfigError> {
         let known: Vec<&str> = self.upstreams.keys().map(String::as_str).collect();
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
 
         for r in routes {
+            if let Some(limit) = &r.rate_limit {
+                self.validate_shared_limit(&r.id, limit)?;
+            }
             if let Some(limit) = &r.rate_limit
                 && matches!(limit.key, RateLimitKey::Ip)
                 && limit.trusted_proxies > 0
@@ -2615,6 +2826,244 @@ routes:
             claims["x-employer-company-id"].when_null.as_deref(),
             Some("none")
         );
+    }
+
+    // --- shared rate-limit counters ------------------------------------
+
+    /// Parse, build the route table, and run the checks a boot would run.
+    ///
+    /// Route-level coupling is validated against the table rather than the
+    /// document, because a limit can be inherited from `defaults` and only the
+    /// built table shows what a route actually ended up with.
+    fn parse_and_validate(text: &str) -> Result<(), ConfigError> {
+        let resolved = parse(text)?;
+        let table = crate::routes::RouteTable::build_with_defaults(
+            resolved.raw.routes.groups(),
+            &resolved.raw.defaults,
+        );
+        resolved.validate_table(&table)
+    }
+
+    const SHARED_BACKEND: &str = "shared_counters:\n  url: recached://cache:6379\n";
+
+    #[test]
+    fn sharing_counters_with_nowhere_to_share_them_is_refused() {
+        // The failure this must not become: a route configured to share
+        // counters quietly counting per process, which is the exact bug the
+        // feature exists to fix.
+        let e = parse_and_validate(
+            r#"
+upstreams:
+  users: http://users:3000
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      rate_limit: { requests: 100, interval: 1m, counter: shared }
+"#,
+        )
+        .expect_err("`counter: shared` with no backend must not start");
+        let message = e.to_string();
+        // A build without the feature reports that first, deliberately: no
+        // amount of config fixes a binary that cannot share counters at all.
+        let expected = if cfg!(feature = "shared-limits") {
+            "shared_counters"
+        } else {
+            "shared-limits"
+        };
+        assert!(
+            message.contains(expected),
+            "the error must name what is missing: {message}"
+        );
+    }
+
+    #[test]
+    fn a_shared_limit_with_a_backend_is_accepted() {
+        let text = format!(
+            r#"{SHARED_BACKEND}
+upstreams:
+  users: http://users:3000
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      rate_limit: {{ requests: 100, interval: 1m, counter: shared }}
+"#
+        );
+        let result = parse_and_validate(&text);
+        // Without the feature the same document is refused, naming the feature
+        // — which is itself the behaviour under test in that build.
+        if cfg!(feature = "shared-limits") {
+            result.expect("a shared limit with a backend is a valid gateway");
+        } else {
+            let message = result.expect_err("no feature, no sharing").to_string();
+            assert!(message.contains("shared-limits"), "{message}");
+        }
+    }
+
+    #[test]
+    fn exactness_without_shared_counters_is_refused() {
+        // `mode: exact` on a per-process counter reads as a promise of
+        // cluster-wide exactness that nothing would keep.
+        let e = parse_and_validate(
+            r#"
+upstreams:
+  users: http://users:3000
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      rate_limit: { requests: 100, interval: 1m, mode: exact }
+"#,
+        )
+        .expect_err("`mode: exact` needs `counter: shared`");
+        assert!(e.to_string().contains("counter: shared"), "{e}");
+    }
+
+    #[test]
+    fn a_shared_window_must_be_at_least_a_second() {
+        // Every replica derives the window index from whole seconds, and
+        // RLCHECK takes its window in seconds; a sub-second shared window has
+        // nowhere to live.
+        let text = format!(
+            r#"{SHARED_BACKEND}
+upstreams:
+  users: http://users:3000
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      rate_limit: {{ requests: 10, interval: 500ms, counter: shared }}
+"#
+        );
+        assert!(
+            parse_and_validate(&text).is_err(),
+            "a sub-second shared window must be refused"
+        );
+    }
+
+    #[test]
+    fn fractional_exact_windows_are_refused_without_truncation() {
+        let text = format!(
+            "{SHARED_BACKEND}\nupstreams: {{ users: http://users:3000 }}\nroutes:\n  public:\n    - prefix: /users\n      upstream: users\n      rate_limit: {{ requests: 10, interval: 1900ms, counter: shared, mode: exact }}\n"
+        );
+        let message = parse_and_validate(&text)
+            .expect_err("RLCHECK takes whole seconds")
+            .to_string();
+        let expected = if cfg!(feature = "shared-limits") {
+            "whole seconds"
+        } else {
+            "shared-limits"
+        };
+        assert!(message.contains(expected), "{message}");
+        if cfg!(feature = "shared-limits") {
+            parse_and_validate(&text.replace("1900ms", "2s")).expect("whole seconds are valid");
+            parse_and_validate(&text.replace("mode: exact", "mode: approximate"))
+                .expect("approximate mode preserves fractional intervals");
+        }
+    }
+
+    #[test]
+    fn a_sync_slower_than_the_window_is_refused() {
+        // Reconciling at most once per window means the cluster's usage is
+        // never really in view, so the limit would be shared in name only.
+        let text = r#"
+shared_counters:
+  url: recached://cache:6379
+  sync: 30s
+upstreams:
+  users: http://users:3000
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      rate_limit: { requests: 10, interval: 10s, counter: shared }
+"#;
+        let e = parse_and_validate(text).expect_err("sync must be shorter than the interval");
+        let message = e.to_string();
+        if cfg!(feature = "shared-limits") {
+            assert!(message.contains("sync"), "{message}");
+        } else {
+            assert!(message.contains("shared-limits"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_url_that_cannot_be_reached_is_a_boot_error_and_keeps_its_password() {
+        // A typo here would otherwise look exactly like a cache outage: the
+        // gateway would serve happily with limits degraded to per-process.
+        let text = r#"
+shared_counters:
+  url: https://default:hunter2@cache:6379
+upstreams:
+  users: http://users:3000
+routes:
+  public: [{ prefix: /users, upstream: users }]
+"#;
+        let e = parse_and_validate(text).expect_err("an unusable scheme must not start");
+        let message = e.to_string();
+        assert!(message.contains("shared_counters.url"), "{message}");
+        assert!(
+            !message.contains("hunter2"),
+            "a config error reaches a log; the password must not: {message}"
+        );
+    }
+
+    #[test]
+    fn a_zero_sync_interval_is_refused() {
+        let text = r#"
+shared_counters:
+  url: recached://cache:6379
+  sync: 0s
+upstreams:
+  users: http://users:3000
+routes:
+  public: [{ prefix: /users, upstream: users }]
+"#;
+        assert!(parse_and_validate(text).is_err());
+    }
+
+    #[test]
+    fn a_backend_nobody_uses_is_not_an_error() {
+        // Configuring the block and opting no route in is a legitimate
+        // intermediate state during a rollout.
+        let text = format!(
+            r#"{SHARED_BACKEND}
+upstreams:
+  users: http://users:3000
+routes:
+  public:
+    - prefix: /users
+      upstream: users
+      rate_limit: {{ requests: 100, interval: 1m }}
+"#
+        );
+        parse_and_validate(&text).expect("an unused backend is valid");
+    }
+
+    #[test]
+    fn a_shared_limit_can_be_inherited_from_defaults() {
+        // Inheritance is why this is validated against the built table rather
+        // than the document: the route itself says nothing about a counter.
+        let text = format!(
+            r#"{SHARED_BACKEND}
+defaults:
+  rate_limit: {{ requests: 100, interval: 1m, counter: shared }}
+upstreams:
+  users: http://users:3000
+routes:
+  public: [{{ prefix: /users, upstream: users }}]
+"#
+        );
+        let result = parse_and_validate(&text);
+        if cfg!(feature = "shared-limits") {
+            result.expect("an inherited shared limit is valid");
+        } else {
+            assert!(
+                result.is_err(),
+                "the feature gate applies to inherited limits too"
+            );
+        }
     }
 
     #[test]

@@ -17,6 +17,11 @@ Standalone Linux/macOS binaries and an automatic installer are available
 starting with 0.1.4; see [installation](docs/installation.md). Windows native
 support remains future work.
 
+Rate limits can be shared across replicas over RESP — Recached, Redis or Valkey
+— with `counter: shared`; see [rate limiting](docs/rate-limiting.md). The cache
+stays off the request path by default and its absence degrades limits rather
+than stopping traffic, so the "no mandatory cache" rule below still holds.
+
 ---
 
 ## Next
@@ -26,11 +31,11 @@ Ordered roughly by how often the absence bites.
 | | Why |
 |---|---|
 | **Production validation** | Load and soak testing, memory behaviour under sustained traffic. The single biggest gap between "tested" and "trustworthy" — see [Project status](README.md#project-status) |
-| **Distributed rate limiting** | Counters are per process today: 100/min across three replicas admits 300/min. Fits behind the existing `Limiter` interface |
 | **Stale-while-error on JWKS** | An identity provider outage currently stops authenticated traffic, even though the cached keys were almost certainly still valid |
 | **Total request deadline** | Timeouts are per read, per write and per connect. A client making slow but steady progress stays inside all of them indefinitely |
 | **Extension execution budgets** | Lagos must bound each request hook and the complete extension chain, reject on timeout, and report which policy exceeded its budget. Native hooks remain trusted code; asynchronous timeouts cannot preempt blocking code. See the [extension proposal](docs/extension-hardening.md) |
 | **In-flight concurrency cap** | Bound the requests being worked on at once, independently of rate, and shed load rather than queue it when saturated |
+| **Shared in-flight and concurrency state** | The counters are shared now; a concurrency cap and a circuit breaker are still per replica |
 | **Request header size limit** | Whatever Pingora's parser accepts, the gateway accepts. Should be ours to bound |
 
 ---

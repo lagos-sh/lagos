@@ -38,6 +38,7 @@ opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry-http = { workspace = true, optional = true }
 anyhow.workspace = true
+redis = { workspace = true, optional = true }
 percent-encoding = "2"
 base64 = "0.22"
 subtle = "2.6.1"
@@ -46,6 +47,13 @@ subtle = "2.6.1"
 default = ["otel", "cache"]
 # OTLP trace export. Turn off for a smaller binary when traces are not collected.
 cache = ["pingora/cache"]
+# Cluster-wide rate-limit counters over RESP (Recached, Redis, Valkey). Off by
+# default: per-process counters need no cache at all, and the whole point of
+# keeping this optional is that a deployment which does not share counters pays
+# neither the dependency nor the connection. `counter: shared` in a config that
+# was built without it is a startup error naming the feature, never a silent
+# downgrade to local counting.
+shared-limits = ["dep:redis"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-http"]
 
 [lints]

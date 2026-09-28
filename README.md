@@ -295,7 +295,7 @@ metrics; sampled requests also produce trace data.
 | Declarative routing | Path prefixes, host matching, allowed methods, authentication tiers, and internal route restrictions |
 | Service-to-service access | Machine credentials on a separate internal listener |
 | Load balancing | Weighted upstream pools with round robin, random, or consistent hashing and optional health checks |
-| Traffic controls | Per-route rate limits, bounded retries, circuit breakers, request body limits, and configurable timeouts |
+| Traffic controls | Per-route rate limits, optionally shared across replicas, plus bounded retries, circuit breakers, request body limits, and configurable timeouts |
 | Response caching | Opt-in memory cache with object limits, authorization checks, `Vary` handling, and route reload isolation |
 | Streaming | Request and response streaming, including server-sent events (SSE) |
 | Observability | Structured logs, Prometheus metrics, trace context propagation, and optional OTLP export |
@@ -755,16 +755,82 @@ routes:
         counter: exact
 ```
 
-Limits are per route and local to each gateway process. Exceeding a limit
-returns `429` with `Retry-After`. Multiple gateway instances do not share quota.
+Limits are per route. Exceeding a limit returns `429` with `Retry-After`.
 Available keys are `ip`, `identity`, `route`, and `header.<name>`. If a configured
 key cannot be determined, that request is not limited; choose a key present on
 all requests that must be covered.
 
 | Counter | Behavior |
 |---|---|
-| `exact` | Per-key sliding-window counters in a capacity-bounded cache; default `max_keys` is 100,000 |
-| `sketch` | Fixed-memory count-min sketch; collisions can over-count and refuse a request below its own quota |
+| `exact` | Per-key sliding-window counters in a capacity-bounded cache; default `max_keys` is 100,000. Local to this process |
+| `sketch` | Fixed-memory count-min sketch; collisions can over-count and refuse a request below its own quota. Local to this process |
+| `shared` | Counters every replica can see, so a limit means what it says across the whole deployment. See [Sharing limits across replicas](#sharing-limits-across-replicas) |
+
+With `exact` or `sketch`, counters are local to each gateway process, so a limit
+of 100/min across three replicas admits up to 300/min. That is often the right
+trade for protecting an upstream from a runaway client, and it needs no cache
+and no clock sync.
+
+#### Sharing limits across replicas
+
+`counter: shared` puts the counters in a cache every replica can reach:
+
+```yaml
+shared_counters:
+  url: recached://cache:6379
+  sync: 1s
+
+routes:
+  authenticated:
+    - prefix: /search
+      upstream: search
+      rate_limit:
+        requests: 100
+        interval: 1m
+        key: identity
+        counter: shared
+```
+
+Any RESP server with a handful of commands will do — [Recached](https://recached.dev),
+Redis or Valkey. `recached://`, `valkey://`, `resp://` and `redis://` are all
+accepted, each with a trailing `s` for TLS, so the configuration need not name a
+product you do not run.
+
+Two modes, because they trade different things:
+
+| `mode` | Request-path cost | Accuracy | Works on |
+|---|---|---|---|
+| `approximate` (default) | None. Every decision is local | Overshoot scales with `replicas x arrival rate x reconciliation period` | Recached, Redis, Valkey |
+| `exact` | One round trip per limited request | Exact. No overshoot and no window alignment to reason about | Recached only |
+
+`approximate` keeps deciding locally and reconciles in the background: a task
+publishes this replica's usage every `sync` and reads back what the others have
+used. Capped batches rotate across keys, so a full pass takes roughly
+`ceil(keys / max_keys_per_sync)` ticks, plus backend latency and retries. No
+request ever waits on the cache. Outstanding usage from both windows is
+published, and retries reuse immutable contribution IDs to avoid double counting.
+
+`exact` uses Recached's `RLCHECK`, which returns an authoritative decision in one
+command. There is no Redis or Valkey equivalent, and it cannot be emulated
+without `EVAL`, which Recached does not implement either — so the backend is
+checked at startup and before route reloads. `mode: exact` against anything else
+refuses to boot or rejects the reload, keeping the previous routes active.
+
+**If the cache is unreachable, traffic continues.** Limits fall back to
+per-process counting and `gateway_shared_limit_errors_total` starts climbing;
+that counter is the one to alert on, because nothing else reports that a
+cluster-wide limit is no longer cluster-wide. The one exception is `mode: exact`
+at startup, which cannot be honoured at all without the backend and so fails the
+boot.
+
+Full reference, including the clock assumptions and what each setting trades:
+[rate limiting](docs/rate-limiting.md).
+
+`shared` needs `interval` of at least `1s`; exact mode also requires whole
+seconds. Approximate mode requires `sync` shorter than `interval`. These rules
+are checked at startup and on reloads. The shipped binary and Docker images
+include this; a custom gateway built on `lagos-core` with `default-features = false` needs the
+`shared-limits` feature.
 
 For IP limits, configure `trusted_proxies` inside the route's `rate_limit`
 block. `0` uses the socket peer; `1` uses the last `X-Forwarded-For` entry;
@@ -1343,6 +1409,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo check -p lagos-core --no-default-features
+cargo clippy -p lagos-core --all-targets --features shared-limits -- -D warnings
 ./tests/e2e/run.sh
 ```
 
@@ -1354,9 +1421,19 @@ Coverage includes token forgery, path traversal, route isolation, duplicate
 ownership parameters, cache variants and authorization, memory accounting,
 retry behavior, circuit recovery, health checks, SSE streaming, and hot reloads.
 
-The `lagos-core` library enables the `cache` and `otel` features by default.
-Custom binaries can disable its default features and opt into either feature
-individually. The stock `lagos` crate uses the library's default features.
+The `lagos-core` library enables the `cache` and `otel` features by default, and
+`shared-limits` — the RESP client behind `counter: shared` — on request. Custom
+binaries can disable its default features and opt into any feature individually.
+The stock `lagos` crate uses the library's defaults plus `shared-limits`, so the
+shipped binary and images can share rate-limit counters without a rebuild;
+nothing connects until `shared_counters` is configured.
+
+Tests that exercise the shared-counter wire format need a RESP server and skip
+themselves without one:
+
+```bash
+LAGOS_TEST_RESP_URL=recached://127.0.0.1:6379 cargo test --features shared-limits
+```
 
 ## Contributing
 
@@ -1390,7 +1467,7 @@ checks verify specific behavior; they do not establish production readiness.
 
 [ROADMAP.md](ROADMAP.md) records what is being worked toward and what is
 deliberately out of scope — including the items that most often come up as
-missing: distributed rate limiting, OpenAPI import, traffic splitting, and a
+missing: OpenAPI import, traffic splitting, and a
 control plane that would never sit on the request path.
 
 What already works is in [Features](#features) above.

@@ -68,6 +68,16 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto"] }
 opentelemetry-http = { version = "0.32", default-features = false }
 anyhow = "1"
+# RESP client for the optional shared rate-limit counters. Optional and off by
+# default: the roadmap rules out a mandatory cache, so the default binary must
+# carry none of this. `script` is deliberately absent -- the design uses no Lua,
+# because Recached implements no `EVAL` and a limiter that needs it would not run
+# there at all. TLS is rustls to match the one TLS stack pingora already pulls in.
+redis = { version = "1.7", default-features = false, features = [
+    "tokio-comp",
+    "tokio-rustls-comp",
+    "connection-manager",
+] }
 
 # Lint policy lives here so it applies to every crate and every target.
 #

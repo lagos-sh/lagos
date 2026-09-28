@@ -214,7 +214,7 @@ fn project(
             crate::config::RetryOn::ConnectionFailure => "connection_failure",
             crate::config::RetryOn::TransportError => "transport_error",
         }).collect::<Vec<_>>()}));
-        let rate = route.rate_limit.as_ref().map(|rate| json!({"requests": rate.requests, "interval": format!("{:?}", rate.interval), "key": match rate.key { crate::config::RateLimitKey::Ip => "ip", crate::config::RateLimitKey::Identity => "identity", crate::config::RateLimitKey::Route => "route", crate::config::RateLimitKey::Header(_) => REDACTED }, "counter": match rate.counter { crate::config::Counter::Exact => "exact", crate::config::Counter::Sketch => "sketch" }, "trusted_proxies": rate.trusted_proxies, "max_keys": rate.max_keys}));
+        let rate = route.rate_limit.as_ref().map(|rate| json!({"requests": rate.requests, "interval": format!("{:?}", rate.interval), "key": match rate.key { crate::config::RateLimitKey::Ip => "ip", crate::config::RateLimitKey::Identity => "identity", crate::config::RateLimitKey::Route => "route", crate::config::RateLimitKey::Header(_) => REDACTED }, "counter": match rate.counter { crate::config::Counter::Exact => "exact", crate::config::Counter::Sketch => "sketch", crate::config::Counter::Shared => "shared" }, "mode": match rate.mode { crate::config::LimitMode::Approximate => "approximate", crate::config::LimitMode::Exact => "exact" }, "trusted_proxies": rate.trusted_proxies, "max_keys": rate.max_keys}));
         json!({
             "reference": format!("route-{}", index + 1), "listener": if route.auth.is_machine() { "internal" } else { "public" },
             "group": group, "id": rs.hidden(&path), "prefix": rs.hidden(&path), "host": rs.hidden(&path),

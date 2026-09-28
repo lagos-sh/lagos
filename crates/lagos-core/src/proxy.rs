@@ -522,7 +522,10 @@ impl Gateway {
         let Some(key) = key else {
             return Ok(false);
         };
-        let decision = limiter.check(&key);
+        // Awaits only where the route asked for a per-request round trip
+        // (`counter: shared` with `mode: exact`); every other configuration
+        // resolves without yielding.
+        let decision = limiter.decide(&key).await;
         if self.dev {
             ctx.rate_limit = Some((decision.remaining, decision.limit));
         }

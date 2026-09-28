@@ -520,6 +520,21 @@ impl RouteTable {
         groups: RouteGroups,
         defaults: &crate::config::RouteDefaults,
     ) -> Self {
+        Self::build_with(groups, defaults, None)
+    }
+
+    /// As [`Self::build_with_defaults`], with a backend for routes that set
+    /// `counter: shared`.
+    ///
+    /// The factory is threaded through every reload rather than captured once,
+    /// so a route that starts sharing counters on a reload gets a limiter that
+    /// actually does — and the background sync task finds it by walking the new
+    /// table, without knowing reloads exist.
+    pub fn build_with(
+        groups: RouteGroups,
+        defaults: &crate::config::RouteDefaults,
+        shared: Option<&crate::ratelimit::SharedCounterFactory>,
+    ) -> Self {
         let deny_prefixes = groups
             .internal
             .iter()
@@ -600,7 +615,16 @@ impl RouteTable {
                         r.id
                     ));
                 } else {
-                    r.limiter = Some(Arc::new(crate::ratelimit::Limiter::new(rl)));
+                    r.limiter = Some(Arc::new(match (rl.counter, shared) {
+                        (crate::config::Counter::Shared, Some(factory)) => {
+                            crate::ratelimit::Limiter::shared(rl, factory)
+                        }
+                        // `shared` with no backend is refused by config
+                        // validation at boot; `Limiter::new` logs and counts
+                        // per process rather than leaving the route
+                        // unlimited.
+                        _ => crate::ratelimit::Limiter::new(rl),
+                    }));
                 }
             }
             for (source, target) in &r.bind {
@@ -761,6 +785,21 @@ impl SharedRoutes {
 
     pub fn load(&self) -> arc_swap::Guard<Arc<RouteTable>> {
         self.0.load()
+    }
+
+    /// Every shared counter in the active table, for the sync task.
+    ///
+    /// Read fresh on each tick rather than cached, so a reload that replaces a
+    /// route's limiter is picked up on the next tick and the old one stops being
+    /// reconciled the moment nothing points at it.
+    pub fn shared_counters(&self) -> Vec<Arc<crate::ratelimit::SharedCounters>> {
+        self.0
+            .load()
+            .routes()
+            .iter()
+            .filter_map(|r| r.limiter.as_ref())
+            .filter_map(|l| l.reconciled_counters().cloned())
+            .collect()
     }
 
     pub fn store(&self, mut table: RouteTable) {
