@@ -1141,6 +1141,16 @@ pub struct AuthConfig {
     pub machine: Option<MachineConfig>,
     #[serde(default)]
     pub client_keys: Option<ClientKeysConfig>,
+    /// Cookies a token may also be read from, in order, when the request has
+    /// no `Authorization: Bearer` header. For browser apps whose session token
+    /// is an httpOnly cookie set by the API, which script cannot copy into a
+    /// header.
+    ///
+    /// A cookie is sent by the browser on its own, so a token read from one is
+    /// an ambient credential: pair it with `SameSite` cookies or CSRF defences
+    /// upstream (see SECURITY.md). Empty by default — only the header is read.
+    #[serde(default)]
+    pub token_cookies: Vec<String>,
 }
 
 /// Credential for service-to-service callers on the `machine` tier.
@@ -2082,6 +2092,8 @@ impl GatewayConfig {
             None => (None, None, Vec::new(), Vec::new(), Vec::new()),
         };
 
+        validate_token_cookies(&self.auth)?;
+
         let mut base_paths: Vec<String> = self
             .server
             .mounts
@@ -2187,6 +2199,44 @@ impl GatewayConfig {
             placeheld_env: expanded.placeheld.clone(),
         })
     }
+}
+
+/// `auth.token_cookies`: names a browser could actually send, each once, and
+/// only where something verifies tokens — otherwise the setting would be read
+/// by nothing and look like protection.
+fn validate_token_cookies(auth: &AuthConfig) -> Result<(), ConfigError> {
+    if auth.token_cookies.is_empty() {
+        return Ok(());
+    }
+    if auth.jwt.is_empty() && auth.firebase.is_none() {
+        return Err(ConfigError::invalid(
+            "auth.token_cookies is set but no auth.jwt or auth.firebase verifies tokens",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for name in &auth.token_cookies {
+        if !is_cookie_name(name) {
+            return Err(ConfigError::invalid(format!(
+                "auth.token_cookies: `{name}` is not a valid cookie name"
+            )));
+        }
+        // Cookie names are case-sensitive, so this is an exact comparison.
+        if !seen.insert(name.as_str()) {
+            return Err(ConfigError::invalid(format!(
+                "auth.token_cookies: `{name}` is listed twice"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// An RFC 6265 `cookie-name`: an RFC 7230 token, i.e. visible ASCII without
+/// separators.
+fn is_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?={}".contains(&b))
 }
 
 /// Drop serde_yaml's trailing ` at line N column M`, which duplicates the
@@ -3422,5 +3472,72 @@ routes:
             "{printed}"
         );
         assert!(printed.contains("storefront"), "ids stay visible");
+    }
+}
+
+#[cfg(test)]
+mod token_cookie_tests {
+    use super::*;
+
+    const ISSUER: &str = "  jwt:\n    - { issuer: https://issuer.test, audience: [api] }\n";
+    const ROUTES: &str = "upstreams: {api: http://api:8080}\nroutes:\n  optional:\n    - { id: books, prefix: books, upstream: api }\n";
+
+    fn load(auth: &str) -> Result<ResolvedConfig, ConfigError> {
+        let text = format!("auth:\n{auth}{ROUTES}");
+        let (cfg, expanded) = GatewayConfig::parse("test.yml", &text)?;
+        cfg.resolve(&expanded)
+    }
+
+    fn refused(auth: &str, needle: &str) {
+        let err = load(auth)
+            .expect_err("configuration should be refused")
+            .to_string();
+        assert!(err.contains(needle), "`{needle}` not in: {err}");
+    }
+
+    #[test]
+    fn off_by_default() {
+        let cfg = load(ISSUER).unwrap();
+        assert!(cfg.raw.auth.token_cookies.is_empty());
+    }
+
+    #[test]
+    fn names_are_kept_in_order() {
+        let cfg = load(&format!(
+            "{ISSUER}  token_cookies: [access_token, __Host-session]\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.raw.auth.token_cookies,
+            ["access_token", "__Host-session"]
+        );
+    }
+
+    #[test]
+    fn needs_something_that_verifies_tokens() {
+        refused(
+            "  token_cookies: [access_token]\n",
+            "no auth.jwt or auth.firebase",
+        );
+    }
+
+    #[test]
+    fn invalid_names_are_refused() {
+        for bad in ["\"\"", "\"a b\"", "\"a;b\"", "\"a=b\"", "\"a,b\""] {
+            refused(
+                &format!("{ISSUER}  token_cookies: [{bad}]\n"),
+                "is not a valid cookie name",
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_listed_twice_is_refused() {
+        refused(
+            &format!("{ISSUER}  token_cookies: [access_token, access_token]\n"),
+            "is listed twice",
+        );
+        // Case matters for cookie names, so these are two different cookies.
+        assert!(load(&format!("{ISSUER}  token_cookies: [t, T]\n")).is_ok());
     }
 }

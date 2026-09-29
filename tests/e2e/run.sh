@@ -512,6 +512,19 @@ say "token verification"
 TOK=$(cd "$WORK" && python3 mint.py)
 expect "valid token"                        200 -H "Authorization: Bearer $TOK" "$G/bff/v1/loyalty/settings"
 expect "lowercase bearer scheme"            200 -H "Authorization: bearer $TOK" "$G/bff/v1/loyalty/settings"
+
+say "token cookies"
+expect "token in a cookie"                  200 -H "Cookie: theme=dark; access_token=$TOK" "$G/bff/v1/loyalty/settings"
+expect "junk token cookie"                  401 -H 'Cookie: access_token=not.a.jwt' "$G/bff/v1/loyalty/settings"
+expect "expired token cookie"               401 -H "Cookie: access_token=$(cd "$WORK" && python3 mint.py expired)" "$G/bff/v1/loyalty/settings"
+expect "unlisted cookie name is not read"   401 -H "Cookie: session=$TOK" "$G/bff/v1/loyalty/settings"
+expect "empty token cookie is no token"     401 -H 'Cookie: access_token=' "$G/bff/v1/loyalty/settings"
+# The header is the caller's explicit choice; a cookie never overrides it.
+expect "header wins over cookie"            401 -H 'Authorization: Bearer not.a.jwt' -H "Cookie: access_token=$TOK" "$G/bff/v1/loyalty/settings"
+expect "valid header, junk cookie"          200 -H "Authorization: Bearer $TOK" -H 'Cookie: access_token=not.a.jwt' "$G/bff/v1/loyalty/settings"
+curl -s -m 5 -H "Cookie: access_token=$TOK" "$G/bff/v1/loyalty/settings" > "$WORK/ck.json"
+python3 "$E2E/assert_header.py" "$WORK/ck.json" x-auth-subject 4821 \
+  && ok "identity injected from a cookie token" || bad "cookie token identity not injected"
 expect "expired"                            401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py expired)"  "$G/bff/v1/loyalty/settings"
 expect "wrong audience"                     401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py wrongaud)" "$G/bff/v1/loyalty/settings"
 expect "tampered signature"                 401 -H "Authorization: Bearer ${TOK%?}X" "$G/bff/v1/loyalty/settings"
@@ -527,14 +540,19 @@ expect "alg:none downgrade"                 401 -H "Authorization: Bearer $NONE"
 expect "issuer not configured"              503 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py otherproject)" "$G/bff/v1/loyalty/settings"
 
 say "header hygiene"
-curl -s -m 5 -H "Authorization: Bearer $TOK" -H 'Cookie: session=leak' \
+curl -s -m 5 -H "Authorization: Bearer $TOK" -H "Cookie: session=keep; access_token=$TOK" \
      -H 'X-Random: x' \
      "$G/bff/v1/loyalty/settings" > "$WORK/h.json"
 python3 - "$WORK/h.json" <<'PY' && ok "no client header leaked upstream" || bad "client header leaked upstream"
 import json,sys
 h = json.load(open(sys.argv[1]))["headers"]
-leaked = [k for k in ("cookie","x-random","authorization") if k in h]
+leaked = [k for k in ("x-random","authorization") if k in h]
 sys.exit(1 if leaked else 0)
+PY
+python3 - "$WORK/h.json" <<'PY' && ok "the token cookie is stripped, other cookies pass" || bad "token cookie reached the upstream"
+import json,sys
+h = json.load(open(sys.argv[1]))["headers"]
+sys.exit(0 if h.get("cookie") == "session=keep" else 1)
 PY
 python3 - "$WORK/h.json" <<'PY' && ok "identity injected from the token, not the client" || bad "identity not injected correctly"
 import json,sys
@@ -705,6 +723,8 @@ distinct() { for i in 1 2 3; do curl -s -m 5 "$@"; echo; done | sort -u | wc -l 
 # must not be shared with the next caller.
 [ "$(distinct -H "Authorization: Bearer $TOK" "$G/bff/v1/cacheable/auth")" = "3" ] \
   && ok "an authorized request's response is not shared" || bad "AUTHENTICATED RESPONSE WAS CACHED"
+[ "$(distinct -H "Cookie: access_token=$TOK" "$G/bff/v1/cacheable/cookie")" = "3" ] \
+  && ok "a token-cookie request's response is not shared" || bad "COOKIE-AUTHENTICATED RESPONSE WAS CACHED"
 
 # The host is part of the key, so two tenants on one path stay separate.
 A=$(curl -s -m 5 -H "Host: a.example.com" "$G/bff/v1/cacheable/t")

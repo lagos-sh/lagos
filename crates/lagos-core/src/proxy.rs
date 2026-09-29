@@ -161,6 +161,9 @@ pub struct Ctx {
     pub subject: Option<String>,
     /// Id of the client key the caller presented, when the route needed one.
     pub client_key_id: Option<String>,
+    /// Where the verified token came from: `header` or `cookie`. `None` when
+    /// the route read no token.
+    pub credential: Option<&'static str>,
     /// Extensions that ran, in order.
     pub extensions_run: Vec<String>,
     /// Why the request was refused: (event, reason).
@@ -179,12 +182,14 @@ pub struct Ctx {
     pub cacheable_route: bool,
     /// The exact route snapshot that authorized this request.
     pub cache_namespace: uuid::Uuid,
-    /// Whether the *client* sent an Authorization header.
+    /// Whether the *client* sent an Authorization header, or one of
+    /// `auth.token_cookies`.
     ///
     /// RFC 9111 forbids storing a response to an authorized request unless the
     /// response explicitly permits it. The gateway strips that header before
     /// proxying, so the fact has to be carried here or the rule cannot be
-    /// applied.
+    /// applied. A token cookie makes a request just as personal, though the
+    /// RFC only names the header.
     pub client_authorized: bool,
     /// Upstream whose circuit must be told how this request went.
     pub breaker_upstream: Option<String>,
@@ -772,8 +777,26 @@ impl ProxyHttp for Gateway {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
 
+        // Only when configured: most gateways never read cookies at all.
+        let cookie_token = {
+            let names = &self.cfg.raw.auth.token_cookies;
+            if names.is_empty() {
+                None
+            } else {
+                let values: Vec<&str> = session
+                    .req_header()
+                    .headers
+                    .get_all("cookie")
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .collect();
+                crate::auth::cookie_token(values.iter().copied(), names).map(str::to_string)
+            }
+        };
+
         ctx.request_id = request_id;
-        ctx.client_authorized = session.req_header().headers.contains_key("authorization");
+        ctx.client_authorized =
+            session.req_header().headers.contains_key("authorization") || cookie_token.is_some();
 
         // Resolved before any refusal can be issued, so *every* response to a
         // given origin carries the same cross-origin headers.
@@ -1041,7 +1064,17 @@ impl ProxyHttp for Gateway {
 
         let mut identity = None;
         if route.auth.verifies() {
-            let bearer = authorization.as_deref().and_then(crate::auth::bearer_token);
+            // The header first: a client that sets one means it. A token
+            // cookie is read only when there is no bearer header at all.
+            let from_header = authorization.as_deref().and_then(crate::auth::bearer_token);
+            let bearer = from_header.or(cookie_token.as_deref());
+            if bearer.is_some() {
+                ctx.credential = Some(if from_header.is_some() {
+                    "header"
+                } else {
+                    "cookie"
+                });
+            }
 
             // Capped before anything reads it. Finding the issuer means
             // base64-decoding the payload and parsing it as JSON, and a
@@ -1231,6 +1264,28 @@ impl ProxyHttp for Gateway {
             // Upstreams read identity from the injected headers; the original
             // credential has no reason to travel further.
             plan.strip("authorization");
+            // Nor does a token cookie. The rest of `Cookie` is left alone, and
+            // it is only rewritten when it would be forwarded at all — an
+            // addition is applied after the allowlist sweep, so setting it
+            // otherwise would forward a header the allowlist drops.
+            let names = &self.cfg.raw.auth.token_cookies;
+            let cookie_forwarded = self.cfg.raw.forward.mode != ForwardMode::Allowlist
+                || self.is_forwardable("cookie");
+            if !names.is_empty() && cookie_forwarded {
+                let values: Vec<&str> = session
+                    .req_header()
+                    .headers
+                    .get_all("cookie")
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .collect();
+                if !values.is_empty() {
+                    match crate::auth::strip_cookies(values, names) {
+                        Some(rest) => plan.set("cookie", rest),
+                        None => plan.strip("cookie"),
+                    };
+                }
+            }
         }
 
         // The key has done its job at the gateway; an upstream never needs it.
@@ -1928,6 +1983,7 @@ impl ProxyHttp for Gateway {
             latency_ms,
             retries = ctx.attempts,
             client = ctx.client_key_id.as_deref().unwrap_or("-"),
+            credential = ctx.credential.unwrap_or("-"),
             trace_id = ctx.trace.as_ref().map(|t| t.trace_id_hex()).unwrap_or_default(),
             "request complete",
         );

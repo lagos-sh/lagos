@@ -113,6 +113,65 @@ pub fn bearer_token(value: &str) -> Option<&str> {
     (!rest.is_empty()).then_some(rest)
 }
 
+/// Every `name=value` pair across a request's `Cookie` headers, in order.
+///
+/// HTTP/2 lets a client split cookies over several `Cookie` fields, so all of
+/// them are read. Pairs without `=` are skipped rather than failing the request.
+fn cookie_pairs<'a>(
+    headers: impl IntoIterator<Item = &'a str>,
+) -> impl Iterator<Item = (&'a str, &'a str)> {
+    headers
+        .into_iter()
+        .flat_map(|h| h.split(';'))
+        .filter_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            Some((name.trim(), value.trim()))
+        })
+}
+
+/// The token from the first of `names` the request carries, or `None`.
+///
+/// Names are tried in configured order. Within one name the first occurrence
+/// wins: a browser sends the cookie with the most specific path first, which
+/// is the one the application set most recently for this path. An empty value
+/// counts as absent, and RFC 6265 double quotes around a value are removed.
+pub fn cookie_token<'a>(
+    headers: impl IntoIterator<Item = &'a str> + Clone,
+    names: &[String],
+) -> Option<&'a str> {
+    names.iter().find_map(|wanted| {
+        cookie_pairs(headers.clone())
+            .find(|(name, _)| name == wanted)
+            .map(|(_, value)| {
+                value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(value)
+            })
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// The `Cookie` header value without any of `names`, or `None` when nothing
+/// else is left. Used when the caller's credential must not travel upstream.
+pub fn strip_cookies<'a>(
+    headers: impl IntoIterator<Item = &'a str>,
+    names: &[String],
+) -> Option<String> {
+    let kept: Vec<String> = headers
+        .into_iter()
+        .flat_map(|h| h.split(';'))
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(n, _)| n.trim());
+            !names.iter().any(|n| n == name)
+        })
+        .map(str::to_string)
+        .collect();
+    (!kept.is_empty()).then(|| kept.join("; "))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("invalid token: {0}")]
@@ -135,6 +194,63 @@ pub trait TokenVerifier: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_token_cookie_is_found_among_others() {
+        let cookies = ["theme=dark; access_token=abc.def.ghi; lang=en"];
+        assert_eq!(
+            cookie_token(cookies, &names(&["access_token"])),
+            Some("abc.def.ghi")
+        );
+    }
+
+    #[test]
+    fn cookie_names_are_exact_and_case_sensitive() {
+        let cookies = ["Access_Token=x; my_access_token=y"];
+        assert_eq!(cookie_token(cookies, &names(&["access_token"])), None);
+    }
+
+    #[test]
+    fn configured_order_wins_then_first_occurrence() {
+        let cookies = ["b=2; a=1", "a=3"];
+        assert_eq!(cookie_token(cookies, &names(&["a", "b"])), Some("1"));
+        assert_eq!(cookie_token(cookies, &names(&["b", "a"])), Some("2"));
+    }
+
+    #[test]
+    fn empty_quoted_and_malformed_cookies() {
+        assert_eq!(cookie_token(["t="], &names(&["t"])), None);
+        assert_eq!(cookie_token([r#"t="v""#], &names(&["t"])), Some("v"));
+        assert_eq!(cookie_token(["junk; t=v"], &names(&["t"])), Some("v"));
+        assert_eq!(cookie_token(Vec::<&str>::new(), &names(&["t"])), None);
+    }
+
+    #[test]
+    fn value_may_contain_equals() {
+        // base64 padding, or a value that is itself key=value.
+        assert_eq!(cookie_token(["t=a=b"], &names(&["t"])), Some("a=b"));
+    }
+
+    #[test]
+    fn stripping_keeps_every_other_cookie() {
+        let cookies = ["theme=dark; access_token=secret", "lang=en"];
+        assert_eq!(
+            strip_cookies(cookies, &names(&["access_token"])).as_deref(),
+            Some("theme=dark; lang=en")
+        );
+        assert_eq!(
+            strip_cookies(["access_token=secret"], &names(&["access_token"])),
+            None
+        );
+        assert_eq!(
+            strip_cookies(["flag; access_token=s"], &names(&["access_token"])).as_deref(),
+            Some("flag")
+        );
+    }
 
     #[test]
     fn claim_lookup_accepts_either_spelling() {
