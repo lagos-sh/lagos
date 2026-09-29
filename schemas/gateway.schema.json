@@ -107,6 +107,22 @@
                   ]
                 }
               ]
+            },
+            "token_cookies": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": [],
+              "description": "Cookies a token may also be read from, in order, when the request has\nno `Authorization: Bearer` header. For browser apps whose session token\nis an httpOnly cookie set by the API, which script cannot copy into a\nheader.\n\nA cookie is sent by the browser on its own, so a token read from one is\nan ambient credential: pair it with `SameSite` cookies or CSRF defences\nupstream (see SECURITY.md). Empty by default — only the header is read."
             }
           },
           "type": "object"

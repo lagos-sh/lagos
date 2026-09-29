@@ -3,7 +3,24 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## 0.1.6 — client keys
+## 0.1.6 — client keys and token cookies
+
+- Added `auth.token_cookies`, a list of cookie names a token may also be read
+  from, for browser apps whose session token is an httpOnly cookie. The
+  `Authorization: Bearer` header is always read first; a cookie is used only
+  when there is no bearer header. Names are tried in order and matched exactly,
+  and an empty value is no token. A cookie token is verified like a header
+  token (invalid or expired → `401`, `optional` routes included), counts as
+  authorized for the response cache, and with `forward.authorization: false` is
+  removed from `Cookie` before proxying while other cookies pass. Off by
+  default; nothing changes without it.
+
+  Startup refuses `token_cookies` when no `jwt` or `firebase` verifier is
+  configured, invalid cookie names, and duplicates. Every `gateway.access` log
+  line gains a `credential` field (`header`, `cookie`, or `-`). `lagos
+  validate` and `lagos explain` show where tokens are read from, `lagos diff`
+  reports changes to the list, and editor schemas include the field. Lagos
+  does no CSRF check for cookie tokens; see SECURITY.md.
 
 - The `401` hints for a missing or invalid bearer token no longer name Firebase
   (`Use a fresh ID token from getIdToken().`, `Bearer <id_token>`). They now

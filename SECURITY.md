@@ -82,6 +82,10 @@ reviewer knows what is already covered.
   casing or duplication trick survives — [`headers.rs`](crates/lagos-core/src/headers.rs)
 - Public routes strip every identity header, including mapped claim headers
 - Claims that cannot be a header value are refused before any header is built
+- Token cookies (`auth.token_cookies`) are read only when configured and only
+  when no `Authorization: Bearer` header is present; they count as authorized
+  for the cache, and are removed from `Cookie` when `forward.authorization` is
+  off — [`auth/mod.rs`](crates/lagos-core/src/auth/mod.rs)
 - Machine credentials compared in constant time
 - Machine routes live on a separate listener, so they are absent from the public
   gateway rather than merely guarded on it
@@ -151,6 +155,11 @@ news.
 - **Rate limiting is per process.** A limit of 100/min across three replicas
   admits up to 300/min. A shared backend fits behind the same `Limiter`
   interface; nothing implements one yet.
+- **No CSRF check for token cookies.** A token read from a cookie is sent by
+  the browser on its own, including on requests a cross-site page starts.
+  Lagos does not inspect `Origin` or require a CSRF token; that protection is
+  the cookie's `SameSite` attribute or the application's. Off unless
+  `auth.token_cookies` is set.
 - **No stale-while-error on JWKS.** If an identity provider is unreachable when
   the key cache expires, verification fails closed and authenticated traffic
   stops, even though the cached keys were almost certainly still valid.

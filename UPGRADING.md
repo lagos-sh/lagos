@@ -6,10 +6,10 @@ moved forward deliberately rather than discovered in production.
 
 ---
 
-## 0.1.5 → 0.1.6 — client keys
+## 0.1.5 → 0.1.6 — client keys and token cookies
 
-No configuration change is needed: `auth.client_keys` is opt-in, and a gateway
-without it behaves exactly as on 0.1.5.
+No configuration change is needed: `auth.client_keys` and `auth.token_cookies`
+are opt-in, and a gateway without them behaves exactly as on 0.1.5.
 
 Turning it on is a deliberate step, because it applies to every route on the
 public listener at once. Before enabling it:
@@ -25,10 +25,20 @@ public listener at once. Before enabling it:
   `routes.internal`.
 
 Whether or not client keys are on, every `gateway.access` log line gains a
-`client` field (`-` when no key was presented). A log pipeline with a strict
-schema needs to allow it.
+`client` field (`-` when no key was presented) and a `credential` field
+(`header`, `cookie`, or `-` when no token was read). A log pipeline with a
+strict schema needs to allow both.
 
-Configuration that uses `auth.client_keys` or a route's `client_key` field is
+Before turning on `auth.token_cookies`:
+
+- An `optional` route now verifies a token cookie it used to ignore, so a
+  browser holding an expired one gets a `401` instead of anonymous content.
+  Make sure the client refreshes on `401`, or that the cookie expires with the
+  token.
+- Check the cookie is `SameSite=Lax` or `Strict`, or that the application
+  keeps its own CSRF protection: Lagos adds none.
+
+Configuration that uses `auth.client_keys`, `auth.token_cookies` or a route's `client_key` field is
 refused by 0.1.5 and earlier (unknown fields are an error), so roll the new
 binary out before the new configuration, and roll the configuration back first
 if you downgrade.

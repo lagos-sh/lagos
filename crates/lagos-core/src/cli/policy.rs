@@ -451,6 +451,24 @@ pub(super) fn diff(old: &str, new: &str, allow_unset: bool) -> anyhow::Result<()
         println!("+ denied /{path}");
         changes += 1;
     }
+    // Where tokens are read from. Names only — never a cookie's value.
+    let old_cookies = &old_cfg.raw.auth.token_cookies;
+    let new_cookies = &new_cfg.raw.auth.token_cookies;
+    if old_cookies != new_cookies {
+        let shown = |v: &Vec<String>| {
+            if v.is_empty() {
+                "none".to_string()
+            } else {
+                v.join(", ")
+            }
+        };
+        println!(
+            "~ auth.token_cookies: {} → {}",
+            shown(old_cookies),
+            shown(new_cookies)
+        );
+        changes += 1;
+    }
     // Client keys: whether they are on, which ids exist, and what is exempt.
     // Ids only — a changed secret under the same id is a deployment detail,
     // and printing either value would put a credential in a CI log.
