@@ -131,6 +131,10 @@ fn sample(ratio: f64) -> bool {
 #[derive(Default)]
 pub struct Ctx {
     pub request_id: String,
+    /// The caller's address, by the rule that fills `X-Real-IP`: the socket
+    /// peer, or the address the trusted proxies vouch for. Set before anything
+    /// can refuse the request, so the access log names refused callers too.
+    pub client_ip: Option<String>,
     pub method: String,
     /// Canonical, decoded sub-path used for every authorization decision.
     pub path: String,
@@ -769,6 +773,14 @@ impl ProxyHttp for Gateway {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
             )
+        };
+        ctx.client_ip = {
+            let peer = session.client_addr().map(|a| a.to_string());
+            let peer_ip = peer.as_deref().and_then(crate::headers::socket_peer_ip);
+            let trusted = self
+                .cfg
+                .trusted_proxy_depth(peer_ip.as_deref(), self.cfg.raw.forward.trusted_proxies);
+            forwarded_for(&session.req_header().headers, peer_ip.as_deref(), trusted).1
         };
         let origin_header = session
             .req_header()
@@ -1963,6 +1975,7 @@ impl ProxyHttp for Gateway {
                 // Pingora's own line named the peer; its log is suppressed, so
                 // the address has to appear here or it is lost.
                 peer = ctx.target.as_ref().map(|t| t.addr.as_str()).unwrap_or("-"),
+                client_ip = ctx.client_ip.as_deref().unwrap_or("-"),
                 path = %ctx.path,
                 status,
                 latency_ms,
@@ -1982,6 +1995,7 @@ impl ProxyHttp for Gateway {
             status,
             latency_ms,
             retries = ctx.attempts,
+            client_ip = ctx.client_ip.as_deref().unwrap_or("-"),
             client = ctx.client_key_id.as_deref().unwrap_or("-"),
             credential = ctx.credential.unwrap_or("-"),
             trace_id = ctx.trace.as_ref().map(|t| t.trace_id_hex()).unwrap_or_default(),

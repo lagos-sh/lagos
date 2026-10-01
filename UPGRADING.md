@@ -6,6 +6,15 @@ moved forward deliberately rather than discovered in production.
 
 ---
 
+## 0.1.6 → 0.1.7 — client address in the access log
+
+No configuration change is needed. `gateway.access` and `gateway.upstream.error`
+lines gain a `client_ip` field; a log pipeline with a fixed field list should
+add it. The caller's address is now written to the logs, which matters where
+logs are kept under a retention or privacy policy.
+
+---
+
 ## 0.1.5 → 0.1.6 — client keys and token cookies
 
 No configuration change is needed: `auth.client_keys` and `auth.token_cookies`
