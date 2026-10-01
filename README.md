@@ -992,6 +992,12 @@ instead of the caller.
 throttling one address while telling the upstream about another makes a per-IP
 control unenforceable. `lagos validate` prints which policy is in effect.
 
+The `gateway.access` and `gateway.upstream.error` log lines carry the same
+address as `client_ip` (`-` when there is none), so a caller refused with `401`,
+`404` or `429` can be traced to its address. It follows
+`forward.trusted_proxies`; a route whose `rate_limit.trusted_proxies` differs
+counts a different address than the log names.
+
 ### Connection-level limits
 
 Two controls act below HTTP, on the socket itself:

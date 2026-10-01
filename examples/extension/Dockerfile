@@ -1,5 +1,5 @@
-ARG LAGOS_BUILDER=ghcr.io/lagos-sh/lagos-builder:0.1.6
-ARG LAGOS_RUNTIME=ghcr.io/lagos-sh/lagos:0.1.6
+ARG LAGOS_BUILDER=ghcr.io/lagos-sh/lagos-builder:0.1.7
+ARG LAGOS_RUNTIME=ghcr.io/lagos-sh/lagos:0.1.7
 FROM ${LAGOS_BUILDER} AS build
 WORKDIR /work
 COPY ext/ /work/ext/

@@ -3,6 +3,15 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## 0.1.7 — client address in the access log
+
+- `gateway.access` and `gateway.upstream.error` log lines gain a `client_ip`
+  field: the caller's address by the rule that fills `X-Real-IP` (the socket
+  peer, or the address `forward.trusted_proxies` vouches for), or `-`. It is
+  set before any refusal, so `401`, `404` and `429` lines name the caller too.
+  The existing `client` field is unchanged: it is the client key id, not an
+  address. No config change.
+
 ## 0.1.6 — client keys and token cookies
 
 - Added `auth.token_cookies`, a list of cookie names a token may also be read
