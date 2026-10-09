@@ -3,6 +3,18 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## Unreleased — case-insensitive deny-list
+
+- **Security.** `internal:` deny-list entries now match ASCII case-insensitively.
+  Route matching was and stays exact, but many upstream frameworks route
+  case-insensitively by default (Express among them), so a request such as
+  `products/Internal/sync` missed a `products/internal` entry, matched a broader
+  route, and reached the internal handler. The deny-list now refuses every
+  ASCII case variant of a denied prefix, still on a segment boundary
+  (`products/internals` is not denied). Non-ASCII characters are compared
+  exactly. A deny-list that over-matches can only refuse more, so there is no
+  opt-out and no config change; the refusal is the usual `404`.
+
 ## 0.1.7 — client address in the access log
 
 - `gateway.access` and `gateway.upstream.error` log lines gain a `client_ip`

@@ -541,9 +541,45 @@ pub(crate) fn under_prefix(path: &str, prefix: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+/// [`under_prefix`], comparing ASCII letters case-insensitively.
+///
+/// Byte-wise and allocation-free like its sibling. `get` rather than slicing:
+/// `prefix.len()` can fall inside a multi-byte character of `path`, and an
+/// index there would panic on a request path. Non-ASCII bytes compare exactly,
+/// which is also what a JavaScript case-insensitive regex without the `u` flag
+/// does for characters outside ASCII.
+pub(crate) fn under_prefix_ignore_ascii_case(path: &str, prefix: &str) -> bool {
+    let (Some(head), Some(rest)) = (path.get(..prefix.len()), path.get(prefix.len()..)) else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(prefix) && (rest.is_empty() || rest.starts_with('/'))
+}
+
 #[cfg(test)]
 mod prefix_tests {
-    use super::under_prefix;
+    use super::{under_prefix, under_prefix_ignore_ascii_case};
+
+    #[test]
+    fn case_folding_keeps_the_segment_boundary() {
+        assert!(under_prefix_ignore_ascii_case("Users/4", "users"));
+        assert!(under_prefix_ignore_ascii_case("USERS", "users"));
+        assert!(!under_prefix_ignore_ascii_case("Users-admin", "users"));
+        assert!(!under_prefix_ignore_ascii_case("use", "users"));
+        assert!(!under_prefix_ignore_ascii_case("", "users"));
+    }
+
+    #[test]
+    fn case_folding_never_panics_inside_a_multibyte_character() {
+        // "é" is two bytes, so a 2-byte prefix ends in the middle of it.
+        assert!(!under_prefix_ignore_ascii_case("é/x", "ab"));
+        assert!(!under_prefix_ignore_ascii_case("aé", "ab"));
+        // Non-ASCII is compared exactly, not folded.
+        assert!(!under_prefix_ignore_ascii_case(
+            "\u{130}nternal",
+            "internal"
+        ));
+        assert!(under_prefix_ignore_ascii_case("Café/menu", "café"));
+    }
 
     #[test]
     fn matches_only_on_a_segment_boundary() {
@@ -688,9 +724,20 @@ impl RouteTable {
 
     /// True if the path is inside a deny-listed prefix. Checked before matching
     /// so a broad allowlist entry can never expose an internal sub-tree.
+    ///
+    /// ASCII case-insensitive, unlike route matching. Many upstream frameworks
+    /// route case-insensitively by default (Express, ASP.NET, Spring with
+    /// some configurations), so with a byte-for-byte comparison
+    /// `legacy/Internal/users` would miss a `legacy/internal` entry, match a
+    /// broad `legacy` route, and be served from the internal sub-tree. A
+    /// deny-list that over-matches only refuses more, so folding is always
+    /// safe here; route matching stays exact because there an over-match would
+    /// grant access.
     pub fn is_denied(&self, path: &str) -> bool {
         let p = normalize_proxy_path(path);
-        self.deny_prefixes.iter().any(|d| under_prefix(p, d))
+        self.deny_prefixes
+            .iter()
+            .any(|d| under_prefix_ignore_ascii_case(p, d))
     }
 
     pub fn match_route(&self, path: &str, method: &str) -> Option<&RouteConfig> {
@@ -876,6 +923,19 @@ authenticated:
         // A prefix must match on a segment boundary, not a raw substring.
         assert!(!t.is_denied("loyalty/walletsomething"));
         assert!(!t.is_denied("loyalty/me/wallet"));
+    }
+
+    #[test]
+    fn deny_list_ignores_ascii_case() {
+        // Upstreams such as Express route `products/Internal/sync` to the same
+        // handler as `products/internal/sync`; the deny-list must agree.
+        let t = table();
+        assert!(t.is_denied("products/Internal/sync"));
+        assert!(t.is_denied("PRODUCTS/INTERNAL"));
+        assert!(t.is_denied("Loyalty/Wallets/42"));
+        assert!(!t.is_denied("loyalty/WalletSomething"));
+        // Route matching itself stays exact.
+        assert!(t.match_route("Products/1", "GET").is_none());
     }
 
     #[test]

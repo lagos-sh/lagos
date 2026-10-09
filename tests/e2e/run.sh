@@ -494,6 +494,9 @@ expect "unknown bare path"                  404 "$G/nosuchservice/42"
 say "deny-list"
 expect "internal subtree"                   404 "$G/bff/v1/products/internal/sync"
 expect "denied under an allowed prefix"     404 "$G/bff/v1/loyalty/wallets/7"
+# Case-insensitive upstreams (Express) would serve these from the internal tree.
+expect "case variant of a denied prefix"    404 "$G/bff/v1/products/Internal/sync"
+expect "upper-case denied prefix"           404 "$G/bff/v1/PRODUCTS/INTERNAL/sync"
 
 say "path traversal"
 expect "plain dot-segment"                  404 --path-as-is "$G/bff/v1/products/../products/internal/x"
