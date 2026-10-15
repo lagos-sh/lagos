@@ -60,12 +60,8 @@ pub struct Gateway {
     /// Resolves upstream names off the worker threads.
     resolver: Arc<crate::dns::Resolver>,
     dns_next: AtomicUsize,
-    /// Requests in flight, for `concurrency` caps. One for the gateway rather
-    /// than one per route table, so a route reload does not reset the count
-    /// while the requests it was counting are still running. Fixed memory
-    /// whatever the number of keys: a count-min sketch, which can over-count
-    /// on a collision but never under-counts.
-    inflight: pingora_limits::inflight::Inflight,
+    /// Requests in flight, for `concurrency` caps.
+    inflight: crate::concurrency::InFlight,
 }
 
 /// Headers required for the request to remain well-formed. Removing these would
@@ -227,7 +223,7 @@ pub struct Ctx {
     pub concurrency: Option<PendingSlot>,
     /// This request's concurrency slot. Released when the context is dropped,
     /// after the response has been written.
-    pub inflight: Option<pingora_limits::inflight::Guard>,
+    pub inflight: Option<crate::concurrency::Slot>,
 }
 
 /// A concurrency slot a request will need before it goes upstream.
@@ -236,19 +232,6 @@ pub struct PendingSlot {
     key: String,
     max: u64,
     per_caller: bool,
-}
-
-/// Take a slot under `max`, or `None` when the key is already at its cap.
-///
-/// The count is incremented before it is compared, so a refused request is
-/// counted for an instant and released as its guard drops.
-fn take_slot(
-    inflight: &pingora_limits::inflight::Inflight,
-    key: &str,
-    max: u64,
-) -> Option<pingora_limits::inflight::Guard> {
-    let (guard, count) = inflight.incr(key, 1);
-    (u64::try_from(count).unwrap_or(0) <= max).then_some(guard)
 }
 
 impl Gateway {
@@ -316,7 +299,7 @@ impl Gateway {
             forwardable,
             resolver,
             dns_next: AtomicUsize::new(0),
-            inflight: pingora_limits::inflight::Inflight::new(),
+            inflight: crate::concurrency::InFlight::new(),
         }
     }
 
@@ -1468,8 +1451,8 @@ impl ProxyHttp for Gateway {
         // Before the breaker: a request refused here must not have been
         // admitted as a half-open trial, or the trial would never report back.
         if let Some(slot) = ctx.concurrency.take() {
-            match take_slot(&self.inflight, &slot.key, slot.max) {
-                Some(guard) => ctx.inflight = Some(guard),
+            match self.inflight.take(&slot.key, slot.max, slot.per_caller) {
+                Some(held) => ctx.inflight = Some(held),
                 None => {
                     ctx.retry_after = Some(1);
                     self.reject(
@@ -2101,25 +2084,6 @@ impl ProxyHttp for Gateway {
 mod tests {
     use super::*;
     use crate::config::GatewayConfig;
-
-    #[test]
-    fn a_concurrency_slot_is_held_until_its_guard_drops() {
-        let inflight = pingora_limits::inflight::Inflight::new();
-        let first = take_slot(&inflight, "r|", 2).expect("first slot");
-        let second = take_slot(&inflight, "r|", 2).expect("second slot");
-        assert!(take_slot(&inflight, "r|", 2).is_none(), "over the cap");
-        // A refusal must not keep its count, or a route at its cap would
-        // stay there.
-        assert!(take_slot(&inflight, "r|", 2).is_none());
-        assert!(
-            take_slot(&inflight, "other|", 2).is_some(),
-            "keys are separate"
-        );
-        drop(first);
-        let third = take_slot(&inflight, "r|", 2).expect("a slot freed");
-        drop((second, third));
-        assert!(take_slot(&inflight, "r|", 2).is_some());
-    }
 
     #[test]
     fn upstream_uri_joins_base_path_path_and_query() {

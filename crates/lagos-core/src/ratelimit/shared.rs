@@ -2,7 +2,7 @@
 //!
 //! [`SharedCounters`] holds, per key, what *this* replica has used and what the
 //! others had used as of the last reconciliation. The request path reads that
-//! and decides locally; a background task publishes the local delta and reads
+//! and decides locally; a background task publishes this replica's totals and reads
 //! the cluster's total back. Nothing here performs I/O — the RESP side is
 //! [`Backend`], implemented in [`super::resp`] — which is what lets the
 //! arithmetic below be tested against an adversarial clock and a failing
@@ -26,7 +26,6 @@
 //! stops meaning much, which is why `interval` is required to be at least a
 //! second and why an operator running without NTP should prefer `exact`.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -65,11 +64,6 @@ struct Shard {
     /// Every other replica, as of the last successful reconciliation.
     remote_current: u64,
     remote_previous: u64,
-    /// Usage assigned to immutable publications, including the retry batch.
-    /// Reserving it prevents a later snapshot from publishing the same usage
-    /// under a different ID while the original answer is still uncertain.
-    published: u64,
-    published_previous: u64,
 }
 
 impl Shard {
@@ -84,37 +78,38 @@ impl Shard {
         if bucket == self.bucket.saturating_add(1) {
             self.own_previous = self.own_current;
             self.remote_previous = self.remote_current;
-            self.published_previous = self.published;
         } else {
             // Two or more buckets idle: nothing from before is in view.
             self.own_previous = 0;
             self.remote_previous = 0;
-            self.published_previous = 0;
         }
         self.own_current = 0;
         self.remote_current = 0;
-        self.published = 0;
         self.bucket = bucket;
     }
 }
 
-/// What one key owes the cluster, and what is needed to interpret the answer.
+/// One key's usage on this replica, and what is needed to interpret the answer.
+///
+/// **Totals, not deltas.** Each replica writes its whole count for a window
+/// under its own field, so publishing the same snapshot twice, or a later
+/// snapshot over an earlier one, leaves the field holding the latest count.
+/// That makes every publish idempotent without IDs or reservations, and it
+/// keeps a window's hash at one field per key incarnation per replica however
+/// many times it is synced -- reading it back costs the same in an hour-long
+/// window as in a minute-long one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Publish {
-    /// Immutable contribution ID. A retry must reuse this ID and its deltas.
-    pub id: uuid::Uuid,
-    /// The local key incarnation that produced this snapshot.
+    /// The local key incarnation that produced this snapshot, and the field
+    /// its totals are written under. A key evicted and seen again gets a new
+    /// one, so its earlier usage stays in the window as someone else's.
     pub source: uuid::Uuid,
     /// The cache key, prefix already applied.
     pub key: String,
-    /// Bucket the delta belongs to.
+    /// Bucket `own_current` belongs to.
     pub bucket: u64,
-    /// Requests this replica has served in `bucket` and not yet published.
-    pub delta: u64,
-    /// Unpublished usage still contributing from the previous bucket.
-    pub delta_previous: u64,
-    /// This replica's own total for `bucket` at the moment of the snapshot, so
-    /// its contribution can be subtracted from the cluster total.
+    /// This replica's own total for `bucket` at the moment of the snapshot,
+    /// written as-is and subtracted from the cluster total read back.
     pub own_current: u64,
     /// The same for the previous bucket.
     pub own_previous: u64,
@@ -153,8 +148,8 @@ pub enum BackendError {
 /// actually matters.
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync + std::fmt::Debug {
-    /// Publish each entry's deltas idempotently and read cluster totals back.
-    /// Repeating an ID must never add its contribution a second time.
+    /// Write each entry's totals under its `source` and read the cluster's
+    /// totals back. Repeating a publish must leave the totals unchanged.
     ///
     /// The reply must be positionally aligned with `batch`; a backend that
     /// cannot honour that must return `Err` rather than a short vector.
@@ -186,9 +181,30 @@ pub struct SharedCounters {
     interval: Duration,
     limit: u64,
     batch: usize,
-    scan_after: Mutex<Option<Arc<String>>>,
-    retry: Mutex<Vec<Publish>>,
+    /// Keys still to visit in the current pass. Taken from the end, a batch at
+    /// a time, and refilled from the store once empty.
+    pass: Mutex<Vec<Entry>>,
     sync_lock: tokio::sync::Mutex<()>,
+}
+
+type Entry = (Arc<String>, Arc<Mutex<Shard>>);
+
+/// One tick's worth of keys: what is sent, and the shard each line came from,
+/// so the reply is applied without searching the store for them.
+#[derive(Default)]
+pub struct Batch {
+    publishes: Vec<Publish>,
+    entries: Vec<Entry>,
+}
+
+impl Batch {
+    pub fn len(&self) -> usize {
+        self.publishes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.publishes.is_empty()
+    }
 }
 
 impl std::fmt::Debug for SharedCounters {
@@ -220,8 +236,7 @@ impl SharedCounters {
             interval: cfg.interval,
             limit: cfg.requests,
             batch: shared.max_keys_per_sync,
-            scan_after: Mutex::new(None),
-            retry: Mutex::new(Vec::new()),
+            pass: Mutex::new(Vec::new()),
             sync_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -292,59 +307,56 @@ impl SharedCounters {
         format!("{}{}", self.prefix, key)
     }
 
-    /// Snapshot what every tracked key owes the cluster.
+    /// Snapshot the next batch of keys' totals.
     ///
     /// Capped at `max_keys_per_sync`: the local store is bounded, but a tick
     /// that cannot finish inside its own interval is a queue that grows, and
     /// leaving keys to the next tick costs accuracy rather than correctness.
-    pub fn pending(&self, now: SystemTime) -> Vec<Publish> {
+    ///
+    /// A pass is a snapshot of every key tracked when it starts, consumed a
+    /// batch per tick, so each key is visited once per pass and the store is
+    /// walked once per pass rather than once per tick. A key first seen during
+    /// a pass waits for the next one. Walking the store does not refresh Moka's
+    /// request-driven idle timers, which a lookup would.
+    pub fn pending(&self, now: SystemTime) -> Batch {
         let Some((bucket, _)) = position(now, self.interval) else {
-            return Vec::new();
+            return Batch::default();
         };
-        // Stable ordering plus a cursor ensures capped ticks visit every key.
-        // Iteration does not refresh Moka's request-driven idle timers.
-        let mut entries: Vec<_> = self.shards.iter().collect();
-        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        let mut cursor = self.scan_after.lock().unwrap_or_else(|p| p.into_inner());
-        let start = cursor
-            .as_ref()
-            .map_or(0, |last| entries.partition_point(|(key, _)| key <= last));
-        let (before, after) = entries.split_at(start);
-        let mut out = Vec::new();
-        for (key, shard) in after.iter().chain(before).take(self.batch) {
-            let mut shard = match shard.lock() {
-                Ok(s) => s,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            shard.roll_to(bucket);
-            let delta = shard.own_current.saturating_sub(shard.published);
-            let delta_previous = shard.own_previous.saturating_sub(shard.published_previous);
-            // Reserve both deltas. Failed syncs retry the identical contribution
-            // rather than creating a second contribution for the same usage.
-            shard.published = shard.own_current;
-            shard.published_previous = shard.own_previous;
-            out.push(Publish {
-                id: uuid::Uuid::new_v4(),
-                source: shard.source,
-                key: self.cache_key(key),
-                bucket: shard.bucket,
-                delta,
-                delta_previous,
-                own_current: shard.own_current,
-                own_previous: shard.own_previous,
-                interval: self.interval,
-            });
-            *cursor = Some(key.clone());
-        }
-        out
+        let entries = {
+            let mut pass = self.pass.lock().unwrap_or_else(|p| p.into_inner());
+            if pass.is_empty() {
+                *pass = self.shards.iter().collect();
+            }
+            let keep = pass.len().saturating_sub(self.batch);
+            pass.split_off(keep)
+        };
+        let publishes = entries
+            .iter()
+            .map(|(key, shard)| {
+                let mut shard = match shard.lock() {
+                    Ok(s) => s,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                shard.roll_to(bucket);
+                Publish {
+                    source: shard.source,
+                    key: self.cache_key(key),
+                    bucket: shard.bucket,
+                    own_current: shard.own_current,
+                    own_previous: shard.own_previous,
+                    interval: self.interval,
+                }
+            })
+            .collect();
+        Batch { publishes, entries }
     }
 
     /// Fold reconciled totals back into the cluster view.
     ///
-    /// `totals` must be positionally aligned with `batch`; a mismatched pair is
-    /// ignored rather than misapplied, since attributing one key's usage to
+    /// `totals` must be positionally aligned with the batch; a mismatched pair
+    /// is ignored rather than misapplied, since attributing one key's usage to
     /// another would throttle an innocent caller.
-    pub fn apply(&self, batch: &[Publish], totals: &[Totals]) {
+    pub fn apply(&self, batch: &Batch, totals: &[Totals]) {
         if batch.len() != totals.len() {
             tracing::warn!(
                 sent = batch.len(),
@@ -353,18 +365,10 @@ impl SharedCounters {
             );
             return;
         }
-        // Look up snapshots through iteration: maintenance must not count as
-        // caller activity and extend a key's idle lifetime.
-        let wanted: HashMap<_, _> = batch
-            .iter()
-            .zip(totals)
-            .map(|(p, t)| (strip(&p.key, &self.prefix), (p, t)))
-            .collect();
-        for (key, shard) in self.shards.iter() {
-            let Some((publish, total)) = wanted.get(key.as_str()) else {
-                // Evicted mid-tick. Nothing to update and nothing lost.
-                continue;
-            };
+        for ((publish, (_, shard)), total) in batch.publishes.iter().zip(&batch.entries).zip(totals)
+        {
+            // A key evicted mid-tick leaves this shard detached from the store;
+            // updating it is harmless, and its replacement has its own source.
             let mut shard = match shard.lock() {
                 Ok(s) => s,
                 Err(poisoned) => poisoned.into_inner(),
@@ -385,44 +389,42 @@ impl SharedCounters {
                 // bucket's traffic against the new one's quota.
                 continue;
             }
-            // The cluster total includes this replica's own published
-            // contribution, so subtract it to get everyone else. Saturating
-            // because another replica's view can lag this one's and a wrapped
-            // subtraction here would read as a near-infinite remote count and
-            // refuse everything.
+            // The cluster total includes this replica's own field, so subtract
+            // it to get everyone else. Saturating because a reply can race a
+            // newer local count, and a wrapped subtraction here would read as a
+            // near-infinite remote count and refuse everything.
             shard.remote_current = total.current.saturating_sub(publish.own_current);
             shard.remote_previous = total.previous.saturating_sub(publish.own_previous);
         }
     }
 
     /// Reconcile once. Called by the background task, never from a request.
-    pub async fn sync_once(&self, now: SystemTime) {
-        // Serialize snapshots and retries, including calls from other runtimes.
+    ///
+    /// Returns `false` when the backend could not be reached, so a caller
+    /// syncing several limiters against the same backend can stop rather than
+    /// wait out the same timeout once per limiter.
+    pub async fn sync_once(&self, now: SystemTime) -> bool {
+        // Serialize snapshots, including calls from other runtimes, so two
+        // ticks cannot write the same field out of order.
         let _sync = self.sync_lock.lock().await;
-        let mut batch = {
-            let mut retry = self.retry.lock().unwrap_or_else(|p| p.into_inner());
-            std::mem::take(&mut *retry)
-        };
-        if let Some((bucket, _)) = position(now, self.interval) {
-            batch.retain(|p| p.bucket.saturating_add(1) >= bucket);
-        }
+        let batch = self.pending(now);
         if batch.is_empty() {
-            batch = self.pending(now);
+            return true;
         }
-        if batch.is_empty() {
-            return;
-        }
-        match self.backend.reconcile(&batch).await {
+        match self.backend.reconcile(&batch.publishes).await {
             Ok(totals) if totals.len() == batch.len() => {
                 self.apply(&batch, &totals);
                 if let Some(m) = crate::metrics::metrics() {
                     m.shared_limit_synced(batch.len() as u64);
                 }
+                true
             }
             result => {
                 // Accuracy degrades to whatever this replica last knew; the
-                // local half of the estimate keeps limiting. Republish the
-                // delta next tick rather than dropping it on the floor.
+                // local half of the estimate keeps limiting. These keys go back
+                // to the front of the pass, and the next tick publishes their
+                // totals as they are then -- nothing is owed, so nothing can be
+                // lost or counted twice.
                 let error = match result {
                     Err(e) => e,
                     Ok(_) => BackendError::Protocol("misaligned reconciliation".into()),
@@ -431,7 +433,14 @@ impl SharedCounters {
                 if let Some(m) = crate::metrics::metrics() {
                     m.shared_limit_error();
                 }
-                *self.retry.lock().unwrap_or_else(|p| p.into_inner()) = batch;
+                self.pass
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .extend(batch.entries);
+                !matches!(
+                    error,
+                    BackendError::Unavailable(_) | BackendError::Timeout(_)
+                )
             }
         }
     }
@@ -441,11 +450,6 @@ impl SharedCounters {
         self.shards.run_pending_tasks();
         self.shards.entry_count()
     }
-}
-
-/// Undo [`SharedCounters::cache_key`].
-fn strip<'a>(key: &'a str, prefix: &str) -> &'a str {
-    key.strip_prefix(prefix).unwrap_or(key)
 }
 
 /// One backend connection plus its settings, cloned into every route that opts
@@ -587,27 +591,47 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// A backend that answers from an in-memory cluster total, so the
-    /// bookkeeping can be driven without a server.
+    /// A backend that answers from an in-memory cluster, so the bookkeeping
+    /// can be driven without a server. Holds what `HSET` would: per window, one
+    /// total per field.
     #[derive(Debug, Default)]
     struct FakeBackend {
-        /// `key:bucket` -> cluster total.
-        totals: Mutex<std::collections::HashMap<String, u64>>,
+        /// `key:bucket` -> field -> total.
+        windows: Mutex<std::collections::HashMap<String, std::collections::HashMap<String, u64>>>,
         calls: AtomicU64,
-        applied: Mutex<std::collections::HashSet<(String, u64, uuid::Uuid)>>,
         lose_reply: std::sync::atomic::AtomicBool,
         fail: std::sync::atomic::AtomicBool,
     }
 
     impl FakeBackend {
-        /// Pretend another replica served `n` requests for `key` in `bucket`.
+        /// Pretend another replica served `n` more requests for `key` in
+        /// `bucket`.
         fn add_remote(&self, key: &str, bucket: u64, n: u64) {
             *self
-                .totals
+                .windows
                 .lock()
                 .unwrap()
                 .entry(format!("{key}:{bucket}"))
+                .or_default()
+                .entry("peer".into())
                 .or_insert(0) += n;
+        }
+
+        /// The cluster total for `key:bucket`, as `HVALS` would sum it.
+        fn total(&self, window: &str) -> Option<u64> {
+            self.windows
+                .lock()
+                .unwrap()
+                .get(window)
+                .map(|fields| fields.values().sum())
+        }
+
+        fn fields(&self, window: &str) -> usize {
+            self.windows
+                .lock()
+                .unwrap()
+                .get(window)
+                .map_or(0, |fields| fields.len())
         }
     }
 
@@ -618,28 +642,31 @@ mod tests {
             if self.fail.load(Ordering::Relaxed) {
                 return Err(BackendError::Unavailable("test".into()));
             }
-            let mut totals = self.totals.lock().unwrap();
-            let mut applied = self.applied.lock().unwrap();
             let result = batch
                 .iter()
                 .map(|p| {
-                    for (bucket, delta) in [
-                        (p.bucket, p.delta),
-                        (p.bucket.saturating_sub(1), p.delta_previous),
-                    ] {
-                        if delta != 0 && applied.insert((p.key.clone(), bucket, p.id)) {
-                            *totals.entry(format!("{}:{bucket}", p.key)).or_insert(0) += delta;
+                    {
+                        let mut windows = self.windows.lock().unwrap();
+                        for (bucket, own) in [
+                            (Some(p.bucket), p.own_current),
+                            (p.bucket.checked_sub(1), p.own_previous),
+                        ] {
+                            if let Some(bucket) = bucket
+                                && own != 0
+                            {
+                                windows
+                                    .entry(format!("{}:{bucket}", p.key))
+                                    .or_default()
+                                    .insert(p.source.to_string(), own);
+                            }
                         }
                     }
                     Totals {
-                        current: totals
-                            .get(&format!("{}:{}", p.key, p.bucket))
-                            .copied()
-                            .unwrap_or(0),
+                        current: self.total(&format!("{}:{}", p.key, p.bucket)).unwrap_or(0),
                         previous: p
                             .bucket
                             .checked_sub(1)
-                            .and_then(|b| totals.get(&format!("{}:{b}", p.key)).copied())
+                            .and_then(|b| self.total(&format!("{}:{b}", p.key)))
                             .unwrap_or(0),
                     }
                 })
@@ -775,7 +802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_delta_is_published_exactly_once() {
+    async fn usage_is_counted_once_however_often_it_syncs() {
         let backend = Arc::new(FakeBackend::default());
         let c = counters(1000, backend.clone());
         let now = mid_bucket();
@@ -789,14 +816,19 @@ mod tests {
         c.sync_once(now).await;
 
         assert_eq!(
-            backend.totals.lock().unwrap().get(&format!("t:k:{bucket}")),
-            Some(&7),
+            backend.total(&format!("t:k:{bucket}")),
+            Some(7),
             "7 requests must reach the cluster as 7, not 21"
+        );
+        assert_eq!(
+            backend.fields(&format!("t:k:{bucket}")),
+            1,
+            "re-syncing overwrites this replica's field rather than adding one"
         );
     }
 
     #[tokio::test]
-    async fn a_failed_sync_still_owes_its_delta() {
+    async fn a_failed_sync_is_published_on_the_next_tick() {
         // Otherwise an outage silently forgives whatever was in flight, and the
         // cluster undercounts for good.
         let backend = Arc::new(FakeBackend::default());
@@ -813,9 +845,9 @@ mod tests {
         c.sync_once(now).await;
 
         assert_eq!(
-            backend.totals.lock().unwrap().get(&format!("t:k:{bucket}")),
-            Some(&4),
-            "the delta the failed tick held must be republished, not dropped"
+            backend.total(&format!("t:k:{bucket}")),
+            Some(4),
+            "the usage the failed tick held must be published, not dropped"
         );
     }
 
@@ -833,7 +865,7 @@ mod tests {
         }
         let next = start + Duration::from_secs(1);
         c.sync_once(next).await;
-        assert_eq!(backend.totals.lock().unwrap().get("t:k:1"), Some(&10));
+        assert_eq!(backend.total("t:k:1"), Some(10));
 
         let replica = counters(10, backend);
         replica.check_at("k", next);
@@ -842,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lost_reply_retries_the_same_contribution_across_rollover() {
+    async fn a_lost_reply_is_not_counted_twice_across_rollover() {
         let backend = Arc::new(FakeBackend::default());
         let c = counters(10, backend.clone());
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(119);
@@ -851,13 +883,13 @@ mod tests {
         }
         backend.lose_reply.store(true, Ordering::Relaxed);
         c.sync_once(now).await;
-        // More usage arrives while the first contribution's outcome is unknown.
+        // More usage arrives while the first publish's outcome is unknown.
         for _ in 0..2 {
             c.check_at("k", now);
         }
         c.sync_once(now + Duration::from_secs(1)).await;
         c.sync_once(now + Duration::from_secs(1)).await;
-        assert_eq!(backend.totals.lock().unwrap().get("t:k:1"), Some(&7));
+        assert_eq!(backend.total("t:k:1"), Some(7));
         // Retry must not attribute this replica's own duplicate to a peer.
         let granted = (0..10)
             .filter(|_| c.check_at("k", now + Duration::from_secs(1)).allowed)
@@ -879,14 +911,7 @@ mod tests {
             c.sync_once(now).await;
         }
         for i in 0..20 {
-            assert_eq!(
-                backend
-                    .totals
-                    .lock()
-                    .unwrap()
-                    .get(&format!("t:k-{i}:{bucket}")),
-                Some(&1)
-            );
+            assert_eq!(backend.total(&format!("t:k-{i}:{bucket}")), Some(1));
             backend.add_remote(&format!("t:k-{i}"), bucket, 9);
         }
         // Keys with no new local usage still need their remote totals refreshed.
@@ -970,6 +995,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sync_says_whether_the_backend_answered() {
+        // The background task stops a tick on `false`, so this must be false
+        // for an unreachable backend and only then.
+        let backend = Arc::new(FakeBackend::default());
+        let c = counters(10, backend.clone());
+        let now = mid_bucket();
+        c.check_at("k", now);
+        assert!(c.sync_once(now).await);
+        backend.fail.store(true, Ordering::Relaxed);
+        assert!(!c.sync_once(now).await);
+        // Nothing to send is not a failure.
+        let idle = counters(10, backend);
+        assert!(idle.sync_once(now).await);
+    }
+
+    #[tokio::test]
+    async fn a_long_window_keeps_one_field_per_replica() {
+        // Reading a window back costs the same however long it is: syncing
+        // every second through an hour must not grow the hash.
+        let backend = Arc::new(FakeBackend::default());
+        let c = counters_with(1_000_000, Duration::from_secs(3600), 4096, backend.clone());
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(3600 * 1000);
+        for second in 0..600 {
+            let now = start + Duration::from_secs(second);
+            c.check_at("k", now);
+            c.sync_once(now).await;
+        }
+        assert_eq!(backend.fields("t:k:1000"), 1);
+        assert_eq!(backend.total("t:k:1000"), Some(600));
+    }
+
+    #[tokio::test]
     async fn an_exact_check_falls_back_when_the_backend_is_down() {
         let backend = Arc::new(FakeBackend::default());
         let c = counters(10, backend.clone());
@@ -1015,7 +1072,7 @@ mod tests {
 
         let mut batch = c.pending(now);
         // Pretend the round trip was slow enough for the window to move on.
-        for p in &mut batch {
+        for p in &mut batch.publishes {
             p.bucket = p.bucket.saturating_sub(1);
             p.own_current = 0;
         }
@@ -1200,7 +1257,7 @@ mod tests {
         c.check_at("orders|203.0.113.7", now);
         let batch = c.pending(now);
         assert_eq!(
-            batch.first().map(|p| p.key.as_str()),
+            batch.publishes.first().map(|p| p.key.as_str()),
             Some("t:orders|203.0.113.7")
         );
     }

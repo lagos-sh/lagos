@@ -37,6 +37,33 @@ A deployment that does not use the response cache can build without it:
 
 ---
 
+## 0.1.7 → 0.1.8 — shared rate limits, concurrency caps, case-insensitive deny-list
+
+No configuration change is needed. Shared counters and concurrency caps are
+opt-in per route.
+
+- **Deny-list.** `internal:` entries now refuse every case variant of a denied
+  prefix, including the four non-ASCII letters some upstreams fold to ASCII
+  (see the CHANGELOG). A client that reached an internal handler through a
+  differently-cased path now gets `404`. Nothing that was refused before is
+  admitted now.
+- **Rejection reasons.** `concurrency_limited` is a new value of
+  `gateway_rejections_total{reason}` and of the `reason` field on rejection
+  log lines. A dashboard or alert keyed on a fixed list should add it.
+- **Shared counters.** Turning on `counter: shared` is a deliberate step:
+  configure `shared_counters`, then alert on
+  `gateway_shared_limit_errors_total`, which is the only signal that limits
+  have fallen back to per-process counting. `mode: exact` makes the cache a
+  boot dependency and needs Recached. The shipped binary now carries the RESP
+  client; it connects to nothing unless `shared_counters` is set.
+- **Custom gateways.** Code built on `lagos-core` sees two API changes:
+  `RouteConfig` has a new `concurrency` field, so a struct literal needs
+  `concurrency: None`, and `ratelimit::key_for` takes the key and
+  `trusted_proxies` directly rather than a `RateLimitConfig`. `Cache::eviction`
+  is now a `cache::LruManager`.
+
+---
+
 ## 0.1.6 → 0.1.7 — client address in the access log
 
 No configuration change is needed. `gateway.access` and `gateway.upstream.error`

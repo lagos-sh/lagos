@@ -531,8 +531,22 @@ impl BackgroundService for SharedLimitSync {
             // configuration-bounded and each tick is one round trip per route,
             // so this stays small; it is deliberately not a fan-out, which
             // would multiply a cache hiccup by the route count.
-            for counters in counters {
-                counters.sync_once(std::time::SystemTime::now()).await;
+            //
+            // Every limiter shares one backend, so the first that cannot reach
+            // it ends the tick: the rest would only wait out the same timeout,
+            // one after another. The failed keys go first next tick and the
+            // limiters skipped keep their place. Shutdown interrupts a tick rather than waiting for it, since
+            // a reconciliation nobody will read is not worth delaying exit for.
+            let tick = async {
+                for counters in counters {
+                    if !counters.sync_once(std::time::SystemTime::now()).await {
+                        break;
+                    }
+                }
+            };
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                () = tick => {}
             }
         }
     }

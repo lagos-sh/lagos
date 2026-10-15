@@ -101,7 +101,7 @@
       "oneOf": [
         {
           "const": "approximate",
-          "description": "Decide locally, reconcile in the background.\n\nThe local window admits or refuses with no I/O at all; a background task\npublishes this replica's usage every `shared_counters.sync` and reads\nback what the others have used. A decision is therefore made against a\ncluster total from its last reconciliation. Capped batches rotate across\nkeys, so a full pass takes roughly `ceil(keys / max_keys_per_sync)` ticks,\nplus backend latency. Overshoot scales with the effective reconciliation\nperiod: roughly `replicas x arrival_rate x period`.\n\nPortable: it uses `HSETNX`, `HVALS` and `EXPIRE`, which Recached, Redis and\nValkey all implement identically.",
+          "description": "Decide locally, reconcile in the background.\n\nThe local window admits or refuses with no I/O at all; a background task\npublishes this replica's usage every `shared_counters.sync` and reads\nback what the others have used. A decision is therefore made against a\ncluster total from its last reconciliation. Capped batches rotate across\nkeys, so a full pass takes roughly `ceil(keys / max_keys_per_sync)` ticks,\nplus backend latency. Overshoot scales with the effective reconciliation\nperiod: roughly `replicas x arrival_rate x period`.\n\nPortable: it uses `HSET`, `HVALS` and `EXPIRE`, which Recached, Redis and\nValkey all implement identically.",
           "type": "string"
         },
         {

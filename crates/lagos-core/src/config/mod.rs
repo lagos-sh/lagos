@@ -415,7 +415,7 @@ pub enum LimitMode {
     /// plus backend latency. Overshoot scales with the effective reconciliation
     /// period: roughly `replicas x arrival_rate x period`.
     ///
-    /// Portable: it uses `HSETNX`, `HVALS` and `EXPIRE`, which Recached, Redis and
+    /// Portable: it uses `HSET`, `HVALS` and `EXPIRE`, which Recached, Redis and
     /// Valkey all implement identically.
     #[default]
     Approximate,

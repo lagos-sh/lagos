@@ -5,7 +5,7 @@
 //!
 //! # Why these commands
 //!
-//! `HSETNX`, `EXPIRE` and `HVALS` for reconciliation, `RLCHECK` for the exact
+//! `HSET`, `EXPIRE` and `HVALS` for reconciliation, `RLCHECK` for the exact
 //! mode. Nothing else, and in particular **no `EVAL`**: Recached implements no
 //! Lua at all, so the usual trick of shipping a sliding-window script would not
 //! run against the backend this is built for. Keeping to the portable subset is
@@ -259,20 +259,23 @@ impl Backend for RespBackend {
 
         let mut pipe = redis::Pipeline::new();
         for publish in batch {
-            for (bucket, delta) in [
-                (publish.bucket, publish.delta),
-                (publish.bucket.saturating_sub(1), publish.delta_previous),
+            let field = publish.source.to_string();
+            for (bucket, own, writable) in [
+                (publish.bucket, publish.own_current, true),
+                // Bucket 0 has no previous window; its key is still read so
+                // every publish gets the same number of replies.
+                (
+                    publish.bucket.saturating_sub(1),
+                    publish.own_previous,
+                    publish.bucket > 0,
+                ),
             ] {
                 let key = Self::bucket_key(&publish.key, bucket);
-                // Immutable contributions commute across replicas and retries.
-                // If a reply is lost after the write, HSETNX recognizes the same
-                // ID on retry instead of adding its delta a second time.
-                if delta != 0 {
-                    pipe.cmd("HSETNX")
-                        .arg(&key)
-                        .arg(publish.id.to_string())
-                        .arg(delta)
-                        .ignore();
+                // This replica's whole count under its own field: a retry or a
+                // later snapshot overwrites it, so nothing is counted twice and
+                // the hash holds one field per replica however often it syncs.
+                if own != 0 && writable {
+                    pipe.cmd("HSET").arg(&key).arg(&field).arg(own).ignore();
                 }
                 pipe.cmd("EXPIRE")
                     .arg(&key)
@@ -420,14 +423,11 @@ mod tests {
         })
     }
 
-    fn publish(key: &str, bucket: u64, delta: u64, own_current: u64, own_previous: u64) -> Publish {
+    fn publish(key: &str, bucket: u64, own_current: u64, own_previous: u64) -> Publish {
         Publish {
-            id: uuid::Uuid::new_v4(),
             source: uuid::Uuid::new_v4(),
-            delta_previous: 0,
             key: key.to_string(),
             bucket,
-            delta,
             own_current,
             own_previous,
             interval: Duration::from_secs(60),
@@ -444,7 +444,7 @@ mod tests {
         let bucket = 5;
 
         // First replica publishes 3.
-        let batch = vec![publish(&format!("{prefix}k"), bucket, 3, 3, 0)];
+        let batch = vec![publish(&format!("{prefix}k"), bucket, 3, 0)];
         let totals = backend.reconcile(&batch).await.expect("reconcile");
         assert_eq!(
             totals,
@@ -457,17 +457,17 @@ mod tests {
 
         // A second replica publishes 4 against the same key: the total is the
         // cluster's, which is the entire point.
-        let batch = vec![publish(&format!("{prefix}k"), bucket, 4, 4, 0)];
+        let batch = vec![publish(&format!("{prefix}k"), bucket, 4, 0)];
         let totals = backend.reconcile(&batch).await.expect("reconcile");
         assert_eq!(
             totals.first().map(|t| t.current),
             Some(7),
-            "the reply must be the cluster total, not this replica's delta"
+            "the reply must be the cluster total, not this replica's own"
         );
 
         // Previous-window reads have to line up with what the window before
         // actually holds, or the sliding weight is applied to nothing.
-        let batch = vec![publish(&format!("{prefix}k"), bucket + 1, 1, 1, 7)];
+        let batch = vec![publish(&format!("{prefix}k"), bucket + 1, 1, 0)];
         let totals = backend.reconcile(&batch).await.expect("reconcile");
         assert_eq!(
             totals.first().copied(),
@@ -480,21 +480,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_and_previous_window_deltas_are_idempotent_on_a_live_server() {
+    async fn republished_totals_are_idempotent_on_a_live_server() {
         let Some(cfg) = live_config() else {
             return;
         };
         let backend = RespBackend::connect(&cfg).expect("connect");
-        let mut p = publish(&format!("{}retry", cfg.prefix), 21, 3, 3, 4);
-        p.delta_previous = 4;
+        let p = publish(&format!("{}retry", cfg.prefix), 21, 3, 4);
         let expected = vec![Totals {
             current: 3,
             previous: 4,
         }];
-        assert_eq!(backend.reconcile(&[p.clone()]).await.unwrap(), expected);
-        assert_eq!(backend.reconcile(&[p.clone()]).await.unwrap(), expected);
-        let mut peer = publish(&p.key, 21, 2, 2, 1);
-        peer.delta_previous = 1;
+        assert_eq!(
+            backend.reconcile(std::slice::from_ref(&p)).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            backend.reconcile(std::slice::from_ref(&p)).await.unwrap(),
+            expected
+        );
+        let peer = publish(&p.key, 21, 2, 1);
         assert_eq!(
             backend.reconcile(&[peer]).await.unwrap(),
             vec![Totals {
@@ -540,7 +544,7 @@ mod tests {
         let prefix = cfg.prefix;
 
         let batch: Vec<Publish> = (0..8)
-            .map(|i| publish(&format!("{prefix}key-{i}"), 9, i, i, 0))
+            .map(|i| publish(&format!("{prefix}key-{i}"), 9, i, 0))
             .collect();
         let totals = backend.reconcile(&batch).await.expect("reconcile");
 
@@ -565,7 +569,7 @@ mod tests {
         let key = format!("{prefix}ttl");
 
         backend
-            .reconcile(&[publish(&key, 11, 1, 1, 0)])
+            .reconcile(&[publish(&key, 11, 1, 0)])
             .await
             .expect("reconcile");
 
@@ -634,9 +638,7 @@ mod tests {
         };
         let backend = RespBackend::connect(&cfg).expect("a lazy connection cannot fail here");
         let started = std::time::Instant::now();
-        let result = backend
-            .reconcile(&[publish("lagos-test:x", 1, 1, 1, 0)])
-            .await;
+        let result = backend.reconcile(&[publish("lagos-test:x", 1, 1, 0)]).await;
         assert!(
             result.is_err(),
             "an unreachable server must not look healthy"
@@ -654,12 +656,9 @@ mod tests {
         // from anything but the key's own interval expires one route's window
         // on another route's schedule -- silently resetting a quota mid-window.
         let long = Publish {
-            id: uuid::Uuid::new_v4(),
             source: uuid::Uuid::new_v4(),
-            delta_previous: 0,
             key: "p:a".into(),
             bucket: 1,
-            delta: 0,
             own_current: 0,
             own_previous: 0,
             interval: Duration::from_secs(3600),
