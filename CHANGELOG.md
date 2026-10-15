@@ -3,31 +3,70 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## 0.1.8 — case-insensitive deny-list, concurrency caps
+## 0.1.8 — shared rate limits, concurrency caps, case-insensitive deny-list
 
+- **Shared rate limits.** `counter: shared` puts rate-limit counters in a cache
+  every replica can reach, so a limit of 100/min across three replicas no
+  longer admits 300/min. Any RESP server works (Recached, Redis or Valkey),
+  configured under a new top-level `shared_counters` block with `url`, `sync`,
+  `prefix`, `timeout` and `max_keys_per_sync`. `recached://`, `valkey://`,
+  `resp://` and `redis://` are all accepted, each with a trailing `s` for TLS.
+  Routes opt in individually, and a block no route uses connects to nothing.
+
+  Two modes. The default `approximate` decides locally and reconciles in the
+  background, so no request waits on the cache: each replica writes its whole
+  count for a window under its own field with `HSET` and reads the sum back,
+  so a retry overwrites rather than adds and a window's hash stays at one field
+  per replica. Overshoot becomes roughly
+  `replicas x arrival rate x reconciliation period` instead of
+  `replicas x limit`. `mode: exact` uses Recached's `RLCHECK` for an
+  authoritative decision in one round trip per limited request. It has no Redis
+  or Valkey counterpart, so the backend is identified at startup and on route
+  reloads, and `exact` against anything else is refused rather than silently
+  degraded.
+
+  If the cache is unreachable, traffic continues with limits degraded to
+  per-process counting, reported by the new `gateway_shared_limit_errors_total`
+  and `gateway_shared_limit_keys_synced_total` metrics. `mode: exact` is the
+  one exception and fails the boot, since it cannot be honoured without the
+  backend. A shared limit needs `interval` of at least 1s and, in `approximate`
+  mode, `sync` shorter than `interval`; `exact` also needs whole seconds. All
+  are checked at startup and on reloads. Accept-time connection limits stay
+  per process.
+
+  The RESP client is behind a new `shared-limits` feature on `lagos-core`, off
+  by default there and on for the shipped `lagos` binary and images. A config
+  using `counter: shared` in a build without it is a startup error naming the
+  feature.
 - **Concurrency caps.** A route can bound how many of its requests are in
   flight upstream at once with `concurrency: { max: N }`, keyed on the route as
   a whole (the default) or per caller (`ip`, `identity`, `header.<name>`).
   Over the cap the request is refused at once, never queued: `503` for a
-  route-wide cap, `429` for a per-caller one, both with `Retry-After: 1`. Slots
-  are counted in `pingora-limits`' fixed-memory in-flight sketch, so a route
-  reload does not reset them. Cache hits never take a slot. A new
-  `concurrency_limited` value of `gateway_rejections_total{reason}`; opt-in,
-  so no config change.
-- **Security.** `internal:` deny-list entries now match ASCII case-insensitively.
+  route-wide cap, `429` for a per-caller one, both with `Retry-After: 1`. A
+  route-wide cap is counted exactly; per-caller caps share `pingora-limits`'
+  fixed-memory in-flight sketch, which can over-count once thousands of
+  callers are in flight at once (see the README). A route reload does not
+  reset either. Cache hits never take a slot. A new `concurrency_limited`
+  value of `gateway_rejections_total{reason}`; opt-in, so no config change.
+- **Security.** `internal:` deny-list entries now match case-insensitively.
   Route matching was and stays exact, but many upstream frameworks route
   case-insensitively by default (Express among them), so a request such as
   `products/Internal/sync` missed a `products/internal` entry, matched a broader
   route, and reached the internal handler. The deny-list now refuses every
   ASCII case variant of a denied prefix, still on a segment boundary
-  (`products/internals` is not denied). Non-ASCII characters are compared
-  exactly. A deny-list that over-matches can only refuse more, so there is no
-  opt-out and no config change; the refusal is the usual `404`.
+  (`products/internals` is not denied). It also folds the four non-ASCII
+  letters that Java's `equalsIgnoreCase` (Spring) and .NET treat as ASCII ones:
+  `ı` and `İ` as `i`, `ſ` as `s`, and the Kelvin sign as `k`. Other non-ASCII
+  characters compare exactly. A deny-list that over-matches can only refuse
+  more, so there is no opt-out and no config change; the refusal is the usual
+  `404`.
 - **Performance.** The response cache's eviction manager is now
   `pingora-cache`'s sharded LRU (16 shards) instead of `simple_lru`, which
-  takes one global lock on every cache fill and every hit. Eviction stays
-  LRU by bytes against `cache.max_size`, so there is no config change. For
-  code built on `lagos-core`, `Cache::eviction` is now a `cache::LruManager`.
+  takes one global lock on every cache fill and every hit. Eviction is still
+  bounded by bytes against `cache.max_size`, but is now approximately LRU
+  rather than strictly: it evicts from the larger of two randomly chosen
+  shards. No config change. For code built on `lagos-core`, `Cache::eviction`
+  is now a `cache::LruManager`.
 - **Dependencies.** rustls 0.23.45 → 0.23.46 for RUSTSEC-2026-0346, -0347,
   -0348 and -0349. Lagos uses rustls for upstream TLS, JWKS and certificate
   fetches, OTLP export and shared counters. No config change.
