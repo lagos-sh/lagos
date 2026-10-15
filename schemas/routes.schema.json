@@ -2,6 +2,80 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ConcurrencyConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/RateLimitKey"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Whose requests share the cap: `route`, `ip`, `identity`, or\n`header.<name>`. Omit for `route`, which bounds the route as a whole to\nprotect its upstream; the others bound each caller separately."
+            },
+            "max": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Requests allowed upstream at once, per key."
+            },
+            "trusted_proxies": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 0,
+              "description": "As `rate_limit.trusted_proxies`. Only read by `key: ip`."
+            }
+          },
+          "required": [
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "A cap on requests in flight, applied per route.\n\n```yaml\nconcurrency:\n  max: 50\n  key: route\n```\n\nA request holds its slot from the moment it is sent upstream until its\nresponse has been fully written, so a streaming response holds one for as\nlong as it streams. A request over the cap is refused at once rather than\nqueued: a queue in front of a saturated upstream only adds latency to the\nrequests that will time out anyway."
+    },
     "Counter": {
       "description": "How a rate limiter counts.\n\nBoth use the same sliding-window formula — the previous interval weighted by\nhow much of it is still in view — so a limit means the same thing either\nway. They differ in what they trade for memory.",
       "oneOf": [
@@ -304,6 +378,33 @@
               ],
               "default": null,
               "description": "Set `false` to exempt this route from `auth.client_keys`, for a caller\nthat cannot send a key — a payment provider's webhook, say. Unset, the\nroute follows `auth.client_keys`. Without `auth.client_keys` any value\nis refused rather than left to read as a control that does nothing."
+            },
+            "concurrency": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ConcurrencyConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Requests allowed upstream at once. Not inherited from `defaults`: a cap\nsized for one upstream means nothing for another."
             },
             "enabled": {
               "anyOf": [

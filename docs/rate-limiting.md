@@ -26,6 +26,10 @@ must be covered.
 Keys are scoped per route, so a quota spent on `/search` is not spent on
 `/orders`.
 
+A rate limit does not bound how many requests are in flight at once; for that,
+see [concurrency caps](../README.md#concurrency-caps). The two compose: a route
+can have both, and the rate limit is checked first.
+
 ## Choosing a counter
 
 | `counter` | Memory | Accuracy | Scope |

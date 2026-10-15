@@ -258,6 +258,7 @@ pub fn normalize_reason(reason: &str) -> String {
         | "missing_client_key"
         | "bad_client_key"
         | "rate_limited"
+        | "concurrency_limited"
         | "circuit_open"
         | "binding_refused"
         | "bind_without_identity"

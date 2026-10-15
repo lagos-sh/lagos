@@ -3,7 +3,17 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## Unreleased — case-insensitive deny-list
+## Unreleased — case-insensitive deny-list, concurrency caps
+
+- **Concurrency caps.** A route can bound how many of its requests are in
+  flight upstream at once with `concurrency: { max: N }`, keyed on the route as
+  a whole (the default) or per caller (`ip`, `identity`, `header.<name>`).
+  Over the cap the request is refused at once, never queued: `503` for a
+  route-wide cap, `429` for a per-caller one, both with `Retry-After: 1`. Slots
+  are counted in `pingora-limits`' fixed-memory in-flight sketch, so a route
+  reload does not reset them. Cache hits never take a slot. A new
+  `concurrency_limited` value of `gateway_rejections_total{reason}`; opt-in,
+  so no config change.
 
 - **Security.** `internal:` deny-list entries now match ASCII case-insensitively.
   Route matching was and stays exact, but many upstream frameworks route

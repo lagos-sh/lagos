@@ -458,6 +458,80 @@
       ],
       "description": "Keys every caller of the public listener must present.\n\n```yaml\nauth:\n  client_keys:\n    header: x-client-key\n    forward_as: x-client-id\n    keys:\n      storefront: ${STOREFRONT_CLIENT_KEY}\n      mobile: ${MOBILE_CLIENT_KEY}\n```\n\nConfiguring this turns the requirement on for *every* route on the public\nlistener, whatever its group: a key is checked before any token is read.\nThe health path is never keyed, and a route opts out only by saying so\n(`client_key: false`) — for a caller that cannot send one, such as a payment\nprovider's webhook. The internal listener keeps the machine credential.\n\nUnlike the machine credential, these are checked on the public listener, so\nanything that can reach the gateway can try to guess one. That is why they\nhave a minimum length and why the check runs after the IP rate limit.\n\nA key that a browser sends is readable by anyone who opens that page. It\ntells honest clients apart and keeps out scanners that do not have it; it is\nnot a secret from a determined visitor, and user authorization still belongs\nto the user's token."
     },
+    "ConcurrencyConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/RateLimitKey"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Whose requests share the cap: `route`, `ip`, `identity`, or\n`header.<name>`. Omit for `route`, which bounds the route as a whole to\nprotect its upstream; the others bound each caller separately."
+            },
+            "max": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Requests allowed upstream at once, per key."
+            },
+            "trusted_proxies": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 0,
+              "description": "As `rate_limit.trusted_proxies`. Only read by `key: ip`."
+            }
+          },
+          "required": [
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "A cap on requests in flight, applied per route.\n\n```yaml\nconcurrency:\n  max: 50\n  key: route\n```\n\nA request holds its slot from the moment it is sent upstream until its\nresponse has been fully written, so a streaming response holds one for as\nlong as it streams. A request over the cap is refused at once rather than\nqueued: a queue in front of a saturated upstream only adds latency to the\nrequests that will time out anyway."
+    },
     "ConnectionLimitConfig": {
       "anyOf": [
         {
@@ -1817,6 +1891,33 @@
               ],
               "default": null,
               "description": "Set `false` to exempt this route from `auth.client_keys`, for a caller\nthat cannot send a key — a payment provider's webhook, say. Unset, the\nroute follows `auth.client_keys`. Without `auth.client_keys` any value\nis refused rather than left to read as a control that does nothing."
+            },
+            "concurrency": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ConcurrencyConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Requests allowed upstream at once. Not inherited from `defaults`: a cap\nsized for one upstream means nothing for another."
             },
             "enabled": {
               "anyOf": [

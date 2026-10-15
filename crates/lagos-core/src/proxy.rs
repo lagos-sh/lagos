@@ -60,6 +60,12 @@ pub struct Gateway {
     /// Resolves upstream names off the worker threads.
     resolver: Arc<crate::dns::Resolver>,
     dns_next: AtomicUsize,
+    /// Requests in flight, for `concurrency` caps. One for the gateway rather
+    /// than one per route table, so a route reload does not reset the count
+    /// while the requests it was counting are still running. Fixed memory
+    /// whatever the number of keys: a count-min sketch, which can over-count
+    /// on a collision but never under-counts.
+    inflight: pingora_limits::inflight::Inflight,
 }
 
 /// Headers required for the request to remain well-formed. Removing these would
@@ -216,6 +222,33 @@ pub struct Ctx {
     pub dns_attempts: u32,
     /// Automatic failovers made for this request, bounded by the DNS answer.
     pub dns_failovers: usize,
+    /// The route's concurrency cap, keyed for this caller, until the request
+    /// is about to go upstream.
+    pub concurrency: Option<PendingSlot>,
+    /// This request's concurrency slot. Released when the context is dropped,
+    /// after the response has been written.
+    pub inflight: Option<pingora_limits::inflight::Guard>,
+}
+
+/// A concurrency slot a request will need before it goes upstream.
+#[derive(Debug)]
+pub struct PendingSlot {
+    key: String,
+    max: u64,
+    per_caller: bool,
+}
+
+/// Take a slot under `max`, or `None` when the key is already at its cap.
+///
+/// The count is incremented before it is compared, so a refused request is
+/// counted for an instant and released as its guard drops.
+fn take_slot(
+    inflight: &pingora_limits::inflight::Inflight,
+    key: &str,
+    max: u64,
+) -> Option<pingora_limits::inflight::Guard> {
+    let (guard, count) = inflight.incr(key, 1);
+    (u64::try_from(count).unwrap_or(0) <= max).then_some(guard)
 }
 
 impl Gateway {
@@ -283,6 +316,7 @@ impl Gateway {
             forwardable,
             resolver,
             dns_next: AtomicUsize::new(0),
+            inflight: pingora_limits::inflight::Inflight::new(),
         }
     }
 
@@ -538,28 +572,14 @@ impl Gateway {
         subject: Option<&str>,
         peer_ip: Option<&str>,
     ) -> Result<bool> {
-        let key = {
-            let headers = &session.req_header().headers;
-            let trusted = self.cfg.trusted_proxy_depth(peer_ip, cfg.trusted_proxies);
-            let forwarded = if trusted > 0 {
-                crate::headers::forwarded_for_chain(headers)
-            } else {
-                None
-            };
-            crate::ratelimit::key_for(
-                cfg,
-                &route.id,
-                subject,
-                forwarded.as_deref(),
-                peer_ip,
-                |name| {
-                    headers
-                        .get(name)
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string)
-                },
-            )
-        };
+        let key = self.limit_key(
+            session,
+            &cfg.key,
+            cfg.trusted_proxies,
+            &route.id,
+            subject,
+            peer_ip,
+        );
 
         let Some(key) = key else {
             return Ok(false);
@@ -578,6 +598,40 @@ impl Gateway {
         ctx.retry_after = Some(retry);
         self.reject(session, ctx, Rejection::rate_limited(retry))
             .await
+    }
+
+    /// The key a rate limit or concurrency cap counts this request under, or
+    /// `None` when the configured key is absent from the request.
+    fn limit_key(
+        &self,
+        session: &Session,
+        key: &crate::config::RateLimitKey,
+        trusted_proxies: usize,
+        route_id: &str,
+        subject: Option<&str>,
+        peer_ip: Option<&str>,
+    ) -> Option<String> {
+        let headers = &session.req_header().headers;
+        let trusted = self.cfg.trusted_proxy_depth(peer_ip, trusted_proxies);
+        let forwarded = if trusted > 0 {
+            crate::headers::forwarded_for_chain(headers)
+        } else {
+            None
+        };
+        crate::ratelimit::key_for(
+            key,
+            trusted_proxies,
+            route_id,
+            subject,
+            forwarded.as_deref(),
+            peer_ip,
+            |name| {
+                headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            },
+        )
     }
 
     async fn send_with_retry_after(
@@ -1350,6 +1404,25 @@ impl ProxyHttp for Gateway {
         }
 
         ctx.plan = plan;
+        // Keyed now, while the headers and identity are at hand; the slot itself
+        // is taken only once the request is about to go upstream, so a cache
+        // hit never holds one.
+        if let Some(cap) = &route.concurrency {
+            ctx.concurrency = self
+                .limit_key(
+                    session,
+                    cap.key(),
+                    cap.trusted_proxies,
+                    &route.id,
+                    identity.as_ref().map(|i| i.subject.as_str()),
+                    peer_ip_for_limit.as_deref(),
+                )
+                .map(|key| PendingSlot {
+                    key,
+                    max: cap.max,
+                    per_caller: cap.per_caller(),
+                });
+        }
         // Consistent hashing uses the subject in production too.
         ctx.subject = identity.as_ref().map(|i| i.subject.clone());
         ctx.client_key_id = client_key_id;
@@ -1392,6 +1465,23 @@ impl ProxyHttp for Gateway {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<bool> {
+        // Before the breaker: a request refused here must not have been
+        // admitted as a half-open trial, or the trial would never report back.
+        if let Some(slot) = ctx.concurrency.take() {
+            match take_slot(&self.inflight, &slot.key, slot.max) {
+                Some(guard) => ctx.inflight = Some(guard),
+                None => {
+                    ctx.retry_after = Some(1);
+                    self.reject(
+                        session,
+                        ctx,
+                        Rejection::concurrency_limited(slot.per_caller, 1),
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+            }
+        }
         if let Some(breaker) = self
             .upstreams
             .get(&ctx.upstream_name)
@@ -2011,6 +2101,25 @@ impl ProxyHttp for Gateway {
 mod tests {
     use super::*;
     use crate::config::GatewayConfig;
+
+    #[test]
+    fn a_concurrency_slot_is_held_until_its_guard_drops() {
+        let inflight = pingora_limits::inflight::Inflight::new();
+        let first = take_slot(&inflight, "r|", 2).expect("first slot");
+        let second = take_slot(&inflight, "r|", 2).expect("second slot");
+        assert!(take_slot(&inflight, "r|", 2).is_none(), "over the cap");
+        // A refusal must not keep its count, or a route at its cap would
+        // stay there.
+        assert!(take_slot(&inflight, "r|", 2).is_none());
+        assert!(
+            take_slot(&inflight, "other|", 2).is_some(),
+            "keys are separate"
+        );
+        drop(first);
+        let third = take_slot(&inflight, "r|", 2).expect("a slot freed");
+        drop((second, third));
+        assert!(take_slot(&inflight, "r|", 2).is_some());
+    }
 
     #[test]
     fn upstream_uri_joins_base_path_path_and_query() {
