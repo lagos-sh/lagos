@@ -931,8 +931,9 @@ Two modes, because they trade different things:
 publishes this replica's usage every `sync` and reads back what the others have
 used. Capped batches rotate across keys, so a full pass takes roughly
 `ceil(keys / max_keys_per_sync)` ticks, plus backend latency and retries. No
-request ever waits on the cache. Outstanding usage from both windows is
-published, and retries reuse immutable contribution IDs to avoid double counting.
+request ever waits on the cache. Each replica writes its whole count for both
+windows under its own field, so a retry overwrites rather than adds and nothing
+is counted twice.
 
 `exact` uses Recached's `RLCHECK`, which returns an authoritative decision in one
 command. There is no Redis or Valkey equivalent, and it cannot be emulated

@@ -70,7 +70,7 @@ during a rollout.
 
 ### Any RESP server
 
-Recached, Redis and Valkey all work. The commands used are `HSETNX`, `HVALS`,
+Recached, Redis and Valkey all work. The commands used are `HSET`, `HVALS`,
 `EXPIRE` and — in `exact` mode only — Recached's `RLCHECK`. Deliberately no
 `EVAL`: Recached implements no Lua, so the usual trick of shipping a
 sliding-window script would not run against it at all.
@@ -90,14 +90,17 @@ run. They are aliases for one protocol, not different behaviours.
 window admits or refuses with no I/O at all; a background task publishes this
 replica's usage on `sync` ticks and reads back what the others have used.
 Capped batches rotate across keys. For a stable key set, a full pass takes
-roughly `ceil(keys / max_keys_per_sync)` ticks, plus backend latency; retries
-can extend that period. Overshoot scales with this effective reconciliation
-period, rather than always with one `sync` interval.
+roughly `ceil(keys / max_keys_per_sync)` ticks, plus backend latency; a failed
+batch is tried again first, which can extend that period. Overshoot scales with
+this effective reconciliation period, rather than always with one `sync`
+interval.
 
-Each snapshot carries outstanding usage for both the current and previous
-windows. Contributions have immutable IDs stored with `HSETNX`; a lost response
-retries the same IDs, so a write that succeeded before a timeout is counted once.
-No request waits on the cache.
+Each replica writes its whole count for the current and previous windows under
+its own field of the window's hash, with `HSET`, and reads the sum of every
+field back. Writing a total rather than adding a delta makes every publish
+idempotent: a lost response, a retry, or the next tick's larger count all
+overwrite the same field, so nothing is counted twice and nothing is owed after
+a failure. No request waits on the cache.
 
 **`exact`** uses `RLCHECK`, which records an attempt and returns
 `[allowed, remaining, retry_after_ms]` in one command. The limit then holds with
@@ -173,10 +176,11 @@ keys rather than the process.
 
 The same cap applies to shared counters. Only requests refresh local idle
 timers; background reconciliation does not keep unused keys alive. Cache-side
-window hashes carry a TTL of two intervals, rounded up to whole seconds. Each
-nonzero publication adds an immutable contribution field, so cache memory grows
-with replicas and publications retained within those windows. Shorter sync
-periods increase both command traffic and contribution storage.
+window hashes carry a TTL of two intervals, rounded up to whole seconds. A hash
+holds one field per replica for each key, plus one per key a replica evicted and
+saw again within the window, so it does not grow with the number of syncs: a
+1-hour window costs the same to read back as a 1-minute one. Shorter sync
+periods increase command traffic, not storage.
 
 ### Builds
 
