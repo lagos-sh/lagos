@@ -25,6 +25,7 @@ pub mod breaker;
 #[cfg(feature = "cache")]
 pub mod cache;
 pub mod cli;
+pub mod concurrency;
 pub mod config;
 pub mod cors;
 pub mod dns;

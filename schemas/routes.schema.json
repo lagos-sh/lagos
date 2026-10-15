@@ -2,6 +2,80 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ConcurrencyConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/RateLimitKey"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Whose requests share the cap: `route`, `ip`, `identity`, or\n`header.<name>`. Omit for `route`, which bounds the route as a whole to\nprotect its upstream; the others bound each caller separately."
+            },
+            "max": {
+              "anyOf": [
+                {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Requests allowed upstream at once, per key."
+            },
+            "trusted_proxies": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 0,
+              "description": "As `rate_limit.trusted_proxies`. Only read by `key: ip`."
+            }
+          },
+          "required": [
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "A cap on requests in flight, applied per route.\n\n```yaml\nconcurrency:\n  max: 50\n  key: route\n```\n\nA request holds its slot from the moment it is sent upstream until its\nresponse has been fully written, so a streaming response holds one for as\nlong as it streams. A request over the cap is refused at once rather than\nqueued: a queue in front of a saturated upstream only adds latency to the\nrequests that will time out anyway."
+    },
     "Counter": {
       "description": "How a rate limiter counts.\n\nBoth use the same sliding-window formula — the previous interval weighted by\nhow much of it is still in view — so a limit means the same thing either\nway. They differ in what they trade for memory.",
       "oneOf": [
@@ -13,6 +87,26 @@
         {
           "const": "sketch",
           "description": "A shared count-min sketch (`pingora-limits`).\n\nFixed memory and lock-free whatever the key cardinality — but\n**approximate, and it only ever over-counts**. Two keys can collide and\none caller can be refused because of another's traffic. Worth it when\nthe key space is huge and the limit is a blunt abuse control; wrong when\nthe 429 is a promise to a specific customer.",
+          "type": "string"
+        },
+        {
+          "const": "shared",
+          "description": "Counters shared across every replica, over RESP.\n\nThe reason to choose it: `exact` and `sketch` both count only what\n*this* process saw, so a limit of 100/min across three replicas admits\nup to 300/min. This one makes the limit mean what it says cluster-wide.\n\nRequires a `shared_counters` block, and a build with the\n`shared-limits` feature. How closely it holds the limit — and whether\nanything waits on the cache — is [`LimitMode`].",
+          "type": "string"
+        }
+      ]
+    },
+    "LimitMode": {
+      "description": "How hard a `shared` counter tries, and what it spends to do it.\n\nOnly meaningful with [`Counter::Shared`]; the local backends have nothing to\ntrade. The default keeps the request path free of I/O, which is the rule the\nrest of this gateway is built to.",
+      "oneOf": [
+        {
+          "const": "approximate",
+          "description": "Decide locally, reconcile in the background.\n\nThe local window admits or refuses with no I/O at all; a background task\npublishes this replica's usage every `shared_counters.sync` and reads\nback what the others have used. A decision is therefore made against a\ncluster total from its last reconciliation. Capped batches rotate across\nkeys, so a full pass takes roughly `ceil(keys / max_keys_per_sync)` ticks,\nplus backend latency. Overshoot scales with the effective reconciliation\nperiod: roughly `replicas x arrival_rate x period`.\n\nPortable: it uses `HSET`, `HVALS` and `EXPIRE`, which Recached, Redis and\nValkey all implement identically.",
+          "type": "string"
+        },
+        {
+          "const": "exact",
+          "description": "Ask the cache per request, and believe it.\n\nOne `RLCHECK` round trip per limited request returns an authoritative\ndecision, so the limit holds cluster-wide with no overshoot and no window\nalignment to reason about. The cost is real and should be chosen\ndeliberately: every limited request now waits on the cache, and a slow\ncache is slow requests.\n\n**Recached only.** `RLCHECK` has no Redis or Valkey counterpart, and it\ncannot be emulated without `EVAL`, which Recached does not implement. The\nbackend is checked at startup and before publishing route reloads; a\nmismatch rejects the configuration. Intervals must be whole seconds,\nbecause `RLCHECK` cannot represent fractional windows.",
           "type": "string"
         }
       ]
@@ -62,6 +156,22 @@
               ],
               "default": 100000,
               "description": "Ceiling on tracked keys. Keys come from requests, so this is what stops\na flood of distinct callers growing the process without bound.\n\nOnly meaningful for `counter: exact`; the sketch has fixed memory."
+            },
+            "mode": {
+              "allOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/LimitMode"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Only meaningful with `counter: shared`."
             },
             "requests": {
               "anyOf": [
@@ -268,6 +378,33 @@
               ],
               "default": null,
               "description": "Set `false` to exempt this route from `auth.client_keys`, for a caller\nthat cannot send a key — a payment provider's webhook, say. Unset, the\nroute follows `auth.client_keys`. Without `auth.client_keys` any value\nis refused rather than left to read as a control that does nothing."
+            },
+            "concurrency": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ConcurrencyConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Requests allowed upstream at once. Not inherited from `defaults`: a cap\nsized for one upstream means nothing for another."
             },
             "enabled": {
               "anyOf": [

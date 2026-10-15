@@ -80,6 +80,35 @@ impl Rejection {
         )
     }
 
+    /// Too many requests to this route are already in flight.
+    ///
+    /// A route-wide cap is the gateway shedding load, so it is a 503. A cap
+    /// per caller is the caller's own doing, so it is a 429, the same answer
+    /// as a rate limit. Slots free as soon as a response finishes, so the
+    /// retry hint is short.
+    pub fn concurrency_limited(per_caller: bool, retry_after_secs: u64) -> Self {
+        let (status, message, error) = if per_caller {
+            (429, "Too many concurrent requests", "Too Many Requests")
+        } else {
+            (
+                503,
+                "The upstream service is at capacity.",
+                "Service Unavailable",
+            )
+        };
+        Self::new(
+            status,
+            json!({
+                "statusCode": status,
+                "message": message,
+                "error": error,
+                "retryAfter": retry_after_secs,
+            }),
+            "gateway.concurrency_limited",
+            "concurrency_limited",
+        )
+    }
+
     pub fn missing_bearer() -> Self {
         Self::new(
             401,
@@ -186,6 +215,18 @@ impl Rejection {
 #[cfg(test)]
 mod tests {
     use super::Rejection;
+
+    #[test]
+    fn a_route_at_capacity_is_a_503_and_a_caller_at_theirs_a_429() {
+        let route = Rejection::concurrency_limited(false, 1);
+        let caller = Rejection::concurrency_limited(true, 1);
+        assert_eq!(route.status, 503);
+        assert_eq!(caller.status, 429);
+        for rej in [route, caller] {
+            assert_eq!(rej.body["statusCode"], rej.status);
+            assert_eq!(rej.reason, "concurrency_limited");
+        }
+    }
 
     /// Lagos verifies tokens from any configured issuer, so what it tells a
     /// client must not assume one identity provider.

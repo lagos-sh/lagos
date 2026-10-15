@@ -124,7 +124,12 @@ reviewer knows what is already covered.
 - Optional per-address connection rate limit at accept time, before a connection
   costs a task or a handshake
 - Optional TCP keepalive, so a vanished peer releases its socket
-- Rate-limit key store bounded and TTL'd; fetched key sets capped
+- Rate-limit key store bounded and TTL'd, locally and for shared counters;
+  fetched key sets capped, and one reconciliation is capped at
+  `max_keys_per_sync` so a wide keyspace cannot outgrow its own interval
+- Shared-counter URLs redacted in logs, `Debug` output and startup errors; the
+  keys those commands carry are addresses and subjects, so backend errors are
+  reported by category rather than echoed
 - `unsafe_code = "forbid"` workspace-wide; clippy warns on `unwrap`, `panic` and
   indexing, and CI runs it as `-D warnings`
 
@@ -160,6 +165,22 @@ news.
   Lagos does not inspect `Origin` or require a CSRF token; that protection is
   the cookie's `SameSite` attribute or the application's. Off unless
   `auth.token_cookies` is set.
+- **Rate limiting is per process unless `counter: shared` is configured.** With
+  the local counters a limit of 100/min across three replicas admits up to
+  300/min. Sharing counters closes that, with two caveats of its own: in the
+  default `approximate` mode a decision uses the last reconciled cluster total,
+  so a burst can overshoot by roughly
+  `replicas x arrival rate x reconciliation period`. Capped batches rotate;
+  backend latency and retries extend that period. If the cache is unreachable,
+  limits fall back to per-process counting so that traffic continues. Both are deliberate,
+  and `gateway_shared_limit_errors_total` reports the second. `mode: exact`
+  removes the first and rejects startup or route reloads without a backend
+  that supports it.
+- **A shared counter store is trusted.** Lagos reads cluster totals from it and
+  enforces limits on them, so write access to those keys is the ability to
+  refuse traffic or to unlimit it. Do not point `shared_counters` at a cache
+  that untrusted code can write, give it credentials of its own, and set
+  `prefix` so the keyspace is identifiable.
 - **No stale-while-error on JWKS.** If an identity provider is unreachable when
   the key cache expires, verification fails closed and authenticated traffic
   stops, even though the cached keys were almost certainly still valid.

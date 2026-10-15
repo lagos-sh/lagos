@@ -214,14 +214,15 @@ fn project(
             crate::config::RetryOn::ConnectionFailure => "connection_failure",
             crate::config::RetryOn::TransportError => "transport_error",
         }).collect::<Vec<_>>()}));
-        let rate = route.rate_limit.as_ref().map(|rate| json!({"requests": rate.requests, "interval": format!("{:?}", rate.interval), "key": match rate.key { crate::config::RateLimitKey::Ip => "ip", crate::config::RateLimitKey::Identity => "identity", crate::config::RateLimitKey::Route => "route", crate::config::RateLimitKey::Header(_) => REDACTED }, "counter": match rate.counter { crate::config::Counter::Exact => "exact", crate::config::Counter::Sketch => "sketch" }, "trusted_proxies": rate.trusted_proxies, "max_keys": rate.max_keys}));
+        let rate = route.rate_limit.as_ref().map(|rate| json!({"requests": rate.requests, "interval": format!("{:?}", rate.interval), "key": match rate.key { crate::config::RateLimitKey::Ip => "ip", crate::config::RateLimitKey::Identity => "identity", crate::config::RateLimitKey::Route => "route", crate::config::RateLimitKey::Header(_) => REDACTED }, "counter": match rate.counter { crate::config::Counter::Exact => "exact", crate::config::Counter::Sketch => "sketch", crate::config::Counter::Shared => "shared" }, "mode": match rate.mode { crate::config::LimitMode::Approximate => "approximate", crate::config::LimitMode::Exact => "exact" }, "trusted_proxies": rate.trusted_proxies, "max_keys": rate.max_keys}));
+        let concurrency = route.concurrency.as_ref().map(|cap| json!({"max": cap.max, "key": match cap.key() { crate::config::RateLimitKey::Ip => "ip", crate::config::RateLimitKey::Identity => "identity", crate::config::RateLimitKey::Route => "route", crate::config::RateLimitKey::Header(_) => REDACTED }, "trusted_proxies": cap.trusted_proxies}));
         json!({
             "reference": format!("route-{}", index + 1), "listener": if route.auth.is_machine() { "internal" } else { "public" },
             "group": group, "id": rs.hidden(&path), "prefix": rs.hidden(&path), "host": rs.hidden(&path),
             "upstream": rs.safe(&path, json!(upstream_ids.get(&route.upstream))),
             "methods": policy(s, rs, &path, "methods", route.policy_origins.methods, json!(methods)), "enabled": rs.safe(&path, json!(route.enabled)),
             "sse": rs.safe(&path, json!(route.sse)), "strip_prefix": rs.safe(&path, json!(route.strip_prefix)), "client_key": rs.safe(&path, json!(route.client_key)), "cache": rs.safe(&path, json!(route.cache)),
-            "retry": policy(s, rs, &path, "retry", route.policy_origins.retry, json!(retry)), "rate_limit": policy(s, rs, &path, "rate_limit", route.policy_origins.rate_limit, json!(rate)),
+            "retry": policy(s, rs, &path, "retry", route.policy_origins.retry, json!(retry)), "rate_limit": policy(s, rs, &path, "rate_limit", route.policy_origins.rate_limit, json!(rate)), "concurrency": rs.safe(&path, json!(concurrency)),
             "bind": rs.hidden(&path), "extensions": {"value": REDACTED, "status": "unchecked", "origin": format!("{}.{}", rs.label, path)}
         })
     }).collect();
