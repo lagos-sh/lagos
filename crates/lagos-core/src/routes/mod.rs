@@ -549,44 +549,76 @@ pub(crate) fn under_prefix(path: &str, prefix: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// [`under_prefix`], comparing ASCII letters case-insensitively.
+/// [`under_prefix`], ignoring case the way case-insensitive upstreams do.
 ///
-/// Byte-wise and allocation-free like its sibling. `get` rather than slicing:
-/// `prefix.len()` can fall inside a multi-byte character of `path`, and an
-/// index there would panic on a request path. Non-ASCII bytes compare exactly,
-/// which is also what a JavaScript case-insensitive regex without the `u` flag
-/// does for characters outside ASCII.
-pub(crate) fn under_prefix_ignore_ascii_case(path: &str, prefix: &str) -> bool {
-    let (Some(head), Some(rest)) = (path.get(..prefix.len()), path.get(prefix.len()..)) else {
-        return false;
-    };
-    head.eq_ignore_ascii_case(prefix) && (rest.is_empty() || rest.starts_with('/'))
+/// ASCII letters fold to lower case. So do four non-ASCII letters that some
+/// frameworks treat as ASCII ones when they ignore case: Java's
+/// `equalsIgnoreCase`, which Spring uses for case-insensitive matching, equates
+/// `ı` (U+0131) and `İ` (U+0130) with `i`, `ſ` (U+017F) with `s`, and the Kelvin
+/// sign (U+212A) with `k`, and .NET's ordinal comparison folds some of the same.
+/// Without them, `products/ınternal` would pass a `products/internal` entry and
+/// reach the internal handler on such an upstream. Every other non-ASCII
+/// character compares exactly. Folding more than an upstream does can only
+/// refuse more, which is the safe direction for a deny-list.
+///
+/// Walks characters rather than slicing by byte length, so a multi-byte
+/// character can never be split and no request path can panic it.
+pub(crate) fn under_prefix_ignore_case(path: &str, prefix: &str) -> bool {
+    let mut rest = path.chars();
+    for p in prefix.chars() {
+        match rest.next() {
+            Some(c) if fold_case(c) == fold_case(p) => {}
+            _ => return false,
+        }
+    }
+    let rest = rest.as_str();
+    rest.is_empty() || rest.starts_with('/')
+}
+
+/// See [`under_prefix_ignore_case`].
+fn fold_case(c: char) -> char {
+    match c {
+        '\u{130}' | '\u{131}' => 'i',
+        '\u{17f}' => 's',
+        '\u{212a}' => 'k',
+        c => c.to_ascii_lowercase(),
+    }
 }
 
 #[cfg(test)]
 mod prefix_tests {
-    use super::{under_prefix, under_prefix_ignore_ascii_case};
+    use super::{under_prefix, under_prefix_ignore_case};
 
     #[test]
     fn case_folding_keeps_the_segment_boundary() {
-        assert!(under_prefix_ignore_ascii_case("Users/4", "users"));
-        assert!(under_prefix_ignore_ascii_case("USERS", "users"));
-        assert!(!under_prefix_ignore_ascii_case("Users-admin", "users"));
-        assert!(!under_prefix_ignore_ascii_case("use", "users"));
-        assert!(!under_prefix_ignore_ascii_case("", "users"));
+        assert!(under_prefix_ignore_case("Users/4", "users"));
+        assert!(under_prefix_ignore_case("USERS", "users"));
+        assert!(!under_prefix_ignore_case("Users-admin", "users"));
+        assert!(!under_prefix_ignore_case("use", "users"));
+        assert!(!under_prefix_ignore_case("", "users"));
     }
 
     #[test]
     fn case_folding_never_panics_inside_a_multibyte_character() {
         // "é" is two bytes, so a 2-byte prefix ends in the middle of it.
-        assert!(!under_prefix_ignore_ascii_case("é/x", "ab"));
-        assert!(!under_prefix_ignore_ascii_case("aé", "ab"));
-        // Non-ASCII is compared exactly, not folded.
-        assert!(!under_prefix_ignore_ascii_case(
-            "\u{130}nternal",
-            "internal"
-        ));
-        assert!(under_prefix_ignore_ascii_case("Café/menu", "café"));
+        assert!(!under_prefix_ignore_case("é/x", "ab"));
+        assert!(!under_prefix_ignore_case("aé", "ab"));
+        // Other non-ASCII compares exactly, not folded.
+        assert!(under_prefix_ignore_case("Café/menu", "café"));
+        assert!(!under_prefix_ignore_case("CAFÉ/menu", "café"));
+    }
+
+    #[test]
+    fn letters_upstreams_fold_to_ascii_are_folded_too() {
+        // What Java's equalsIgnoreCase treats as `internal` and `sync`.
+        for path in ["\u{131}nternal", "\u{130}nternal", "INTERNAL"] {
+            assert!(under_prefix_ignore_case(path, "internal"), "{path}");
+        }
+        assert!(under_prefix_ignore_case("\u{17f}ync/x", "sync"));
+        assert!(under_prefix_ignore_case("\u{212a}eys", "keys"));
+        // Still on a segment boundary, and still nothing else.
+        assert!(!under_prefix_ignore_case("\u{131}nternals", "internal"));
+        assert!(!under_prefix_ignore_case("\u{ec}nternal", "internal"));
     }
 
     #[test]
@@ -764,7 +796,8 @@ impl RouteTable {
     /// True if the path is inside a deny-listed prefix. Checked before matching
     /// so a broad allowlist entry can never expose an internal sub-tree.
     ///
-    /// ASCII case-insensitive, unlike route matching. Many upstream frameworks
+    /// Case-insensitive, unlike route matching; see [`under_prefix_ignore_case`]
+    /// for exactly which letters fold. Many upstream frameworks
     /// route case-insensitively by default (Express, ASP.NET, Spring with
     /// some configurations), so with a byte-for-byte comparison
     /// `legacy/Internal/users` would miss a `legacy/internal` entry, match a
@@ -776,7 +809,7 @@ impl RouteTable {
         let p = normalize_proxy_path(path);
         self.deny_prefixes
             .iter()
-            .any(|d| under_prefix_ignore_ascii_case(p, d))
+            .any(|d| under_prefix_ignore_case(p, d))
     }
 
     pub fn match_route(&self, path: &str, method: &str) -> Option<&RouteConfig> {
@@ -988,6 +1021,8 @@ authenticated:
         assert!(t.is_denied("PRODUCTS/INTERNAL"));
         assert!(t.is_denied("Loyalty/Wallets/42"));
         assert!(!t.is_denied("loyalty/WalletSomething"));
+        // `%C4%B1` decodes to a dotless ı, which Java folds to `i`.
+        assert!(t.is_denied("products/\u{131}nternal/sync"));
         // Route matching itself stays exact.
         assert!(t.match_route("Products/1", "GET").is_none());
     }
