@@ -577,6 +577,43 @@ time, authentication time, and subject. Token revocation is not checked.
 
 Firebase and generic JWT providers can be configured together.
 
+### Tokens in cookies
+
+A browser app whose API keeps the session token in an httpOnly cookie cannot
+put it in a header: script is not allowed to read the cookie, which is the
+point of it. Name the cookie and Lagos reads the token from there as well:
+
+```yaml
+auth:
+  jwt:
+    - issuer: https://auth.example.com
+      audience: [my-api]
+  token_cookies: [access_token]
+```
+
+- `Authorization: Bearer` is always read first. The cookie is used only when a
+  request has no bearer header, so a client that sends one gets exactly the
+  header's result.
+- Cookies are tried in the listed order; names are exact and case-sensitive.
+  An empty value is no token.
+- A token from a cookie is verified like any other: an invalid or expired one
+  is a `401` on every tier that reads tokens, `optional` included.
+- A request carrying a token cookie counts as authorized for the response
+  cache, exactly as one with an `Authorization` header does.
+- With `forward.authorization: false`, the token cookie is removed from
+  `Cookie` before proxying and the other cookies pass unchanged. `Cookie` is
+  only forwarded at all when `forward.headers` lists it.
+- The access log's `credential` field records where the token came from:
+  `header`, `cookie`, or `-`.
+
+A browser attaches cookies to requests on its own, so a cookie token is an
+ambient credential that a cross-site page can make the browser send. Lagos
+performs no CSRF check: set the cookie `SameSite=Lax` or `Strict`, or keep the
+application's own CSRF protection. See [SECURITY.md](SECURITY.md).
+
+Startup refuses `token_cookies` without any `jwt` or `firebase` verifier,
+names that are not valid cookie names, and a name listed twice.
+
 ### Identity headers and signed tokens
 
 After verification, Lagos describes the caller to the upstream:
@@ -1020,6 +1057,12 @@ instead of the caller.
 `rate_limit.trusted_proxies` uses the same rule, and the two should agree —
 throttling one address while telling the upstream about another makes a per-IP
 control unenforceable. `lagos validate` prints which policy is in effect.
+
+The `gateway.access` and `gateway.upstream.error` log lines carry the same
+address as `client_ip` (`-` when there is none), so a caller refused with `401`,
+`404` or `429` can be traced to its address. It follows
+`forward.trusted_proxies`; a route whose `rate_limit.trusted_proxies` differs
+counts a different address than the log names.
 
 ### Connection-level limits
 

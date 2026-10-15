@@ -52,6 +52,8 @@ auth:
   machine:
     headers: [x-internal-api-key, x-api-key]
     secret: ${INTERNAL_API_KEY}
+  # A browser app whose session token is an httpOnly cookie.
+  token_cookies: [access_token]
 
 inject:
   headers:
@@ -70,7 +72,8 @@ reject:
 
 forward:
   mode: allowlist
-  headers: [user-agent, traceparent, tracestate]
+  # `cookie` so the token cookie can be shown stripped while the rest passes.
+  headers: [user-agent, traceparent, tracestate, cookie]
   authorization: false
   trusted_proxies: 1
   trusted_proxy_ips: [127.0.0.1/32]

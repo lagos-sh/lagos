@@ -555,6 +555,12 @@ fn validate(
     if issuers > 0 {
         println!("✓ issuers     {issuers}");
     }
+    if !cfg.raw.auth.token_cookies.is_empty() {
+        println!(
+            "✓ token from  Authorization header, then cookie {}",
+            cfg.raw.auth.token_cookies.join(", ")
+        );
+    }
     if let Some(c) = &cfg.raw.cache {
         let cached = table.routes().iter().filter(|r| r.cache).count();
         println!(
@@ -873,6 +879,18 @@ fn explain(
         crate::routes::AuthTier::Machine => {
             println!("  shared credential on the internal listener only")
         }
+    }
+    if route.auth.verifies() && !cfg.raw.auth.token_cookies.is_empty() {
+        println!(
+            "  the token is read from `Authorization: Bearer`, else cookie {}",
+            cfg.raw
+                .auth
+                .token_cookies
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", then ")
+        );
     }
     println!();
 
