@@ -989,11 +989,25 @@ a rate limit, never take one. Over the cap, the request is refused at once with
 
 Keys follow the [rate limiting](#rate-limiting) rules, including
 `trusted_proxies` for `ip`. Counts are local to each process, like `exact` and
-`sketch` rate limits, so a cap of 20 across three replicas admits up to 60. They
-are held in a fixed-memory sketch whatever the number of keys, which can
-over-count on a collision but never admits more than the cap. A route reload does
-not reset them. Refusals are counted as
+`sketch` rate limits, so a cap of 20 across three replicas admits up to 60. A
+route reload does not reset them. Refusals are counted as
 `gateway_rejections_total{reason="concurrency_limited"}`.
+
+A route-wide cap is counted exactly. Per-caller caps share one fixed-memory
+sketch, so memory does not grow with callers. It never admits more than the cap,
+but it can over-count a caller, and so refuse them below their cap, when their
+key collides with other callers' in-flight requests. The chance depends on how
+many distinct callers have requests in flight at the same moment, across all
+capped routes:
+
+| Distinct callers in flight | Chance a caller is over-counted |
+|---|---|
+| 1,000 | 0.02% |
+| 2,000 | 0.2% |
+| 4,000 | 2% |
+
+Above a couple of thousand, prefer a route-wide cap, or a per-caller `max` with
+headroom, since an over-count of one matters most at `max: 1`.
 
 ### Response cache
 
