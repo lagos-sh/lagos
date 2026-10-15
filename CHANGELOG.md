@@ -14,6 +14,11 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   (`products/internals` is not denied). Non-ASCII characters are compared
   exactly. A deny-list that over-matches can only refuse more, so there is no
   opt-out and no config change; the refusal is the usual `404`.
+- **Performance.** The response cache's eviction manager is now
+  `pingora-cache`'s sharded LRU (16 shards) instead of `simple_lru`, which
+  takes one global lock on every cache fill and every hit. Eviction stays
+  LRU by bytes against `cache.max_size`, so there is no config change. For
+  code built on `lagos-core`, `Cache::eviction` is now a `cache::LruManager`.
 
 ## 0.1.7 — client address in the access log
 

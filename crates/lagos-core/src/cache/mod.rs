@@ -11,10 +11,21 @@ pub use storage::MemoryStorage;
 use std::time::Duration;
 
 use pingora::cache::CacheMetaDefaults;
-use pingora::cache::eviction::simple_lru::Manager as LruManager;
+use pingora::cache::eviction::lru::Manager;
 use pingora::cache::lock::{CacheKeyLockImpl, CacheLock};
 
 use crate::config::CacheConfig;
+
+/// Independent LRUs the eviction manager splits keys across, so concurrent
+/// fills and hits on different keys do not contend on one lock.
+const EVICTION_SHARDS: usize = 16;
+
+/// Entries preallocated per shard. Only an allocation hint: shards grow past it.
+const SHARD_CAPACITY_HINT: usize = 128;
+
+/// `pingora-cache`'s sharded LRU. `simple_lru` puts every admission and every
+/// hit behind one global lock, which its own documentation calls unoptimized.
+pub type LruManager = Manager<EVICTION_SHARDS>;
 
 /// Freshness for responses whose upstream said nothing about caching.
 ///
@@ -57,8 +68,9 @@ impl Cache {
         // separately bounded by bytes. Both are needed: the manager keeps the
         // accounting `pingora-cache` uses for admission, the storage is what
         // actually holds — and releases — memory.
-        let eviction = Box::leak(Box::new(LruManager::new(
+        let eviction = Box::leak(Box::new(LruManager::with_capacity(
             usize::try_from(cfg.max_size).unwrap_or(usize::MAX),
+            SHARD_CAPACITY_HINT,
         )));
 
         // Without this, every concurrent miss on the same key becomes its own
