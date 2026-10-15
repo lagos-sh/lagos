@@ -14,6 +14,13 @@ yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained; pulled only by pingora-core" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained; pulled only by pingora-rustls" },
+    # Unlike the two above, this one is also ours: `serde_yaml_ng` parses the
+    # config with it. Replacing that would not remove it, because pingora-core
+    # pulls it through `serde_yaml`. Informational only: no vulnerability is
+    # known, and the input it parses is operator-written config, never request
+    # data. Drop this once pingora moves off `serde_yaml`, and move the config
+    # parser to a safe-Rust YAML crate (saphyr) at the same time.
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; pulled by pingora-core (serde_yaml) and serde_yaml_ng, which parses operator config only" },
 ]
 
 # Every licence in the tree today, and nothing wider. A dependency arriving
