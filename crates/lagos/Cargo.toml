@@ -12,6 +12,17 @@ repository.workspace = true
 lagos-core = { path = "../lagos-core" }
 anyhow.workspace = true
 
+[features]
+# On for the shipped binary, off in `lagos-core`. The binary is the product and
+# an operator should not have to rebuild it to share rate-limit counters;
+# nothing connects until `shared_counters` is configured, so carrying the client
+# costs a deployment that does not use it only binary size. `lagos-core` keeps it
+# optional for the other direction: a custom gateway built on the library and
+# opting out of default features should not inherit a RESP client it never asked
+# for.
+default = ["shared-limits"]
+shared-limits = ["lagos-core/shared-limits"]
+
 [lints]
 workspace = true
 

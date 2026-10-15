@@ -46,6 +46,8 @@ pub struct Metrics {
     backends: IntGaugeVec,
     circuit: IntGaugeVec,
     cache: IntCounterVec,
+    shared_limit_keys: prometheus::IntCounter,
+    shared_limit_errors: prometheus::IntCounter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -117,6 +119,22 @@ impl Metrics {
                 "Backends in each pool, by health state.",
                 &["upstream", "state"]
             )?,
+            // Unlabelled on purpose. The interesting breakdown would be per
+            // key, and rate-limit keys are addresses, subjects and header
+            // values -- request content, which is the one thing a label may
+            // never come from.
+            shared_limit_keys: prometheus::register_int_counter!(
+                "gateway_shared_limit_keys_synced_total",
+                "Rate-limit keys reconciled with the shared counter store. \
+                 Flat while traffic continues means sync has stopped."
+            )?,
+            shared_limit_errors: prometheus::register_int_counter!(
+                "gateway_shared_limit_errors_total",
+                "Shared rate-limit reconciliations or checks that failed. \
+                 Non-zero means limits have degraded to per-process counting, \
+                 so the cluster admits up to replicas x the configured limit; \
+                 traffic is unaffected."
+            )?,
         })
     }
 
@@ -156,6 +174,19 @@ impl Metrics {
         self.circuit
             .with_label_values(&[route_label(upstream)])
             .set(state);
+    }
+
+    /// Keys reconciled by one sync tick.
+    pub fn shared_limit_synced(&self, keys: u64) {
+        self.shared_limit_keys.inc_by(keys);
+    }
+
+    /// A reconciliation or an exact check the backend could not answer.
+    ///
+    /// This is the one to alert on: the gateway keeps serving, so nothing else
+    /// reports that a cluster-wide limit is no longer cluster-wide.
+    pub fn shared_limit_error(&self) {
+        self.shared_limit_errors.inc();
     }
 
     pub fn record_span_dropped(&self) {

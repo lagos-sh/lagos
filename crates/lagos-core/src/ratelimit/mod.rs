@@ -1,11 +1,23 @@
-//! Local rate limiting.
+//! Rate limiting.
 //!
-//! Counters live in this process. That is a deliberate default, not a
-//! shortcut: it needs no Redis, no clock sync and no network hop on the
+//! Counters live in this process by default. That is a deliberate default, not
+//! a shortcut: it needs no cache, no clock sync and no network hop on the
 //! request path. The cost is that a limit of 100/min across three gateway
 //! instances admits up to 300/min, which for protecting an upstream from
-//! runaway clients is usually the right trade. A shared backend can be added
-//! behind the same [`Limiter`] interface when a deployment needs exactness.
+//! runaway clients is usually the right trade.
+//!
+//! When it is not, `counter: shared` puts the counters in a cache every replica
+//! can see, and the limit means what it says cluster-wide. Two shapes, because
+//! they trade different things -- see [`crate::config::LimitMode`]:
+//!
+//! - `approximate` keeps deciding locally and reconciles in the background, so
+//!   no request ever waits on the cache. [`shared`] holds that bookkeeping.
+//! - `exact` asks the cache per request and believes the answer.
+//!
+//! Both sit behind [`Limiter`], so the proxy calls one thing whichever is
+//! configured, and the accept-time connection limiter in [`crate::accept`] goes
+//! on counting locally regardless -- it runs before a task exists and has
+//! nowhere to await anything.
 //!
 //! # Algorithm
 //!
@@ -21,10 +33,68 @@
 //! TTL of two windows; under key-space flooding the oldest are evicted, which
 //! degrades limiting for those keys rather than the process.
 
+pub mod shared;
+
+// The RESP client. Behind the feature gate so the default binary carries
+// neither the dependency nor a connection; `counter: shared` without it is
+// refused at boot by config validation, naming the feature.
+#[cfg(feature = "shared-limits")]
+pub mod resp;
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::config::{Counter, RateLimitConfig, RateLimitKey};
+use crate::config::{Counter, LimitMode, RateLimitConfig, RateLimitKey};
+
+pub use shared::{SharedCounterFactory, SharedCounters};
+
+/// The sliding-window estimate, and the decision that follows from it.
+///
+/// **The only place the quota arithmetic lives.** Two window alignments feed it
+/// -- per-key monotonic for a limiter counting inside one process, epoch-aligned
+/// for one whose counts are added to other replicas' -- and a limit has to mean
+/// the same thing on either. Two copies of this formula is exactly how a
+/// gateway ends up enforcing one quota locally and a different one across the
+/// cluster, so there is one copy and both callers use it.
+///
+/// `previous` and `current` are the counts *before* this request. The caller
+/// increments its own counter when the answer is `allowed`; this function
+/// mutates nothing, which is what lets the shared path compute a decision from
+/// numbers it does not own.
+fn decide(previous: u64, current: u64, progress: f64, limit: u64, interval: Duration) -> Decision {
+    let interval_secs = interval.as_secs_f64().max(f64::MIN_POSITIVE);
+    let progress = progress.clamp(0.0, 1.0);
+
+    // The previous window weighted by how much of it is still in view. Unlike a
+    // fixed window this cannot be gamed by sending a full quota either side of
+    // a boundary.
+    let estimated = (previous as f64) * (1.0 - progress) + (current as f64);
+
+    if estimated >= limit as f64 {
+        // Enough of the previous window has to age out for one slot to free up;
+        // at minimum wait for the rest of this one.
+        let remaining_window = interval_secs * (1.0 - progress);
+        return Decision {
+            allowed: false,
+            limit,
+            remaining: 0,
+            retry_after: Duration::from_secs_f64(remaining_window.max(1.0).ceil()),
+        };
+    }
+
+    // `estimated < limit` on this branch and the result is clamped at 0, so the
+    // value is in `[0, limit)` -- within `u64` and non-negative by
+    // construction. The cast cannot truncate or lose a sign.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let remaining = (limit as f64 - estimated - 1.0).max(0.0) as u64;
+
+    Decision {
+        allowed: true,
+        limit,
+        remaining,
+        retry_after: Duration::ZERO,
+    }
+}
 
 /// One key's view of the current and previous window.
 #[derive(Debug)]
@@ -44,6 +114,10 @@ impl Window {
     }
 
     /// Roll the window forward to `now`, then decide.
+    ///
+    /// Anchored per key: the window starts when this key was first seen, which
+    /// is the better behaviour for counting inside one process and the reason
+    /// the shared path does not reuse it. See [`shared`].
     fn check(&mut self, now: Instant, limit: u64, interval: Duration) -> Decision {
         let interval_secs = interval.as_secs_f64().max(f64::MIN_POSITIVE);
         let mut elapsed = now.saturating_duration_since(self.start);
@@ -61,34 +135,11 @@ impl Window {
 
         // How far into the current window we are, 0.0..1.0.
         let progress = (elapsed.as_secs_f64() / interval_secs).clamp(0.0, 1.0);
-        let estimated = (self.previous as f64) * (1.0 - progress) + (self.current as f64);
-
-        if estimated >= limit as f64 {
-            // Enough of the previous window has to age out for one slot to free
-            // up; at minimum wait for the rest of this window.
-            let remaining_window = interval_secs * (1.0 - progress);
-            return Decision {
-                allowed: false,
-                limit,
-                remaining: 0,
-                retry_after: Duration::from_secs_f64(remaining_window.max(1.0).ceil()),
-            };
+        let decision = decide(self.previous, self.current, progress, limit, interval);
+        if decision.allowed {
+            self.current = self.current.saturating_add(1);
         }
-
-        self.current = self.current.saturating_add(1);
-
-        // `estimated < limit` on this branch, and the result is clamped at 0,
-        // so the value is in `[0, limit)` — within `u64` and non-negative by
-        // construction. The cast cannot truncate or lose a sign.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let remaining = (limit as f64 - estimated - 1.0).max(0.0) as u64;
-
-        Decision {
-            allowed: true,
-            limit,
-            remaining,
-            retry_after: Duration::ZERO,
-        }
+        decision
     }
 }
 
@@ -101,6 +152,30 @@ pub struct Decision {
     pub retry_after: Duration,
 }
 
+impl Decision {
+    /// An admitted request.
+    pub fn allow(limit: u64, remaining: u64) -> Self {
+        Self {
+            allowed: true,
+            limit,
+            remaining,
+            retry_after: Duration::ZERO,
+        }
+    }
+
+    /// A refused request. `retry_after` is floored at a second, because a
+    /// `Retry-After: 0` reads as "try again immediately" and is how a client
+    /// turns a limit into a hot loop.
+    pub fn refuse(limit: u64, retry_after: Duration) -> Self {
+        Self {
+            allowed: false,
+            limit,
+            remaining: 0,
+            retry_after: retry_after.max(Duration::from_secs(1)),
+        }
+    }
+}
+
 /// Where the counts live.
 enum Counters {
     /// One window per key, exact.
@@ -108,6 +183,10 @@ enum Counters {
     /// A shared count-min sketch. Fixed memory, lock-free, over-counts on
     /// collision.
     Sketch(pingora_limits::rate::Rate),
+    /// Counters every replica can see. Still a local window per key -- the
+    /// cluster's contribution is folded into it out of band, or asked for
+    /// outright, per [`LimitMode`].
+    Shared(Arc<SharedCounters>),
 }
 
 /// A rate limiter over one of two counting backends.
@@ -115,6 +194,7 @@ pub struct Limiter {
     counters: Counters,
     limit: u64,
     interval: Duration,
+    mode: LimitMode,
 }
 
 impl std::fmt::Debug for Limiter {
@@ -129,7 +209,19 @@ impl std::fmt::Debug for Limiter {
 }
 
 impl Limiter {
+    /// A limiter counting in this process only.
+    ///
+    /// `counter: shared` reaching here means no backend was configured, which
+    /// config validation refuses at boot -- so this is belt and braces. It
+    /// degrades to exact local counting and says so, because a limit that
+    /// counts less than it should is better than a route that refuses
+    /// everything.
     pub fn new(cfg: &RateLimitConfig) -> Self {
+        if cfg.counter == Counter::Shared {
+            tracing::warn!(
+                "`counter: shared` with no `shared_counters` backend; counting per process"
+            );
+        }
         let counters = match cfg.counter {
             Counter::Exact => Counters::Exact(
                 moka::sync::Cache::builder()
@@ -140,24 +232,87 @@ impl Limiter {
                     .time_to_idle(cfg.interval.saturating_mul(2))
                     .build(),
             ),
-            Counter::Sketch => Counters::Sketch(pingora_limits::rate::Rate::new(cfg.interval)),
+            Counter::Sketch | Counter::Shared => {
+                Counters::Sketch(pingora_limits::rate::Rate::new(cfg.interval))
+            }
         };
         Self {
             counters,
             limit: cfg.requests,
             interval: cfg.interval,
+            mode: LimitMode::Approximate,
         }
     }
 
-    /// Count one request against `key`.
+    /// A limiter whose counters are shared with every other replica.
+    pub fn shared(cfg: &RateLimitConfig, factory: &SharedCounterFactory) -> Self {
+        Self {
+            counters: Counters::Shared(factory.build(cfg)),
+            limit: cfg.requests,
+            interval: cfg.interval,
+            mode: cfg.mode,
+        }
+    }
+
+    /// The cluster state this limiter needs reconciled in the background.
+    ///
+    /// The background sync task finds its work through here rather than holding
+    /// its own list, so a route reload that replaces a limiter is picked up
+    /// without the task knowing reloads exist.
+    ///
+    /// `None` in [`LimitMode::Exact`], which asks the cache per request and so
+    /// has nothing to publish — reconciling it would be a round trip per key
+    /// per tick for numbers nothing reads. The cost of that choice is that an
+    /// `exact` limiter falling back to a local decision falls back to a purely
+    /// local one.
+    pub fn reconciled_counters(&self) -> Option<&Arc<SharedCounters>> {
+        match (&self.counters, self.mode) {
+            (Counters::Shared(c), LimitMode::Approximate) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Count one request against `key`, without I/O.
+    ///
+    /// Every backend can answer this way, including `shared` in its default
+    /// mode -- which is the point of that mode. [`Self::decide`] is what the
+    /// proxy calls; this is what the accept-time limiter calls, and what any
+    /// mode falls back to when the cache cannot answer.
     pub fn check(&self, key: &str) -> Decision {
         self.check_at(key, Instant::now())
     }
 
+    /// Count one request against `key`, consulting the cache if configured to.
+    ///
+    /// Awaits only in [`LimitMode::Exact`]; every other configuration resolves
+    /// without yielding, so a route that does not opt into a round trip does
+    /// not pay for one.
+    pub async fn decide(&self, key: &str) -> Decision {
+        if let (LimitMode::Exact, Counters::Shared(counters)) = (self.mode, &self.counters)
+            && let Some(decision) = counters.check_exact(key).await
+        {
+            return decision;
+        }
+        // Either no round trip was asked for, or the cache could not answer.
+        // Falling back to the local window rather than refusing is the
+        // roadmap's rule that traffic continues when the shared store does not;
+        // it is recorded as an error on the metric, not as a 429 for a caller
+        // who did nothing wrong.
+        self.check(key)
+    }
+
+    /// `now` is the monotonic reading the local window uses.
+    ///
+    /// The shared backend ignores it and reads the wall clock instead: its
+    /// windows have to be epoch-aligned for other replicas' counts to be
+    /// addable, and an `Instant` carries no epoch. So the injected clock this
+    /// seam exists for steers the local backends only — [`shared`] takes its own
+    /// `SystemTime` for the same purpose in its own tests.
     fn check_at(&self, key: &str, now: Instant) -> Decision {
         match &self.counters {
             Counters::Exact(windows) => self.check_exact(windows, key, now),
             Counters::Sketch(rate) => self.check_sketch(rate, key),
+            Counters::Shared(counters) => counters.check_at(key, std::time::SystemTime::now()),
         }
     }
 
@@ -177,14 +332,9 @@ impl Limiter {
         });
 
         if weighted >= self.limit as f64 {
-            return Decision {
-                allowed: false,
-                limit: self.limit,
-                remaining: 0,
-                // The sketch does not expose how far into the window it is, so
-                // the whole interval is the honest answer.
-                retry_after: Duration::from_secs(self.interval.as_secs().max(1)),
-            };
+            // The sketch does not expose how far into the window it is, so
+            // the whole interval is the honest answer.
+            return Decision::refuse(self.limit, self.interval);
         }
 
         // Only successful requests are counted, matching the exact backend: a
@@ -230,6 +380,7 @@ impl Limiter {
                 Some(windows.entry_count())
             }
             Counters::Sketch(_) => None,
+            Counters::Shared(counters) => Some(counters.tracked()),
         }
     }
 }
@@ -279,6 +430,7 @@ mod tests {
             trusted_proxies: 0,
             max_keys: 1000,
             counter: Counter::Exact,
+            mode: LimitMode::Approximate,
         }
     }
 
@@ -444,6 +596,111 @@ mod tests {
             .filter(|i| !l.check(&format!("caller-{i}")).allowed)
             .count();
         assert_eq!(refused, 0);
+    }
+
+    // --- the shared backend --------------------------------------------
+
+    fn shared_cfg(counter: Counter, mode: LimitMode) -> RateLimitConfig {
+        RateLimitConfig {
+            counter,
+            mode,
+            ..cfg(10, Duration::from_secs(60))
+        }
+    }
+
+    #[test]
+    fn a_shared_limiter_without_a_backend_still_limits() {
+        // Config validation refuses this at boot, so reaching here is a bug --
+        // but the fallback must be a working per-process limit rather than a
+        // route that refuses everything or limits nothing.
+        let l = Limiter::new(&shared_cfg(Counter::Shared, LimitMode::Approximate));
+        let granted = (0..20).filter(|_| l.check("k").allowed).count();
+        assert_eq!(granted, 10, "the limit must still hold, got {granted}");
+    }
+
+    #[tokio::test]
+    async fn an_approximate_limiter_is_reconciled_and_an_exact_one_is_not() {
+        // `exact` asks the cache per request, so publishing its counters would
+        // be a round trip per key per tick for numbers nothing reads.
+        let factory = test_factory();
+        let approximate = Limiter::shared(
+            &shared_cfg(Counter::Shared, LimitMode::Approximate),
+            &factory,
+        );
+        let exact = Limiter::shared(&shared_cfg(Counter::Shared, LimitMode::Exact), &factory);
+
+        assert!(approximate.reconciled_counters().is_some());
+        assert!(
+            exact.reconciled_counters().is_none(),
+            "an exact limiter has nothing to publish"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exact_limiter_answers_from_the_backend() {
+        let l = Limiter::shared(
+            &shared_cfg(Counter::Shared, LimitMode::Exact),
+            &test_factory(),
+        );
+        let d = l.decide("k").await;
+        assert!(d.allowed);
+        assert_eq!(
+            d.remaining, 7,
+            "the backend's answer should be passed through, not recomputed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_counter_never_awaits_the_cache() {
+        // `decide` is the proxy's entry point for every mode; a route that did
+        // not opt into a round trip must not pay for one.
+        let l = Limiter::new(&cfg(1, Duration::from_secs(60)));
+        assert!(l.decide("k").await.allowed);
+        assert!(!l.decide("k").await.allowed);
+    }
+
+    /// A factory over a backend that answers without a server.
+    fn test_factory() -> SharedCounterFactory {
+        #[derive(Debug)]
+        struct Stub;
+
+        #[async_trait::async_trait]
+        impl shared::Backend for Stub {
+            async fn reconcile(
+                &self,
+                batch: &[shared::Publish],
+            ) -> Result<Vec<shared::Totals>, shared::BackendError> {
+                Ok(vec![
+                    shared::Totals {
+                        current: 0,
+                        previous: 0
+                    };
+                    batch.len()
+                ])
+            }
+            async fn check_exact(
+                &self,
+                _key: &str,
+                limit: u64,
+                _interval: Duration,
+            ) -> Result<Decision, shared::BackendError> {
+                Ok(Decision::allow(limit, 7))
+            }
+            async fn probe(&self) -> Result<(String, bool), shared::BackendError> {
+                Ok(("a test double".into(), true))
+            }
+        }
+
+        SharedCounterFactory::new(
+            Arc::new(Stub),
+            crate::config::SharedCountersConfig {
+                url: "recached://localhost:6379".into(),
+                sync: Duration::from_secs(1),
+                prefix: "t:".into(),
+                timeout: Duration::from_millis(250),
+                max_keys_per_sync: 64,
+            },
+        )
     }
 
     // --- client address ------------------------------------------------

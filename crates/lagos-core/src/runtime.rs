@@ -64,14 +64,22 @@ impl Runtime {
         // Routes live either inline in the document or in a file of their own.
         // Only a file can be reloaded: the document itself also carries
         // listeners and credentials, which cannot change without a restart.
+        // Built before the routes, because routes that set `counter: shared`
+        // need it to build their limiters. Connecting is lazy, so this does no
+        // I/O and a cache that is down cannot stop the gateway from starting.
+        let shared_counters = shared_counter_factory(&cfg)?;
+
         let route_file = cfg.raw.routes.file.clone();
         let provider: Arc<dyn RouteProvider> = match &route_file {
             Some(path) => Arc::new(
-                FileRouteProvider::new(path.clone()).with_defaults(cfg.raw.defaults.clone()),
+                FileRouteProvider::new(path.clone())
+                    .with_defaults(cfg.raw.defaults.clone())
+                    .with_shared_counters(shared_counters.clone()),
             ),
             None => Arc::new(
                 InlineRouteProvider::new(cfg.raw.routes.groups())
-                    .with_defaults(cfg.raw.defaults.clone()),
+                    .with_defaults(cfg.raw.defaults.clone())
+                    .with_shared_counters(shared_counters.clone()),
             ),
         };
 
@@ -82,6 +90,14 @@ impl Runtime {
         let table = boot.block_on(provider.load())?;
 
         cfg.validate_table(&table)?;
+
+        // Whether the backend must be reachable depends on what the routes ask
+        // of it, which is only knowable now. `approximate` degrades gracefully
+        // and gets a warning; `exact` cannot work at all without `RLCHECK`, so
+        // it is verified here rather than discovered per request.
+        if let Some(factory) = &shared_counters {
+            boot.block_on(verify_shared_counters(factory, &table))?;
+        }
 
         let referenced: Vec<String> = table.extension_names().map(String::from).collect();
         let missing = self
@@ -250,17 +266,38 @@ impl Runtime {
                 RouteReloader {
                     provider,
                     config: cfg.clone(),
-                    public: routes,
+                    shared: shared_counters.clone(),
+                    public: routes.clone(),
                     machine: cfg
                         .raw
                         .server
                         .internal_listen
                         .as_ref()
-                        .map(|_| machine_routes),
+                        .map(|_| machine_routes.clone()),
                     interval: cfg.raw.routes.reload,
                     path,
                 },
             ));
+        }
+
+        if let Some(factory) = &shared_counters {
+            server.add_service(background_service(
+                "shared-limit-sync",
+                SharedLimitSync {
+                    public: routes.clone(),
+                    machine: cfg
+                        .raw
+                        .server
+                        .internal_listen
+                        .as_ref()
+                        .map(|_| machine_routes.clone()),
+                    interval: factory.sync_interval(),
+                },
+            ));
+            tracing::info!(
+                sync = ?factory.sync_interval(),
+                "shared rate-limit counters configured",
+            );
         }
 
         if let Some(t) = &cfg.raw.observability.tracing {
@@ -379,6 +416,7 @@ struct RouteReloader {
     /// Kept so a reload is validated against the same upstreams and listeners
     /// the running gateway was booted with.
     config: Arc<ResolvedConfig>,
+    shared: Option<crate::ratelimit::SharedCounterFactory>,
     public: SharedRoutes,
     machine: Option<SharedRoutes>,
     interval: Duration,
@@ -386,6 +424,16 @@ struct RouteReloader {
 }
 
 impl RouteReloader {
+    async fn publish(&self, table: crate::routes::RouteTable) -> anyhow::Result<usize> {
+        self.config.validate_table(&table)?;
+        if let Some(factory) = &self.shared {
+            verify_shared_counters(factory, &table).await?;
+        }
+        let total = table.len();
+        SharedRoutes::publish_reload(table, &self.public, self.machine.as_ref());
+        Ok(total)
+    }
+
     fn mtime(&self) -> Option<std::time::SystemTime> {
         std::fs::metadata(&self.path).ok()?.modified().ok()
     }
@@ -414,19 +462,20 @@ impl BackgroundService for RouteReloader {
                     // A table that names a missing upstream would answer 502 on
                     // every request it matched. Reject it and keep serving the
                     // one that works — the same fail-closed rule as at boot.
-                    if let Err(e) = self.config.validate_table(&table) {
-                        tracing::error!(
-                            event = "gateway.routes.reload_rejected",
-                            error = %e,
-                            "route reload rejected; keeping the previous table",
-                        );
-                        continue;
-                    }
+                    let total = match self.publish(table).await {
+                        Ok(total) => total,
+                        Err(e) => {
+                            tracing::error!(
+                                event = "gateway.routes.reload_rejected",
+                                error = %e,
+                                "route reload rejected; keeping the previous table",
+                            );
+                            continue;
+                        }
+                    };
                     // Only advance `last` on success, so a half-written file is
                     // retried on the next tick instead of being skipped.
                     last = current;
-                    let total = table.len();
-                    SharedRoutes::publish_reload(table, &self.public, self.machine.as_ref());
                     tracing::info!(
                         event = "gateway.routes.reloaded",
                         routes = total,
@@ -441,6 +490,150 @@ impl BackgroundService for RouteReloader {
             }
         }
     }
+}
+
+/// Publishes this replica's rate-limit usage and reads the cluster's back.
+///
+/// A background service rather than a task spawned from the request path: the
+/// entire premise of `mode: approximate` is that no request waits on the cache,
+/// and a reconciliation driven by request arrival would not be that.
+///
+/// It re-reads the route table every tick rather than holding its own list, so a
+/// route reload that replaces a limiter is picked up immediately and a limiter
+/// nothing points at any more stops being reconciled.
+struct SharedLimitSync {
+    public: SharedRoutes,
+    machine: Option<SharedRoutes>,
+    interval: Duration,
+}
+
+#[async_trait::async_trait]
+impl BackgroundService for SharedLimitSync {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        let mut ticker = tokio::time::interval(self.interval);
+        // `Delay` rather than `Skip`: a tick that overran should push the next
+        // one out, not fire immediately behind it. Bursting reconciliations at a
+        // cache that is already slow is how a slow cache becomes a dead one.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                _ = ticker.tick() => {}
+            }
+
+            let mut counters = self.public.shared_counters();
+            if let Some(machine) = &self.machine {
+                counters.extend(machine.shared_counters());
+            }
+
+            // One pipelined round trip per limiter, sequentially. Routes are
+            // configuration-bounded and each tick is one round trip per route,
+            // so this stays small; it is deliberately not a fan-out, which
+            // would multiply a cache hiccup by the route count.
+            for counters in counters {
+                counters.sync_once(std::time::SystemTime::now()).await;
+            }
+        }
+    }
+}
+
+/// Build the shared-counter backend, or `None` when nothing is configured.
+#[cfg(feature = "shared-limits")]
+fn shared_counter_factory(
+    cfg: &ResolvedConfig,
+) -> anyhow::Result<Option<crate::ratelimit::SharedCounterFactory>> {
+    let Some(shared) = &cfg.raw.shared_counters else {
+        return Ok(None);
+    };
+    let backend = crate::ratelimit::resp::RespBackend::connect(shared)
+        .map_err(|e| anyhow::anyhow!("shared_counters: {e}"))?;
+    tracing::info!(url = %backend.url(), "shared rate-limit counter store configured");
+    Ok(Some(crate::ratelimit::SharedCounterFactory::new(
+        Arc::new(backend),
+        shared.clone(),
+    )))
+}
+
+/// Without the feature there is no backend to build.
+///
+/// A configuration that asks for one is refused by validation, naming the
+/// feature — so reaching here with `shared_counters` set means no route uses it,
+/// which is worth one line and not an error.
+#[cfg(not(feature = "shared-limits"))]
+fn shared_counter_factory(
+    cfg: &ResolvedConfig,
+) -> anyhow::Result<Option<crate::ratelimit::SharedCounterFactory>> {
+    if cfg.raw.shared_counters.is_some() {
+        tracing::warn!(
+            "shared_counters is configured but this binary was built without the \
+             `shared-limits` feature; no route uses it, so it is ignored",
+        );
+    }
+    Ok(None)
+}
+
+/// Check the backend can do what the routes ask of it.
+///
+/// Reuses the factory's own connection rather than opening a second one, and is
+/// compiled in every build: without the `shared-limits` feature no factory is
+/// ever built, so this is simply never called.
+async fn verify_shared_counters(
+    factory: &crate::ratelimit::SharedCounterFactory,
+    table: &crate::routes::RouteTable,
+) -> anyhow::Result<()> {
+    use crate::config::{Counter, LimitMode};
+
+    if !table.routes().iter().any(|r| {
+        r.rate_limit
+            .as_ref()
+            .is_some_and(|rl| rl.counter == Counter::Shared)
+    }) {
+        return Ok(());
+    }
+
+    let needs_exact = table.routes().iter().any(|r| {
+        r.rate_limit
+            .as_ref()
+            .is_some_and(|rl| rl.counter == Counter::Shared && rl.mode == LimitMode::Exact)
+    });
+
+    match factory.probe().await {
+        Ok((server, supports_exact)) => {
+            tracing::info!(%server, "shared rate-limit counter store reached");
+            if needs_exact && !supports_exact {
+                anyhow::bail!(
+                    "a route sets `rate_limit.mode: exact`, which needs Recached's RLCHECK, \
+                     but shared_counters.url answered as {server}. RLCHECK has no Redis or \
+                     Valkey equivalent and cannot be emulated without EVAL, which Recached \
+                     does not implement either. Use `mode: approximate`, or point \
+                     shared_counters at Recached."
+                );
+            }
+        }
+        Err(e) if needs_exact => {
+            // Nothing to degrade to. An exact limit is a promise that cannot be
+            // kept without the backend, and starting anyway would mean every
+            // request quietly falling back to the per-process count the
+            // operator explicitly rejected.
+            anyhow::bail!(
+                "a route sets `rate_limit.mode: exact`, but the shared counter store could \
+                 not be reached: {e}"
+            );
+        }
+        Err(e) => {
+            // `approximate` has a local answer for every request and reconciles
+            // once the cache comes back, so this is a degraded start rather
+            // than a failed one.
+            tracing::warn!(
+                event = "gateway.ratelimit.store_unreachable",
+                error = %e,
+                "shared counter store unreachable at startup; limits count per process until \
+                 it answers. Watch gateway_shared_limit_errors_total.",
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Samples each pool's health into `gateway_pool_backends`.
@@ -496,5 +689,146 @@ impl BackgroundService for TraceExporter {
         }
         // The exporter runs on its own task; this one only waits for shutdown.
         let _ = shutdown.changed().await;
+    }
+}
+
+#[cfg(all(test, feature = "shared-limits"))]
+mod shared_limit_tests {
+    use super::*;
+    use crate::ratelimit::shared::{Backend, BackendError, Publish, Totals};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[derive(Debug, Default)]
+    struct Store {
+        supports_exact: AtomicBool,
+        unavailable: AtomicBool,
+        probes: AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for Store {
+        async fn reconcile(&self, batch: &[Publish]) -> Result<Vec<Totals>, BackendError> {
+            Ok(vec![
+                Totals {
+                    current: 0,
+                    previous: 0
+                };
+                batch.len()
+            ])
+        }
+        async fn check_exact(
+            &self,
+            _: &str,
+            limit: u64,
+            _: Duration,
+        ) -> Result<crate::ratelimit::Decision, BackendError> {
+            Ok(crate::ratelimit::Decision::allow(limit, 0))
+        }
+        async fn probe(&self) -> Result<(String, bool), BackendError> {
+            self.probes.fetch_add(1, Ordering::Relaxed);
+            if self.unavailable.load(Ordering::Relaxed) {
+                Err(BackendError::Unavailable("offline".into()))
+            } else {
+                Ok((
+                    "test server".into(),
+                    self.supports_exact.load(Ordering::Relaxed),
+                ))
+            }
+        }
+    }
+
+    fn config(mode: &str) -> ResolvedConfig {
+        let text = format!(
+            "shared_counters:\n  url: redis://cache:6379\nupstreams: {{ users: http://users:3000 }}\nroutes:\n  public:\n    - prefix: /users\n      upstream: users\n      rate_limit: {{ requests: 10, interval: 1m, counter: shared, mode: {mode} }}\n"
+        );
+        let (raw, expanded) = crate::config::GatewayConfig::parse("test.yml", &text).unwrap();
+        raw.resolve(&expanded).unwrap()
+    }
+
+    fn reloader(backend: Arc<Store>) -> RouteReloader {
+        let config = Arc::new(config("approximate"));
+        let factory = crate::ratelimit::SharedCounterFactory::new(
+            backend,
+            config.raw.shared_counters.clone().unwrap(),
+        );
+        let table = crate::routes::RouteTable::build_with(
+            config.raw.routes.groups(),
+            &config.raw.defaults,
+            Some(&factory),
+        );
+        RouteReloader {
+            provider: Arc::new(InlineRouteProvider::new(config.raw.routes.groups())),
+            config,
+            shared: Some(factory),
+            public: SharedRoutes::new(table),
+            machine: None,
+            interval: Duration::from_secs(1),
+            path: "test.yml".into(),
+        }
+    }
+
+    fn exact_table(reloader: &RouteReloader) -> crate::routes::RouteTable {
+        let cfg = config("exact");
+        crate::routes::RouteTable::build_with(
+            cfg.raw.routes.groups(),
+            &cfg.raw.defaults,
+            reloader.shared.as_ref(),
+        )
+    }
+
+    #[tokio::test]
+    async fn exact_reloads_are_rejected_until_the_backend_can_honour_them() {
+        let backend = Arc::new(Store::default());
+        let reloader = reloader(backend.clone());
+        let original = reloader.public.load();
+        assert!(
+            reloader
+                .publish(exact_table(&reloader))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("RLCHECK")
+        );
+        assert!(Arc::ptr_eq(&original, &reloader.public.load()));
+
+        backend.supports_exact.store(true, Ordering::Relaxed);
+        backend.unavailable.store(true, Ordering::Relaxed);
+        assert!(
+            reloader
+                .publish(exact_table(&reloader))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("could not be reached")
+        );
+        assert!(Arc::ptr_eq(&original, &reloader.public.load()));
+
+        backend.unavailable.store(false, Ordering::Relaxed);
+        assert_eq!(reloader.publish(exact_table(&reloader)).await.unwrap(), 1);
+        assert!(!Arc::ptr_eq(&original, &reloader.public.load()));
+    }
+
+    #[tokio::test]
+    async fn approximate_reloads_tolerate_outages_and_unused_backends_are_not_probed() {
+        let backend = Arc::new(Store::default());
+        backend.unavailable.store(true, Ordering::Relaxed);
+        let reloader = reloader(backend.clone());
+        let cfg = config("approximate");
+        let table = crate::routes::RouteTable::build_with(
+            cfg.raw.routes.groups(),
+            &cfg.raw.defaults,
+            reloader.shared.as_ref(),
+        );
+        assert_eq!(reloader.publish(table).await.unwrap(), 1);
+        assert_eq!(backend.probes.load(Ordering::Relaxed), 1);
+
+        let local = crate::routes::RouteTable::build(
+            serde_yaml_ng::from_str(
+                "public: [{prefix: /users, upstream: users, rate_limit: {requests: 10}}]",
+            )
+            .unwrap(),
+        );
+        assert_eq!(reloader.publish(local).await.unwrap(), 1);
+        assert_eq!(backend.probes.load(Ordering::Relaxed), 1);
     }
 }

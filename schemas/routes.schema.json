@@ -14,6 +14,26 @@
           "const": "sketch",
           "description": "A shared count-min sketch (`pingora-limits`).\n\nFixed memory and lock-free whatever the key cardinality — but\n**approximate, and it only ever over-counts**. Two keys can collide and\none caller can be refused because of another's traffic. Worth it when\nthe key space is huge and the limit is a blunt abuse control; wrong when\nthe 429 is a promise to a specific customer.",
           "type": "string"
+        },
+        {
+          "const": "shared",
+          "description": "Counters shared across every replica, over RESP.\n\nThe reason to choose it: `exact` and `sketch` both count only what\n*this* process saw, so a limit of 100/min across three replicas admits\nup to 300/min. This one makes the limit mean what it says cluster-wide.\n\nRequires a `shared_counters` block, and a build with the\n`shared-limits` feature. How closely it holds the limit — and whether\nanything waits on the cache — is [`LimitMode`].",
+          "type": "string"
+        }
+      ]
+    },
+    "LimitMode": {
+      "description": "How hard a `shared` counter tries, and what it spends to do it.\n\nOnly meaningful with [`Counter::Shared`]; the local backends have nothing to\ntrade. The default keeps the request path free of I/O, which is the rule the\nrest of this gateway is built to.",
+      "oneOf": [
+        {
+          "const": "approximate",
+          "description": "Decide locally, reconcile in the background.\n\nThe local window admits or refuses with no I/O at all; a background task\npublishes this replica's usage every `shared_counters.sync` and reads\nback what the others have used. A decision is therefore made against a\ncluster total from its last reconciliation. Capped batches rotate across\nkeys, so a full pass takes roughly `ceil(keys / max_keys_per_sync)` ticks,\nplus backend latency. Overshoot scales with the effective reconciliation\nperiod: roughly `replicas x arrival_rate x period`.\n\nPortable: it uses `HSETNX`, `HVALS` and `EXPIRE`, which Recached, Redis and\nValkey all implement identically.",
+          "type": "string"
+        },
+        {
+          "const": "exact",
+          "description": "Ask the cache per request, and believe it.\n\nOne `RLCHECK` round trip per limited request returns an authoritative\ndecision, so the limit holds cluster-wide with no overshoot and no window\nalignment to reason about. The cost is real and should be chosen\ndeliberately: every limited request now waits on the cache, and a slow\ncache is slow requests.\n\n**Recached only.** `RLCHECK` has no Redis or Valkey counterpart, and it\ncannot be emulated without `EVAL`, which Recached does not implement. The\nbackend is checked at startup and before publishing route reloads; a\nmismatch rejects the configuration. Intervals must be whole seconds,\nbecause `RLCHECK` cannot represent fractional windows.",
+          "type": "string"
         }
       ]
     },
@@ -62,6 +82,22 @@
               ],
               "default": 100000,
               "description": "Ceiling on tracked keys. Keys come from requests, so this is what stops\na flood of distinct callers growing the process without bound.\n\nOnly meaningful for `counter: exact`; the sketch has fixed memory."
+            },
+            "mode": {
+              "allOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/LimitMode"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Only meaningful with `counter: shared`."
             },
             "requests": {
               "anyOf": [
