@@ -3,7 +3,7 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## Unreleased — case-insensitive deny-list, concurrency caps
+## 0.1.8 — case-insensitive deny-list, concurrency caps
 
 - **Concurrency caps.** A route can bound how many of its requests are in
   flight upstream at once with `concurrency: { max: N }`, keyed on the route as
@@ -14,7 +14,6 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   reload does not reset them. Cache hits never take a slot. A new
   `concurrency_limited` value of `gateway_rejections_total{reason}`; opt-in,
   so no config change.
-
 - **Security.** `internal:` deny-list entries now match ASCII case-insensitively.
   Route matching was and stays exact, but many upstream frameworks route
   case-insensitively by default (Express among them), so a request such as
@@ -29,6 +28,9 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   takes one global lock on every cache fill and every hit. Eviction stays
   LRU by bytes against `cache.max_size`, so there is no config change. For
   code built on `lagos-core`, `Cache::eviction` is now a `cache::LruManager`.
+- **Dependencies.** rustls 0.23.45 → 0.23.46 for RUSTSEC-2026-0346, -0347,
+  -0348 and -0349. Lagos uses rustls for upstream TLS, JWKS and certificate
+  fetches, OTLP export and shared counters. No config change.
 
 ## 0.1.7 — client address in the access log
 
