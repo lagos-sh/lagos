@@ -322,6 +322,46 @@ pub struct RateLimitConfig {
     pub mode: LimitMode,
 }
 
+/// A cap on requests in flight, applied per route.
+///
+/// ```yaml
+/// concurrency:
+///   max: 50
+///   key: route
+/// ```
+///
+/// A request holds its slot from the moment it is sent upstream until its
+/// response has been fully written, so a streaming response holds one for as
+/// long as it streams. A request over the cap is refused at once rather than
+/// queued: a queue in front of a saturated upstream only adds latency to the
+/// requests that will time out anyway.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConcurrencyConfig {
+    /// Requests allowed upstream at once, per key.
+    pub max: u64,
+    /// Whose requests share the cap: `route`, `ip`, `identity`, or
+    /// `header.<name>`. Omit for `route`, which bounds the route as a whole to
+    /// protect its upstream; the others bound each caller separately.
+    #[serde(default)]
+    pub key: Option<RateLimitKey>,
+    /// As `rate_limit.trusted_proxies`. Only read by `key: ip`.
+    #[serde(default)]
+    pub trusted_proxies: usize,
+}
+
+impl ConcurrencyConfig {
+    pub fn key(&self) -> &RateLimitKey {
+        self.key.as_ref().unwrap_or(&RateLimitKey::Route)
+    }
+
+    /// Whether each caller has a cap of their own, rather than sharing the
+    /// route's.
+    pub fn per_caller(&self) -> bool {
+        !matches!(self.key(), RateLimitKey::Route)
+    }
+}
+
 /// How a rate limiter counts.
 ///
 /// Both use the same sliding-window formula — the previous interval weighted by
@@ -2822,6 +2862,16 @@ impl ResolvedConfig {
             if let Some(limit) = &r.rate_limit {
                 self.validate_shared_limit(&r.id, limit)?;
             }
+            if let Some(cap) = &r.concurrency
+                && matches!(cap.key(), RateLimitKey::Ip)
+                && cap.trusted_proxies > 0
+                && self.trusted_proxy_ips.is_empty()
+            {
+                return Err(ConfigError::invalid(format!(
+                    "route `{}` trusts X-Forwarded-For for its concurrency cap but forward.trusted_proxy_ips is empty",
+                    r.id
+                )));
+            }
             if let Some(limit) = &r.rate_limit
                 && matches!(limit.key, RateLimitKey::Ip)
                 && limit.trusted_proxies > 0
@@ -3198,6 +3248,45 @@ routes:
         let table = crate::routes::RouteTable::build(resolved.raw.routes.groups());
         resolved.validate_table(&table)?;
         Ok(table)
+    }
+
+    #[test]
+    fn a_concurrency_cap_is_route_wide_unless_keyed_otherwise() {
+        let t = table(
+            "upstreams: { users: http://users:3000 }\nroutes:\n  public:\n    \
+             - { prefix: /a, upstream: users, concurrency: { max: 5 } }\n    \
+             - { prefix: /b, upstream: users, concurrency: { max: 2, key: identity } }\n",
+        )
+        .expect("valid");
+        let caps: Vec<_> = t
+            .routes()
+            .iter()
+            .map(|r| r.concurrency.as_ref().expect("cap"))
+            .collect();
+        assert!(caps.iter().any(|c| c.max == 5 && !c.per_caller()));
+        assert!(
+            caps.iter()
+                .any(|c| c.max == 2 && matches!(c.key(), RateLimitKey::Identity))
+        );
+    }
+
+    #[test]
+    fn a_concurrency_cap_that_admits_nothing_or_trusts_unlisted_proxies_is_refused() {
+        let route = |cap: &str| {
+            format!(
+                "upstreams: {{ users: http://users:3000 }}\nroutes:\n  public:\n    \
+                 - {{ prefix: /a, upstream: users, concurrency: {cap} }}\n"
+            )
+        };
+        let zero = table(&route("{ max: 0 }"))
+            .map(drop)
+            .expect_err("max 0 refused");
+        assert!(zero.to_string().contains("concurrency.max is 0"), "{zero}");
+        let forged = table(&route("{ max: 5, key: ip, trusted_proxies: 1 }"))
+            .map(drop)
+            .expect_err("unlisted proxies refused");
+        assert!(forged.to_string().contains("concurrency cap"), "{forged}");
+        assert!(table(&route("{ max: 5, key: nope }")).is_err());
     }
 
     #[test]

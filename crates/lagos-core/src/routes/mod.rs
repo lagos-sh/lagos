@@ -239,6 +239,9 @@ pub struct RouteConfig {
     /// so the counters live as long as the table and are replaced with it.
     #[serde(skip)]
     pub limiter: Option<Arc<crate::ratelimit::Limiter>>,
+    /// Requests allowed upstream at once.
+    #[serde(default)]
+    pub concurrency: Option<crate::config::ConcurrencyConfig>,
     /// Names of extensions to run for this route, in order.
     #[serde(default)]
     pub extensions: Vec<String>,
@@ -338,6 +341,10 @@ struct RouteInput {
     #[schemars(with = "Option<crate::config::RateLimitConfig>")]
     #[schemars(transform = crate::config::schema::inherited_policy)]
     pub rate_limit: Option<Option<crate::config::RateLimitConfig>>,
+    /// Requests allowed upstream at once. Not inherited from `defaults`: a cap
+    /// sized for one upstream means nothing for another.
+    #[serde(default)]
+    pub concurrency: Option<crate::config::ConcurrencyConfig>,
     /// Names of extensions to run for this route, in order.
     #[serde(default)]
     pub extensions: Vec<String>,
@@ -356,6 +363,7 @@ impl From<RouteInput> for RouteConfig {
             bind: input.bind,
             cache: input.cache,
             cache_authenticated: input.cache_authenticated,
+            concurrency: input.concurrency,
             extensions: input.extensions,
             policy_origins: PolicyOrigins {
                 methods: if input.methods.is_some() {
@@ -715,6 +723,13 @@ impl RouteTable {
                         _ => crate::ratelimit::Limiter::new(rl),
                     }));
                 }
+            }
+            if r.concurrency.as_ref().is_some_and(|c| c.max == 0) {
+                errors.push(format!(
+                    "route `{}`: concurrency.max is 0, which would refuse every request. \
+                     Remove the route instead, or set `enabled: false`.",
+                    r.id
+                ));
             }
             for (source, target) in &r.bind {
                 match Binding::parse(source, target) {

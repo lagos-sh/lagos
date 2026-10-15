@@ -6,6 +6,37 @@ moved forward deliberately rather than discovered in production.
 
 ---
 
+## Pingora upgrades and the response cache
+
+Pingora describes its proxy caching integration as experimental, and its
+caching APIs as highly volatile. Lagos implements one of them directly: the
+response cache's storage backend is `pingora-cache`'s `Storage` trait, and the
+`cache` feature is on by default. So a Pingora minor release can change cache
+behaviour even when no Lagos code mentions it, and can stop a custom gateway
+built on `lagos-core` from compiling.
+
+Lagos depends on `pingora = "0.9"`, which Cargo reads as `>=0.9.0, <0.10.0`:
+patch releases are picked up, minor releases never are. Each move to a new
+Pingora minor is a Lagos release of its own, and its entry here says what the
+cache does differently. When reviewing one, check:
+
+- **Cache behaviour.** Hits, misses, `Vary`, revalidation and the fill lock,
+  on any route with `cache: true`.
+- **Memory bound.** `cache.max_size` is enforced by the storage and the
+  eviction manager together. A change in what the eviction manager counts
+  moves where the cache settles.
+- **`/metrics`.** `pingora-prometheus` registers into the `prometheus` crate
+  version it was built with; if the two drift apart, the endpoint comes back
+  empty with nothing failing. This happened on the move to 0.9.
+- **Custom gateways.** Anything built on `lagos-core` that touches
+  `lagos_core::cache` or Pingora types directly should be rebuilt against the
+  new version before deploying.
+
+A deployment that does not use the response cache can build without it:
+`default-features = false` on `lagos-core`, then add back the features it needs.
+
+---
+
 ## 0.1.6 → 0.1.7 — client address in the access log
 
 No configuration change is needed. `gateway.access` and `gateway.upstream.error`

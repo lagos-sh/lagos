@@ -381,6 +381,7 @@ fn route_fields(cfg: &ResolvedConfig, route: &RouteConfig) -> BTreeMap<&'static 
         ("bindings", format!("{:?}", route.bind)),
         ("extensions", format!("{:?}", route.extensions)),
         ("rate_limit", format!("{:?}", route.rate_limit)),
+        ("concurrency", format!("{:?}", route.concurrency)),
         ("retry", format!("{:?}", route.retry)),
         ("cache", route.cache.to_string()),
         ("cache_authenticated", route.cache_authenticated.to_string()),

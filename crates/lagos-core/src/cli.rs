@@ -694,6 +694,9 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
         if let Some(rl) = &r.rate_limit {
             notes.push(format!("{}/{:?}", rl.requests, rl.interval));
         }
+        if let Some(cap) = &r.concurrency {
+            notes.push(format!("concurrency {}", cap.max));
+        }
         if let Some(rt) = &r.retry {
             notes.push(format!("retry x{}", rt.attempts));
         }
@@ -949,6 +952,25 @@ fn explain(
                  \x20       behind an ingress every client shares one bucket"
             );
         }
+        println!();
+    }
+
+    if let Some(cap) = &route.concurrency {
+        println!("Concurrency\n");
+        println!(
+            "  {} requests upstream at once, {}",
+            cap.max,
+            match cap.key() {
+                crate::config::RateLimitKey::Ip => "per client address".to_string(),
+                crate::config::RateLimitKey::Identity => "per caller subject".to_string(),
+                crate::config::RateLimitKey::Route => "for this route as a whole".to_string(),
+                crate::config::RateLimitKey::Header(h) => format!("per header `{h}`"),
+            }
+        );
+        println!(
+            "  over the cap: {} at once, never queued",
+            if cap.per_caller() { "429" } else { "503" }
+        );
         println!();
     }
 

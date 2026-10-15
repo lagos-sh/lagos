@@ -399,16 +399,20 @@ pub use crate::headers::client_address;
 /// caller treats as "not limited" — a limit keyed on something absent would
 /// otherwise lump every such caller into one bucket and throttle them
 /// collectively.
+///
+/// Takes the key and proxy depth rather than a whole [`RateLimitConfig`] so the
+/// concurrency cap derives its keys by exactly the same rules.
 pub fn key_for(
-    cfg: &RateLimitConfig,
+    key: &RateLimitKey,
+    trusted_proxies: usize,
     route_id: &str,
     subject: Option<&str>,
     forwarded_for: Option<&str>,
     peer: Option<&str>,
     header: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let raw = match &cfg.key {
-        RateLimitKey::Ip => client_address(forwarded_for, peer, cfg.trusted_proxies)?,
+    let raw = match key {
+        RateLimitKey::Ip => client_address(forwarded_for, peer, trusted_proxies)?,
         RateLimitKey::Identity => subject?.to_string(),
         RateLimitKey::Route => String::new(),
         RateLimitKey::Header(name) => header(name)?,
@@ -757,8 +761,24 @@ mod tests {
     #[test]
     fn keys_are_scoped_per_route() {
         let c = cfg(10, Duration::from_secs(60));
-        let a = key_for(&c, "orders", None, None, Some("10.0.0.1"), |_| None);
-        let b = key_for(&c, "search", None, None, Some("10.0.0.1"), |_| None);
+        let a = key_for(
+            &c.key,
+            c.trusted_proxies,
+            "orders",
+            None,
+            None,
+            Some("10.0.0.1"),
+            |_| None,
+        );
+        let b = key_for(
+            &c.key,
+            c.trusted_proxies,
+            "search",
+            None,
+            None,
+            Some("10.0.0.1"),
+            |_| None,
+        );
         assert_ne!(a, b, "a quota spent on one route must not affect another");
     }
 
@@ -768,7 +788,29 @@ mod tests {
         // collectively, which is worse than not limiting them.
         let mut c = cfg(10, Duration::from_secs(60));
         c.key = RateLimitKey::Identity;
-        assert!(key_for(&c, "r", None, None, Some("10.0.0.1"), |_| None).is_none());
-        assert!(key_for(&c, "r", Some("user-1"), None, None, |_| None).is_some());
+        assert!(
+            key_for(
+                &c.key,
+                c.trusted_proxies,
+                "r",
+                None,
+                None,
+                Some("10.0.0.1"),
+                |_| None
+            )
+            .is_none()
+        );
+        assert!(
+            key_for(
+                &c.key,
+                c.trusted_proxies,
+                "r",
+                Some("user-1"),
+                None,
+                None,
+                |_| None
+            )
+            .is_some()
+        );
     }
 }

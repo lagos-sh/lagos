@@ -289,7 +289,7 @@ metrics; sampled requests also produce trace data.
 | Service-to-service access | Machine credentials on a separate internal listener |
 | Client keys | Optional gateway-wide key requirement on the public listener, with named keys, rotation, and explicit exemptions |
 | Load balancing | Weighted upstream pools with round robin, random, or consistent hashing and optional health checks |
-| Traffic controls | Per-route rate limits, optionally shared across replicas, plus bounded retries, circuit breakers, request body limits, and configurable timeouts |
+| Traffic controls | Per-route rate limits, optionally shared across replicas, plus concurrency caps, bounded retries, circuit breakers, request body limits, and configurable timeouts |
 | Response caching | Opt-in memory cache with object limits, authorization checks, `Vary` handling, and route reload isolation |
 | Streaming | Request and response streaming, including server-sent events (SSE) |
 | Observability | Structured logs, Prometheus metrics, trace context propagation, and optional OTLP export |
@@ -960,6 +960,40 @@ For IP limits, configure `trusted_proxies` inside the route's `rate_limit`
 block. `0` uses the socket peer; `1` uses the last `X-Forwarded-For` entry;
 `n` counts from the right. This setting must match the actual trusted proxy
 chain. An excessive value can trust a client-supplied address.
+
+### Concurrency caps
+
+```yaml
+routes:
+  public:
+    - prefix: /reports
+      upstream: reports
+      concurrency:
+        max: 20
+```
+
+A rate limit bounds how often requests arrive; a concurrency cap bounds how many
+are in flight at once. That is what protects an upstream whose requests are
+slow: 10 requests a second is light load at 50 ms each and a queue at 5 s each.
+
+A request takes a slot when it is about to go upstream and releases it when its
+response has been fully written, so a streaming or SSE response holds one for as
+long as it streams. Cache hits and requests refused earlier, by authentication or
+a rate limit, never take one. Over the cap, the request is refused at once with
+`Retry-After: 1`, never queued.
+
+| `key` | Over the cap |
+|---|---|
+| `route` (default) | `503`: the route as a whole is at capacity |
+| `ip`, `identity`, `header.<name>` | `429`: this caller has too many requests in flight |
+
+Keys follow the [rate limiting](#rate-limiting) rules, including
+`trusted_proxies` for `ip`. Counts are local to each process, like `exact` and
+`sketch` rate limits, so a cap of 20 across three replicas admits up to 60. They
+are held in a fixed-memory sketch whatever the number of keys, which can
+over-count on a collision but never admits more than the cap. A route reload does
+not reset them. Refusals are counted as
+`gateway_rejections_total{reason="concurrency_limited"}`.
 
 ### Response cache
 
