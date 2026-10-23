@@ -61,3 +61,15 @@ Local regression suite passed 54 gateway and 18 route-default checks before
 adding the held fallback concurrency case (included in final rerun).
 Default sandbox cannot create sockets; loopback regression run was approved
 through tool escalation and passed. No external service was contacted.
+
+## A2 — shared cache
+
+Cookie-setting responses are rejected at both fills and hits. Every Cookie
+request bypasses lookup/fill regardless of configured authentication cookie
+names, Vary or public directives. Existing authenticated public sharing and
+verified-identity variants remain covered. `cargo test --offline -p lagos-core
+cache:: --lib`: 14 passed. The broader `cache` substring filter also selected
+three JWKS socket tests that failed under sandbox socket restrictions (not code
+failures); final workspace tests require loopback permission. Updated local
+E2E: 68 gateway regression checks passed, including held fallback concurrency
+and anonymous/session-cookie isolation. Final full suite follows later patches.

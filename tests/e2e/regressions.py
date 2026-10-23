@@ -65,6 +65,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         response = {
             "origin": count,
             "language": self.headers.get("accept-language"),
+            "cookie": self.headers.get("cookie"),
             "body": body,
             "subject": self.headers.get("x-auth-subject"),
             "port": self.server.server_port,
@@ -87,9 +88,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("vary", "*")
         elif path == "/varyidentity":
             self.send_header("vary", "x-auth-subject")
+        if path == "/cookieset":
+            self.send_header("set-cookie", f"session=user-{count}; HttpOnly")
+        if path == "/cookievary":
+            self.send_header("vary", "cookie")
         if path == "/authcache" and self.headers.get("x-auth-subject"):
             self.send_header("cache-control", "private, no-store")
-        elif path in ("/authshared", "/varyidentity"):
+        elif path in ("/authshared", "/varyidentity", "/cookieset", "/cookieplain", "/cookievary"):
             self.send_header("cache-control", "public, max-age=60")
             if path == "/authshared":
                 response["subject"] = None
@@ -158,7 +163,7 @@ def run(binary, work):
         groups = {
             "public": [
                 {"prefix": f"/{path}", "upstream": "origin", "cache": True}
-                for path in ("vary", "star", "write", "large", "cb/cached")
+                for path in ("vary", "star", "write", "large", "cb/cached", "cookieset", "cookieplain", "cookievary")
             ] + [
                 {"id": "swap", "prefix": "/swap", "upstream": "origin", "cache": True},
                 {"prefix": "/keylimit", "upstream": "origin", "rate_limit": {
@@ -207,7 +212,7 @@ def run(binary, work):
             "cache": {"max_size": "64KiB", "max_object_size": "4KiB"},
             "auth": {"jwt": [{"issuer": "https://regression.test", "audience": ["regression-api"],
                                "jwks_url": origin + "/jwks"}]},
-            "forward": {"authorization": False, "headers": ["x-merchant-id"]},
+            "forward": {"authorization": False, "headers": ["x-merchant-id", "cookie"]},
             "cors": {"origins": ["https://app.test"]},
             "upstreams": {
                 "origin": origin,
@@ -301,6 +306,17 @@ def run(binary, work):
         checks.check("accept-language" in varies and "origin" in varies, "CORS preserves upstream Vary")
         checks.check(request("/star")[1] != request("/star")[1], "Vary star is never reused")
 
+        set_a, set_b = request("/cookieset"), request("/cookieset")
+        checks.check(set_a[1] != set_b[1] and set_a[2]["set-cookie"] != set_b[2]["set-cookie"],
+                     "even public Set-Cookie responses never replay another session")
+        for path in ("/cookieplain", "/cookievary"):
+            anonymous_cookie = request(path)[1]
+            for cookie in ("session=alice", "session=bob", "", "session=alice"):
+                status, data, _ = request(path, {"cookie": cookie})
+                checks.check(status == 200 and data["cookie"] == cookie and data != anonymous_cookie,
+                             "cookie request bypasses anonymous cache: " + path)
+            checks.check(request(path)[1] == anonymous_cookie,
+                         "personalized cookie fills cannot replace the anonymous entry: " + path)
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             a = request("/write", method=method, body="first")[1]
             b = request("/write", method=method, body="second")[1]

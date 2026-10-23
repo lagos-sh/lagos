@@ -229,3 +229,11 @@ Coordinated. We will agree a date with you, publish a GitHub advisory with a
 CVE, and credit you unless you would rather we did not. If a report goes
 unanswered for 90 days, publish — an unresponsive maintainer is not a reason to
 leave users unaware.
+
+## Shared-cache cookie boundary (unreleased)
+
+Every Cookie-bearing request bypasses shared lookup and fill. Every Set-Cookie
+response is ineligible at both fill and hit checks. This is a Lagos policy:
+Pingora 0.9's RFC cache helper permits Set-Cookie on otherwise cacheable
+responses. Authentication and ownership bindings still run before lookup;
+Vary uses effective forwarded identity, and route generations isolate reloads.

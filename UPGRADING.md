@@ -361,3 +361,9 @@ choose `missing_key: route` or `ip` to bound anonymous traffic. Use explicit
 comma-separated or malformed header keys now always reject. Adding the public
 Rust configuration fields requires library users constructing struct literals
 to set `missing_key: MissingKey::Reject` (or another explicit policy).
+
+Shared-cache migration: cookie-bearing requests now always bypass the shared
+cache, even with public cache directives or Vary: Cookie. Set-Cookie responses
+never fill it, even if marked public. Remove irrelevant cookies at a trusted
+ingress only when the application demonstrably ignores them; do not strip
+session cookies just to recover cache hit rates.

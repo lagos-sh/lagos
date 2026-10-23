@@ -1819,6 +1819,9 @@ impl ProxyHttp for Gateway {
             session.req_header().method,
             http::Method::GET | http::Method::HEAD
         ) || ctx.sse
+            // Any application cookie can select session state. A gateway
+            // cannot infer harmless cookies or safely reuse anonymous entries.
+            || session.req_header().headers.contains_key(http::header::COOKIE)
         {
             return Ok(());
         }

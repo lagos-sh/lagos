@@ -5,6 +5,10 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## Unreleased
 
+- Shared response caching rejects every `Set-Cookie` response and bypasses
+  lookup/fill for any request with `Cookie`, including unconfigured application
+  session cookies and empty Cookie fields. Existing authorized/Vary checks remain.
+
 - Missing rate-limit and concurrency keys reject with 400 by default; explicit
   `missing_key: route|ip|skip` selects fallback/optional behavior. Header keys
   reject ambiguity and normalize outer whitespace. CLI diagnostics, offline
