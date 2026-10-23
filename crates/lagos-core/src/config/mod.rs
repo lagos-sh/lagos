@@ -271,7 +271,9 @@ impl<'de> Deserialize<'de> for RateLimitKey {
             "identity" => Ok(Self::Identity),
             "route" => Ok(Self::Route),
             other => match other.strip_prefix("header.") {
-                Some(name) if !name.is_empty() => Ok(Self::Header(name.to_ascii_lowercase())),
+                Some(name) if http::HeaderName::from_bytes(name.as_bytes()).is_ok() => {
+                    Ok(Self::Header(name.to_ascii_lowercase()))
+                }
                 _ => Err(serde::de::Error::custom(format!(
                     "`{other}` is not a rate-limit key; expected `ip`, `identity`, `route`, \
                      or `header.<name>`"
@@ -279,6 +281,22 @@ impl<'de> Deserialize<'de> for RateLimitKey {
             },
         }
     }
+}
+
+/// Action when a protective policy cannot derive its configured key.
+/// Malformed or repeated header keys are always rejected, even with `skip`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingKey {
+    /// Fail closed with 400. Anonymous identity policies must choose a fallback.
+    #[default]
+    Reject,
+    /// Count all requests without a key in the route-wide bucket.
+    Route,
+    /// Count the socket peer (never an untrusted forwarded header).
+    Ip,
+    /// Explicitly leave requests without a key unlimited.
+    Skip,
 }
 
 /// A rate limit, applied per route.
@@ -299,6 +317,9 @@ pub struct RateLimitConfig {
     pub interval: Duration,
     #[serde(default)]
     pub key: RateLimitKey,
+    /// Missing-key policy; malformed header values always receive 400.
+    #[serde(default)]
+    pub missing_key: MissingKey,
     /// How many proxies sit in front of this gateway.
     ///
     /// `X-Forwarded-For` is appended to by each hop, so only the rightmost
@@ -345,6 +366,9 @@ pub struct ConcurrencyConfig {
     /// protect its upstream; the others bound each caller separately.
     #[serde(default)]
     pub key: Option<RateLimitKey>,
+    /// Missing-key policy; malformed header values always receive 400.
+    #[serde(default)]
+    pub missing_key: MissingKey,
     /// As `rate_limit.trusted_proxies`. Only read by `key: ip`.
     #[serde(default)]
     pub trusted_proxies: usize,
@@ -934,6 +958,7 @@ impl ConnectionLimitConfig {
             requests: self.connections,
             interval: self.interval,
             key: RateLimitKey::Ip,
+            missing_key: MissingKey::Reject,
             trusted_proxies: 0,
             max_keys: self.max_tracked,
             // Local, always. This limiter runs in `connection_filter`, before

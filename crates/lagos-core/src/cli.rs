@@ -946,6 +946,10 @@ fn explain(
                 crate::config::RateLimitKey::Header(h) => format!("header `{h}`"),
             }
         );
+        println!(
+            "  missing key: {:?}; malformed header keys: 400",
+            rl.missing_key
+        );
         if matches!(rl.key, crate::config::RateLimitKey::Ip) && rl.trusted_proxies == 0 {
             println!(
                 "  note: trusted_proxies is 0, so the socket peer is used —\n\
@@ -967,6 +971,13 @@ fn explain(
                 crate::config::RateLimitKey::Header(h) => format!("per header `{h}`"),
             }
         );
+        println!(
+            "  missing key: {:?}; malformed header keys: 400",
+            cap.missing_key
+        );
+        if cap.per_caller() && cap.missing_key == crate::config::MissingKey::Route {
+            println!("  missing-key route fallback: 503 when the shared fallback cap is full");
+        }
         println!(
             "  over the cap: {} at once, never queued",
             if cap.per_caller() { "429" } else { "503" }

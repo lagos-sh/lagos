@@ -395,10 +395,8 @@ pub use crate::headers::client_address;
 
 /// Build the limiter key for a request.
 ///
-/// Returns `None` when the configured key cannot be determined, which the
-/// caller treats as "not limited" — a limit keyed on something absent would
-/// otherwise lump every such caller into one bucket and throttle them
-/// collectively.
+/// Returns `None` when the configured key cannot be determined. Protective
+/// admission must apply an explicit missing-key policy with [`admission_key`].
 ///
 /// Takes the key and proxy depth rather than a whole [`RateLimitConfig`] so the
 /// concurrency cap derives its keys by exactly the same rules.
@@ -413,7 +411,7 @@ pub fn key_for(
 ) -> Option<String> {
     let raw = match key {
         RateLimitKey::Ip => client_address(forwarded_for, peer, trusted_proxies)?,
-        RateLimitKey::Identity => subject?.to_string(),
+        RateLimitKey::Identity => subject.filter(|s| !s.is_empty())?.to_string(),
         RateLimitKey::Route => String::new(),
         RateLimitKey::Header(name) => header(name)?,
     };
@@ -422,15 +420,178 @@ pub fn key_for(
     Some(format!("{route_id}|{raw}"))
 }
 
+/// An absent key and an ambiguous header are different admission failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyError {
+    Missing,
+    Invalid,
+}
+
+/// Read one opaque header key. OWS is normalized; list values, duplicates,
+/// empty values, controls, non-ASCII and embedded whitespace are ambiguous.
+pub fn header_key(headers: &http::HeaderMap, name: &str) -> Result<Option<String>, KeyError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(KeyError::Invalid);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| KeyError::Invalid)?
+        .trim_matches([' ', '\t']);
+    if value.is_empty()
+        || value
+            .bytes()
+            .any(|b| !(0x21..=0x7e).contains(&b) || b == b',')
+    {
+        return Err(KeyError::Invalid);
+    }
+    Ok(Some(value.to_string()))
+}
+
+/// Shared runtime/offline admission rules. Header keys are client input, not
+/// authenticated identities. `identity` always uses the verified subject.
+#[allow(clippy::too_many_arguments)]
+pub fn admission_key(
+    key: &RateLimitKey,
+    missing: crate::config::MissingKey,
+    trusted_proxies: usize,
+    route_id: &str,
+    subject: Option<&str>,
+    forwarded_for: Option<&str>,
+    peer: Option<&str>,
+    headers: &http::HeaderMap,
+) -> Result<Option<String>, KeyError> {
+    let value = match key {
+        RateLimitKey::Header(name) => header_key(headers, name)?,
+        _ => None,
+    };
+    if let Some(key) = key_for(
+        key,
+        trusted_proxies,
+        route_id,
+        subject,
+        forwarded_for,
+        peer,
+        |_| value.clone(),
+    ) {
+        return Ok(Some(key));
+    }
+    use crate::config::MissingKey;
+    match missing {
+        MissingKey::Reject => Err(KeyError::Missing),
+        MissingKey::Route => Ok(Some(format!("{route_id}|"))),
+        MissingKey::Ip => peer
+            .map(|ip| Some(format!("{route_id}|{ip}")))
+            .ok_or(KeyError::Missing),
+        MissingKey::Skip => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_keys_are_unambiguous_and_missing_is_explicit() {
+        use crate::config::MissingKey;
+        let key = RateLimitKey::Header("x-client".into());
+        let mut headers = http::HeaderMap::new();
+        let resolve = |headers: &http::HeaderMap, missing| {
+            admission_key(
+                &key,
+                missing,
+                0,
+                "r",
+                None,
+                None,
+                Some("192.0.2.1"),
+                headers,
+            )
+        };
+        assert_eq!(
+            resolve(&headers, MissingKey::Reject),
+            Err(KeyError::Missing)
+        );
+        assert_eq!(resolve(&headers, MissingKey::Skip), Ok(None));
+        assert_eq!(resolve(&headers, MissingKey::Route), Ok(Some("r|".into())));
+        assert_eq!(
+            resolve(&headers, MissingKey::Ip),
+            Ok(Some("r|192.0.2.1".into()))
+        );
+        for raw in ["", " ", "a,b", "a b", "a\tb"] {
+            headers.insert("x-client", http::HeaderValue::from_str(raw).unwrap());
+            for missing in [
+                MissingKey::Reject,
+                MissingKey::Skip,
+                MissingKey::Route,
+                MissingKey::Ip,
+            ] {
+                assert_eq!(
+                    resolve(&headers, missing),
+                    Err(KeyError::Invalid),
+                    "{raw:?}"
+                );
+            }
+        }
+        headers.insert("x-client", http::HeaderValue::from_bytes(&[0xff]).unwrap());
+        assert_eq!(resolve(&headers, MissingKey::Route), Err(KeyError::Invalid));
+        headers.insert("x-client", http::HeaderValue::from_static(" \talice\t "));
+        assert_eq!(
+            resolve(&headers, MissingKey::Reject),
+            Ok(Some("r|alice".into()))
+        );
+        headers.append("x-client", http::HeaderValue::from_static("alice"));
+        assert_eq!(resolve(&headers, MissingKey::Skip), Err(KeyError::Invalid));
+    }
+
+    #[test]
+    fn equivalent_header_keys_share_a_quota_under_concurrent_requests() {
+        let limiter = Arc::new(Limiter::new(&cfg(3, Duration::from_secs(60))));
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let limiter = limiter.clone();
+                std::thread::spawn(move || {
+                    let mut headers = http::HeaderMap::new();
+                    headers.insert(
+                        "x-client",
+                        http::HeaderValue::from_static(if i % 2 == 0 {
+                            "alice"
+                        } else {
+                            " alice "
+                        }),
+                    );
+                    let key = admission_key(
+                        &RateLimitKey::Header("x-client".into()),
+                        crate::config::MissingKey::Reject,
+                        0,
+                        "r",
+                        None,
+                        None,
+                        None,
+                        &headers,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    limiter.check(&key).allowed
+                })
+            })
+            .collect();
+        let allowed = threads
+            .into_iter()
+            .map(|t| usize::from(t.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(allowed, 3);
+    }
 
     fn cfg(requests: u64, interval: Duration) -> RateLimitConfig {
         RateLimitConfig {
             requests,
             interval,
             key: RateLimitKey::Ip,
+            missing_key: crate::config::MissingKey::Reject,
             trusted_proxies: 0,
             max_keys: 1000,
             counter: Counter::Exact,

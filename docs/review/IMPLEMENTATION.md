@@ -44,3 +44,20 @@ possible; do not claim this is the full independent exploit-sandbox workflow.
 No Strix executable is installed; no cloud upload or paid scan was attempted.
 
 Detailed changes and command results will be appended here before handoff.
+
+## A1 — admission keys
+
+Implemented explicit `missing_key` policy for rate limits/concurrency, strict
+single opaque header keys, normalized OWS, CLI explain/effective/diff, offline
+key assertions and generated schemas. Missing keys default to 400; route/IP
+fallback and explicit optional skip remain available. Route-fallback concurrency
+uses exact route accounting. Independent source review caught and corrected
+schema/CLI/offline identity mismatches.
+
+Checks: `cargo test --offline -p lagos-core ratelimit --lib` (51 passed),
+`cargo test --offline -p lagos --test explain --test schema` (9 passed),
+`cargo clippy --offline --workspace --all-targets -- -D warnings` passed.
+Local regression suite passed 54 gateway and 18 route-default checks before
+adding the held fallback concurrency case (included in final rerun).
+Default sandbox cannot create sockets; loopback regression run was approved
+through tool escalation and passed. No external service was contacted.

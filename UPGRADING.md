@@ -351,3 +351,13 @@ binary and its configuration are not.
 | `headers::forwarded_for` | `(&HeaderMap, Option<&str>)` | `(&HeaderMap, Option<&str>, usize)` — trusted hops |
 | `identity::apply` | `Result<(), String>` | `Result<(), IdentityError>` — `Claim` (401) vs `Mint` (503) |
 | `ratelimit::client_address` | defined here | re-exported from `headers`, same signature |
+
+## Unreleased: protective policy keys
+
+Missing rate-limit/concurrency keys now reject with 400 by default. Previously
+such requests silently skipped the policy. On optional identity-keyed routes,
+choose `missing_key: route` or `ip` to bound anonymous traffic. Use explicit
+`skip` only when unlimited missing-key traffic is intentional. Repeated, empty,
+comma-separated or malformed header keys now always reject. Adding the public
+Rust configuration fields requires library users constructing struct literals
+to set `missing_key: MissingKey::Reject` (or another explicit policy).

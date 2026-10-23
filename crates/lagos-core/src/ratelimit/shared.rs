@@ -711,6 +711,7 @@ mod tests {
         let cfg = crate::config::RateLimitConfig {
             requests,
             interval,
+            missing_key: crate::config::MissingKey::Reject,
             key: crate::config::RateLimitKey::Ip,
             trusted_proxies: 0,
             max_keys: 1000,
@@ -1128,6 +1129,7 @@ mod tests {
         let mut cfg = crate::config::RateLimitConfig {
             requests: 10,
             interval: Duration::from_secs(60),
+            missing_key: crate::config::MissingKey::Reject,
             key: crate::config::RateLimitKey::Ip,
             trusted_proxies: 0,
             max_keys: 10,
@@ -1160,6 +1162,7 @@ mod tests {
         let cfg = crate::config::RateLimitConfig {
             requests: 10,
             interval: Duration::from_secs(60),
+            missing_key: crate::config::MissingKey::Reject,
             key: crate::config::RateLimitKey::Ip,
             trusted_proxies: 0,
             max_keys: 10_000,

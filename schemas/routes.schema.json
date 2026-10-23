@@ -48,6 +48,22 @@
               ],
               "description": "Requests allowed upstream at once, per key."
             },
+            "missing_key": {
+              "allOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/MissingKey"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Missing-key policy; malformed header values always receive 400."
+            },
             "trusted_proxies": {
               "anyOf": [
                 {
@@ -111,6 +127,31 @@
         }
       ]
     },
+    "MissingKey": {
+      "description": "Action when a protective policy cannot derive its configured key.\nMalformed or repeated header keys are always rejected, even with `skip`.",
+      "oneOf": [
+        {
+          "const": "reject",
+          "description": "Fail closed with 400. Anonymous identity policies must choose a fallback.",
+          "type": "string"
+        },
+        {
+          "const": "route",
+          "description": "Count all requests without a key in the route-wide bucket.",
+          "type": "string"
+        },
+        {
+          "const": "ip",
+          "description": "Count the socket peer (never an untrusted forwarded header).",
+          "type": "string"
+        },
+        {
+          "const": "skip",
+          "description": "Explicitly leave requests without a key unlimited.",
+          "type": "string"
+        }
+      ]
+    },
     "RateLimitConfig": {
       "anyOf": [
         {
@@ -156,6 +197,22 @@
               ],
               "default": 100000,
               "description": "Ceiling on tracked keys. Keys come from requests, so this is what stops\na flood of distinct callers growing the process without bound.\n\nOnly meaningful for `counter: exact`; the sketch has fixed memory."
+            },
+            "missing_key": {
+              "allOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/MissingKey"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Missing-key policy; malformed header values always receive 400."
             },
             "mode": {
               "allOf": [
@@ -217,7 +274,7 @@
     "RateLimitKey": {
       "anyOf": [
         {
-          "pattern": "^(ip|identity|route|header\\..+)$",
+          "pattern": "^(ip|identity|route|header\\.[!#$%&'*+.^_`|~0-9A-Za-z-]+)$",
           "type": "string"
         },
         {

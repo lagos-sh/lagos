@@ -57,7 +57,7 @@ selector!(
 selector!(
     RateSelector,
     schemars::json_schema!({
-        "type": "string", "pattern": "^(ip|identity|route|header\\..+)$",
+        "type": "string", "pattern": "^(ip|identity|route|header\\.[!#$%&'*+.^_`|~0-9A-Za-z-]+)$",
         "examples": ["ip", "identity", "route", "header.x-tenant"]
     })
 );

@@ -558,14 +558,17 @@ impl Gateway {
         let key = self.limit_key(
             session,
             &cfg.key,
+            cfg.missing_key,
             cfg.trusted_proxies,
             &route.id,
             subject,
             peer_ip,
         );
 
-        let Some(key) = key else {
-            return Ok(false);
+        let key = match key {
+            Ok(Some(key)) => key,
+            Ok(None) => return Ok(false),
+            Err(error) => return self.reject(session, ctx, Rejection::limit_key(error)).await,
         };
         // Awaits only where the route asked for a per-request round trip
         // (`counter: shared` with `mode: exact`); every other configuration
@@ -584,16 +587,18 @@ impl Gateway {
     }
 
     /// The key a rate limit or concurrency cap counts this request under, or
-    /// `None` when the configured key is absent from the request.
+    /// `None` only when skipping an absent key was explicitly configured.
+    #[allow(clippy::too_many_arguments)]
     fn limit_key(
         &self,
         session: &Session,
         key: &crate::config::RateLimitKey,
+        missing: crate::config::MissingKey,
         trusted_proxies: usize,
         route_id: &str,
         subject: Option<&str>,
         peer_ip: Option<&str>,
-    ) -> Option<String> {
+    ) -> std::result::Result<Option<String>, crate::ratelimit::KeyError> {
         let headers = &session.req_header().headers;
         let trusted = self.cfg.trusted_proxy_depth(peer_ip, trusted_proxies);
         let forwarded = if trusted > 0 {
@@ -601,19 +606,15 @@ impl Gateway {
         } else {
             None
         };
-        crate::ratelimit::key_for(
+        crate::ratelimit::admission_key(
             key,
+            missing,
             trusted_proxies,
             route_id,
             subject,
             forwarded.as_deref(),
             peer_ip,
-            |name| {
-                headers
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
-            },
+            headers,
         )
     }
 
@@ -1391,20 +1392,26 @@ impl ProxyHttp for Gateway {
         // is taken only once the request is about to go upstream, so a cache
         // hit never holds one.
         if let Some(cap) = &route.concurrency {
-            ctx.concurrency = self
-                .limit_key(
-                    session,
-                    cap.key(),
-                    cap.trusted_proxies,
-                    &route.id,
-                    identity.as_ref().map(|i| i.subject.as_str()),
-                    peer_ip_for_limit.as_deref(),
-                )
-                .map(|key| PendingSlot {
+            let key = match self.limit_key(
+                session,
+                cap.key(),
+                cap.missing_key,
+                cap.trusted_proxies,
+                &route.id,
+                identity.as_ref().map(|i| i.subject.as_str()),
+                peer_ip_for_limit.as_deref(),
+            ) {
+                Ok(key) => key,
+                Err(error) => return self.reject(session, ctx, Rejection::limit_key(error)).await,
+            };
+            ctx.concurrency = key.map(|key| {
+                let per_caller = cap.per_caller() && key.strip_prefix(&route.id) != Some("|");
+                PendingSlot {
                     key,
                     max: cap.max,
-                    per_caller: cap.per_caller(),
-                });
+                    per_caller,
+                }
+            });
         }
         // Consistent hashing uses the subject in production too.
         ctx.subject = identity.as_ref().map(|i| i.subject.clone());

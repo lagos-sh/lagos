@@ -7,6 +7,7 @@ files and loopback listeners; no configuration in the checkout is modified.
 
 import base64
 import collections
+import concurrent.futures
 import http.client
 import http.server
 import json
@@ -57,6 +58,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with self.server.count_lock:
             self.server.counts[path] += 1
             count = self.server.counts[path]
+        if path == "/keycapfallback":
+            self.server.hold_started.set()
+            self.server.hold_release.wait(3)
         body = self.rfile.read(int(self.headers.get("content-length", "0"))).decode()
         response = {
             "origin": count,
@@ -137,6 +141,8 @@ def run(binary, work):
     try:
         for _ in range(2):
             server = Fixture(("127.0.0.1", 0), Handler)
+            server.hold_started = threading.Event()
+            server.hold_release = threading.Event()
             server.jwks = jwks
             server.counts = collections.Counter()
             server.count_lock = threading.Lock()
@@ -155,6 +161,14 @@ def run(binary, work):
                 for path in ("vary", "star", "write", "large", "cb/cached")
             ] + [
                 {"id": "swap", "prefix": "/swap", "upstream": "origin", "cache": True},
+                {"prefix": "/keylimit", "upstream": "origin", "rate_limit": {
+                    "requests": 1, "interval": "60s", "key": "header.x-client"}},
+                {"prefix": "/keycap", "upstream": "origin", "concurrency": {
+                    "max": 1, "key": "header.x-client"}},
+                {"prefix": "/keycapfallback", "upstream": "origin", "concurrency": {
+                    "max": 1, "key": "header.x-client", "missing_key": "route"}},
+                {"prefix": "/keyfallback", "upstream": "origin", "rate_limit": {
+                    "requests": 1, "interval": "60s", "key": "header.x-client", "missing_key": "route"}},
                 {"prefix": "/healthprobe", "upstream": "health"},
                 {"prefix": "/memberprobe", "upstream": "memberhealth"},
                 {"prefix": "/mixedprobe", "upstream": "mixedhealth"},
@@ -253,6 +267,22 @@ def run(binary, work):
             raise AssertionError("timed out: " + description)
 
         wait_until(lambda: request("/health")[0] == 200, "gateway startup", timeout=30)
+        for path in ("/keylimit", "/keycap"):
+            for headers in ({}, {"x-client": ""}, {"x-client": "a,b"}, {"x-client": "a b"},
+                            [("x-client", "a"), ("x-client", "a")]):
+                checks.check(request(path, headers)[0] == 400, "absent or ambiguous policy key refused: " + path)
+            checks.check(request(path, {"x-client": "alice"})[0] == 200, "valid policy key admitted: " + path)
+        checks.check(request("/keylimit", {"x-client": " alice "})[0] == 429,
+                     "equivalent header formatting cannot reset quota")
+        checks.check(request("/keyfallback")[0] == 200 and request("/keyfallback")[0] == 429,
+                     "explicit route fallback counts missing header requests")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            held = executor.submit(request, "/keycapfallback")
+            checks.check(servers[0].hold_started.wait(3), "fallback request holds its upstream slot")
+            checks.check(request("/keycapfallback")[0] == 503, "concurrent fallback request cannot skip cap")
+            servers[0].hold_release.set()
+            checks.check(held.result()[0] == 200 and request("/keycapfallback")[0] == 200,
+                         "completed fallback request releases its slot")
         auth = {"authorization": token()}
         checks.check(request("/bound?merchantId=11", auth)[0] == 200, "a unique ownership parameter passes")
         for query in ("merchantId=11&merchantId=12", "merchantId=11&%6derchantId=12",

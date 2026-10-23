@@ -3,6 +3,13 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## Unreleased
+
+- Missing rate-limit and concurrency keys reject with 400 by default; explicit
+  `missing_key: route|ip|skip` selects fallback/optional behavior. Header keys
+  reject ambiguity and normalize outer whitespace. CLI diagnostics, offline
+  `expect.policy_keys`, and schemas expose the policy. See UPGRADING.
+
 ## 0.1.8 — shared rate limits, concurrency caps, case-insensitive deny-list
 
 - **Shared rate limits.** `counter: shared` puts rate-limit counters in a cache
