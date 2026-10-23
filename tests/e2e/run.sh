@@ -529,6 +529,11 @@ curl -s -m 5 -H "Cookie: access_token=$TOK" "$G/bff/v1/loyalty/settings" > "$WOR
 python3 "$E2E/assert_header.py" "$WORK/ck.json" x-auth-subject 4821 \
   && ok "identity injected from a cookie token" || bad "cookie token identity not injected"
 expect "expired"                            401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py expired)"  "$G/bff/v1/loyalty/settings"
+for claim in iat auth_time; do
+  for variant in missing null string negative fraction future; do
+    expect "Firebase $claim $variant" 401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py "$claim-$variant")" "$G/bff/v1/loyalty/settings"
+  done
+done
 expect "wrong audience"                     401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py wrongaud)" "$G/bff/v1/loyalty/settings"
 expect "tampered signature"                 401 -H "Authorization: Bearer ${TOK%?}X" "$G/bff/v1/loyalty/settings"
 FORGED=$(python3 -c "

@@ -27,6 +27,13 @@ key = "key.pem"
 
 if mode == "expired":
     payload["iat"], payload["exp"] = now - 7200, now - 3600
+elif mode.startswith("iat-") or mode.startswith("auth_time-"):
+    claim, variant = mode.split("-", 1)
+    if variant == "missing":
+        payload.pop(claim)
+    else:
+        payload[claim] = {"null": None, "string": "900", "negative": -1,
+                          "fraction": now - 10.5, "future": now + 3600}[variant]
 elif mode == "wrongaud":
     payload["aud"] = "some-other-project"
 elif mode == "otherproject":

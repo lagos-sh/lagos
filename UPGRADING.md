@@ -367,3 +367,8 @@ cache, even with public cache directives or Vary: Cookie. Set-Cookie responses
 never fill it, even if marked public. Remove irrelevant cookies at a trusted
 ingress only when the application demonstrably ignores them; do not strip
 session cookies just to recover cache hit rates.
+
+Firebase tokens must now contain unsigned numeric `iat` and `auth_time`, neither
+in the future beyond configured clock skew. Previously unsupported required
+claims in jsonwebtoken allowed missing/malformed iat and auth_time through.
+Real Firebase ID tokens already contain both; update custom test token issuers.

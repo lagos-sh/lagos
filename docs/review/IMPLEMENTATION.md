@@ -73,3 +73,11 @@ three JWKS socket tests that failed under sandbox socket restrictions (not code
 failures); final workspace tests require loopback permission. Updated local
 E2E: 68 gateway regression checks passed, including held fallback concurrency
 and anonymous/session-cookie isolation. Final full suite follows later patches.
+
+## A3 — Firebase timestamps
+
+Explicit post-signature checks now require unsigned `iat` and `auth_time` and
+reject future values outside clock skew. This follows Firebase's published
+[verification requirements](https://firebase.google.com/docs/auth/admin/verify-id-tokens).
+Six focused unit tests passed; twelve signed-token variants were added to the
+full E2E suite for final execution. No change to signature/audience/expiry rules.

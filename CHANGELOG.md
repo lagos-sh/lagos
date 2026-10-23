@@ -5,6 +5,9 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## Unreleased
 
+- Firebase explicitly validates signed `iat` and `auth_time` presence, type and
+  future timestamps; jsonwebtoken does not enforce these names itself.
+
 - Shared response caching rejects every `Set-Cookie` response and bypasses
   lookup/fill for any request with `Cookie`, including unconfigured application
   session cookies and empty Cookie fields. Existing authorized/Vary checks remain.
