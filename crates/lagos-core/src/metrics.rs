@@ -52,6 +52,7 @@ pub struct Metrics {
     extensions: HistogramVec,
     request_deadlines: prometheus::IntCounter,
     discovery: IntCounterVec,
+    cache_fills_abandoned: IntCounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -72,6 +73,13 @@ pub fn metrics() -> Option<&'static Metrics> {
 impl Metrics {
     fn build() -> prometheus::Result<Self> {
         Ok(Self {
+            cache_fills_abandoned: register_int_counter_vec!(
+                "gateway_cache_fills_abandoned_total",
+                "Cache fills dropped before storing; the response was still served. \
+                 object_too_large: over max_object_size. fill_budget: max_inflight_fill \
+                 was exhausted by concurrent fills.",
+                &["reason"]
+            )?,
             discovery: register_int_counter_vec!(
                 "gateway_upstream_discovery_total",
                 "Pool membership refreshes: updated, unchanged, or failed and rejected \
@@ -175,6 +183,16 @@ impl Metrics {
         self.extensions
             .with_label_values(&[extension, outcome])
             .observe(seconds);
+    }
+
+    pub fn record_cache_fill_abandoned(&self, reason: &str) {
+        let reason = match reason {
+            "object_too_large" | "fill_budget" => reason,
+            _ => "other",
+        };
+        self.cache_fills_abandoned
+            .with_label_values(&[reason])
+            .inc();
     }
 
     pub fn record_discovery(&self, upstream: &str, outcome: &str) {

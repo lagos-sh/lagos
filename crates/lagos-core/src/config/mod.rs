@@ -115,6 +115,17 @@ pub struct CacheConfig {
     #[serde(default = "default_max_object", deserialize_with = "de_byte_size")]
     #[schemars(schema_with = "schema::byte_size")]
     pub max_object_size: u64,
+    /// Body bytes all in-progress fills may buffer together. Each fill holds
+    /// its whole body until it completes, so without this, many concurrent
+    /// misses on distinct keys could buffer `max_object_size` each, outside
+    /// `max_size`. A fill that would exceed it is proxied without being
+    /// stored. At least `max_object_size`.
+    #[serde(
+        default = "default_max_inflight_fill",
+        deserialize_with = "de_byte_size"
+    )]
+    #[schemars(schema_with = "schema::byte_size")]
+    pub max_inflight_fill: u64,
     /// Freshness for a response whose upstream said nothing about caching.
     #[serde(with = "humantime_serde", default = "d60")]
     #[schemars(with = "String")]
@@ -130,6 +141,9 @@ fn default_cache_size() -> u64 {
 }
 fn default_max_object() -> u64 {
     8 * 1024 * 1024
+}
+fn default_max_inflight_fill() -> u64 {
+    64 * 1024 * 1024
 }
 fn d0() -> Duration {
     Duration::ZERO
@@ -2493,6 +2507,17 @@ impl GatewayConfig {
             }
         }
 
+        if let Some(c) = &self.cache
+            && c.max_inflight_fill < c.max_object_size
+        {
+            return Err(ConfigError::invalid(format!(
+                "cache.max_inflight_fill ({} bytes) is smaller than cache.max_object_size \
+                 ({} bytes), so the largest objects could never be stored; raise it or \
+                 lower max_object_size",
+                c.max_inflight_fill, c.max_object_size
+            )));
+        }
+
         for (name, up) in &self.upstreams {
             if let Some(cb) = &up.circuit_breaker {
                 if cb.failures == 0 {
@@ -3457,6 +3482,20 @@ routes:
             .expect_err("unlisted proxies refused");
         assert!(forged.to_string().contains("concurrency cap"), "{forged}");
         assert!(table(&route("{ max: 5, key: nope }")).is_err());
+    }
+
+    #[test]
+    fn the_cache_fill_budget_must_fit_the_largest_object() {
+        let routes = "routes:\n  public: [{prefix: /p, upstream: u}]\nupstreams: {u: http://u:1}\n";
+        let ok = parse(&format!("cache: {{}}\n{routes}")).expect("defaults parse");
+        let c = ok.raw.cache.as_ref().expect("cache");
+        assert_eq!(c.max_inflight_fill, 64 * 1024 * 1024);
+        let Err(err) = parse(&format!(
+            "cache: {{max_object_size: 8MiB, max_inflight_fill: 1MiB}}\n{routes}"
+        )) else {
+            panic!("a budget below one object must be refused")
+        };
+        assert!(err.to_string().contains("max_inflight_fill"));
     }
 
     #[test]

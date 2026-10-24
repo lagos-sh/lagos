@@ -71,3 +71,33 @@ sets (host-specific, wildcard and host-less routes; method filters; disabled
 routes; repeated and non-ASCII segments; both listener partitions; a 2,000
 segment path). `prefix_candidates` (CLI explain / why-not) still scans
 linearly, so its diagnostics are unchanged.
+
+## Cache storage (C4)
+
+`cargo bench -p lagos-core --bench cache` drives `MemoryStorage` directly
+through Pingora's `Storage` interface: hits (lookup plus reading the whole
+body), fills (miss handler, one body write, finish), fills into a cache that
+holds about 16 bodies so nearly every fill evicts, missing-key lookups, and
+hits from every core at once (aggregate ns per hit). Same machine, toolchain
+and method as above; 1,024 keys cycle; 200 samples for hits, 60 for fills, each
+of 256 operations. It does not include HTTP parsing, `pingora-cache` freshness
+logic or the cache lock, so it bounds storage cost only.
+
+`cache-before.csv` is the storage before the in-flight fill budget; three
+runs each, p50 ns/op:
+
+| Workload | Body | Before | After budget |
+| --- | ---: | ---: | ---: |
+| hit | 1 KiB | 1,467–1,693 | 1,470–1,681 |
+| hit | 1 MiB | 2,314–2,427 | 2,304–2,323 |
+| fill | 1 KiB | 3,994–4,234 | 4,139–4,199 |
+| fill | 1 MiB | 89,127–92,502 | 88,049–89,293 |
+| fill, evicting | 1 MiB | 104,548–117,867 | 115,881–117,472 |
+| miss lookup | – | 595–597 | 578–579 |
+| hit, 6 threads (aggregate) | 1 KiB | 412–434 | 414–552 |
+
+The budget is one atomic update per body chunk; its cost is inside run-to-run
+noise. Hits are dominated by fixed per-lookup work rather than body size (a
+1 MiB hit costs about 1.5x a 1 KiB one, since bodies are shared slices).
+Peak RSS in `cache-*-resources.txt` (about 2.4 GB) is the benchmark's own warm
+sets of 1,024 bodies up to 1 MiB, not gateway overhead.

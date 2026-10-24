@@ -189,6 +189,42 @@
               "description": "Freshness for a response whose upstream said nothing about caching.",
               "type": "string"
             },
+            "max_inflight_fill": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "pattern": "^\\s*[0-9]+\\s*([bB]|[kKmMgG]([bB]|[iI][bB])?)?\\s*$",
+                      "type": "string"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "default": 67108864,
+              "description": "Body bytes all in-progress fills may buffer together. Each fill holds\nits whole body until it completes, so without this, many concurrent\nmisses on distinct keys could buffer `max_object_size` each, outside\n`max_size`. A fill that would exceed it is proxied without being\nstored. At least `max_object_size`.",
+              "examples": [
+                52428800,
+                "50mb",
+                "8 MiB"
+              ]
+            },
             "max_object_size": {
               "anyOf": [
                 {
