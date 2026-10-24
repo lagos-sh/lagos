@@ -186,6 +186,24 @@ pub enum AuthError {
     Unavailable(String),
 }
 
+/// Longest token-supplied value quoted in a rejection reason or log line.
+const UNTRUSTED_QUOTE_CHARS: usize = 64;
+
+/// A token-supplied value (`kid`, `iss`) made safe to put in a log line:
+/// control characters and quotes escaped, so a crafted value cannot forge a
+/// line in the text log format, and long values truncated.
+pub(crate) fn untrusted(value: &str) -> String {
+    let mut out: String = value
+        .chars()
+        .take(UNTRUSTED_QUOTE_CHARS)
+        .flat_map(char::escape_debug)
+        .collect();
+    if value.chars().nth(UNTRUSTED_QUOTE_CHARS).is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
 #[async_trait::async_trait]
 pub trait TokenVerifier: Send + Sync + 'static {
     async fn verify(&self, token: &str) -> Result<Identity, AuthError>;
@@ -194,6 +212,16 @@ pub trait TokenVerifier: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untrusted_values_cannot_forge_log_lines_or_grow_without_bound() {
+        assert_eq!(untrusted("k1"), "k1");
+        let forged = untrusted("k1\nlevel=ERROR msg=\"forged\"\u{1b}[31m");
+        assert!(!forged.contains('\n') && !forged.contains('\u{1b}'));
+        assert!(forged.starts_with("k1\\n"));
+        let long = untrusted(&"é".repeat(5000));
+        assert!(long.ends_with("...") && long.chars().count() == UNTRUSTED_QUOTE_CHARS + 3);
+    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

@@ -57,10 +57,9 @@ impl Cached {
     /// A miss on a *fresh* cache is a bad `kid`, not a reason to refetch.
     /// Google rotation is handled by expiry, not by every unknown kid.
     fn key(&self, kid: &str) -> Result<DecodingKey, AuthError> {
-        self.keys
-            .get(kid)
-            .cloned()
-            .ok_or_else(|| AuthError::Invalid(format!("unknown signing key `{kid}`")))
+        self.keys.get(kid).cloned().ok_or_else(|| {
+            AuthError::Invalid(format!("unknown signing key `{}`", super::untrusted(kid)))
+        })
     }
 }
 

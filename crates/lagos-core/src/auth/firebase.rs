@@ -96,7 +96,12 @@ impl TokenVerifier for FirebaseVerifier {
     async fn verify(&self, token: &str) -> Result<Identity, AuthError> {
         let iss = unverified_issuer(token)?;
         let project_id = project_id_from_issuer(&iss)
-            .ok_or_else(|| AuthError::Invalid(format!("issuer `{iss}` is not a Firebase issuer")))?
+            .ok_or_else(|| {
+                AuthError::Invalid(format!(
+                    "issuer `{}` is not a Firebase issuer",
+                    super::untrusted(&iss)
+                ))
+            })?
             .to_string();
 
         if !self.project_ids.contains(&project_id) {

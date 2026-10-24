@@ -1204,7 +1204,10 @@ impl ProxyHttp for Gateway {
                                     ctx,
                                     Rejection::unavailable(
                                         "Token issuer is not configured on this gateway",
-                                        format!("unknown_issuer_{project}"),
+                                        format!(
+                                            "unknown_issuer_{}",
+                                            crate::auth::untrusted(&project)
+                                        ),
                                     ),
                                 )
                                 .await;
