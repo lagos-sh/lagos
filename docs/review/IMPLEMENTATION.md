@@ -165,3 +165,9 @@ Two focused CSRF tests passed and Clippy passed. Local E2E exercised safe cookie
 requests, unsafe positive/negative Origin/Referer cases, duplicate Origin,
 bearer compatibility and repeated credentials. Application CSRF responsibilities,
 SameSite/deployment choices and default-disabled migration are documented.
+
+A5 integration follow-up: complete local suite now passes 83 gateway and 19
+route-default checks. Corrected two fixture assumptions: configured credential
+stripping removes empty Cookie fields; and an old reload log plus 404 cannot
+prove a new route is active. The test now waits for that new route's admitted
+request and verifies its next request is limited.

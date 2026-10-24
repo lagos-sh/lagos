@@ -335,7 +335,7 @@ def run(binary, work):
             anonymous_cookie = request(path)[1]
             for cookie in ("session=alice", "session=bob", "", "session=alice"):
                 status, data, _ = request(path, {"cookie": cookie})
-                checks.check(status == 200 and data["cookie"] == cookie and data != anonymous_cookie,
+                checks.check(status == 200 and data["cookie"] == (cookie or None) and data != anonymous_cookie,
                              "cookie request bypasses anonymous cache: " + path)
             checks.check(request(path)[1] == anonymous_cookie,
                          "personalized cookie fills cannot replace the anonymous entry: " + path)
@@ -545,9 +545,11 @@ def run_defaults(binary, work):
                         config_path.write_text(json.dumps(config))
                         groups["public"].append({"prefix": "/fresh", "upstream": "origin"})
                         publish(groups)
-                        wait_until(lambda: request("/fresh", "POST") == 404 and "gateway.routes.reloaded" in log_path.read_text(),
-                                   "defaults route reload")
-                        checks.check(request("/fresh") == 200 and request("/fresh") == 429,
+                        # Wait for the new route itself, consuming its one
+                        # allowed request. An earlier reload log plus a 404
+                        # cannot establish that this replacement is active.
+                        wait_until(lambda: request("/fresh") == 200, "defaults route reload")
+                        checks.check(request("/fresh", "POST") == 404 and request("/fresh") == 429,
                                      "reload retains captured startup defaults despite main-file edits")
                         checks.check(request("/inherit") == 429,
                                      "unchanged effective limiter keeps spent quota across reload")
