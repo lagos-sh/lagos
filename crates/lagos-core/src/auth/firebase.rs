@@ -38,6 +38,12 @@ impl FirebaseVerifier {
         }
     }
 
+    /// Allow previously fetched keys for a fixed interval after expiry when refresh fails.
+    pub fn with_stale_if_error(mut self, maximum: Duration) -> Self {
+        self.certs = self.certs.with_stale_if_error(maximum);
+        self
+    }
+
     /// Issuer URLs this verifier accepts, one per configured project.
     pub fn issuers(&self) -> Vec<String> {
         self.project_ids

@@ -794,6 +794,11 @@
                 }
               ],
               "description": "Firebase project IDs whose tokens are accepted. A token is routed to a\nproject by its `iss` claim; unknown issuers are refused.\n\nOnly project *IDs* are needed. Unlike the Firebase Admin SDK, verifying\na token requires no service-account credentials, so this gateway holds\nno private keys."
+            },
+            "stale_if_error": {
+              "default": "0s",
+              "description": "Maximum stale interval after original certificate expiry on provider errors.\nZero (default) fails closed; stale use delays emergency key revocation.",
+              "type": "string"
             }
           },
           "required": [
@@ -1265,6 +1270,11 @@
               ],
               "default": [],
               "description": "Claims that must be present beyond the standard set."
+            },
+            "stale_if_error": {
+              "default": "0s",
+              "description": "Maximum stale interval after original key expiry during provider errors.\nZero (default) fails closed; stale use delays emergency key revocation.",
+              "type": "string"
             }
           },
           "required": [

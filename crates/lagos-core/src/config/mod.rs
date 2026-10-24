@@ -1542,6 +1542,11 @@ pub struct JwtConfig {
     #[serde(with = "humantime_serde", default = "d300")]
     #[schemars(with = "String")]
     pub min_key_ttl: Duration,
+    /// Maximum stale interval after original key expiry during provider errors.
+    /// Zero (default) fails closed; stale use delays emergency key revocation.
+    #[serde(with = "humantime_serde", default = "d0")]
+    #[schemars(with = "String")]
+    pub stale_if_error: Duration,
 }
 
 fn default_algorithms() -> Vec<String> {
@@ -1580,6 +1585,11 @@ pub struct FirebaseConfig {
     #[serde(with = "humantime_serde", default = "d300")]
     #[schemars(with = "String")]
     pub min_cert_ttl: Duration,
+    /// Maximum stale interval after original certificate expiry on provider errors.
+    /// Zero (default) fails closed; stale use delays emergency key revocation.
+    #[serde(with = "humantime_serde", default = "d0")]
+    #[schemars(with = "String")]
+    pub stale_if_error: Duration,
 }
 
 fn default_certs_url() -> String {

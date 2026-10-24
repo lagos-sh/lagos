@@ -48,6 +48,7 @@ pub struct Metrics {
     cache: IntCounterVec,
     shared_limit_keys: prometheus::IntCounter,
     shared_limit_errors: prometheus::IntCounter,
+    jwks: IntCounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -68,6 +69,11 @@ pub fn metrics() -> Option<&'static Metrics> {
 impl Metrics {
     fn build() -> prometheus::Result<Self> {
         Ok(Self {
+            jwks: register_int_counter_vec!(
+                "gateway_jwks_total",
+                "Signing-key refresh and bounded stale-key outcomes.",
+                &["outcome"]
+            )?,
             requests: register_int_counter_vec!(
                 "gateway_requests_total",
                 "Requests answered, by route, method and status.",
@@ -136,6 +142,14 @@ impl Metrics {
                  traffic is unaffected."
             )?,
         })
+    }
+
+    pub fn record_jwks(&self, outcome: &str) {
+        let outcome = match outcome {
+            "refresh_failed" | "stale_used" | "stale_exhausted" => outcome,
+            _ => "other",
+        };
+        self.jwks.with_label_values(&[outcome]).inc();
     }
 
     pub fn record_request(&self, route: &str, method: &str, status: u16, seconds: f64) {
@@ -257,6 +271,8 @@ pub fn normalize_reason(reason: &str) -> String {
         | "bad_machine_credential"
         | "missing_client_key"
         | "bad_client_key"
+        | "missing_limit_key"
+        | "invalid_limit_key"
         | "rate_limited"
         | "concurrency_limited"
         | "circuit_open"

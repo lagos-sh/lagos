@@ -372,3 +372,8 @@ Firebase tokens must now contain unsigned numeric `iat` and `auth_time`, neither
 in the future beyond configured clock skew. Previously unsupported required
 claims in jsonwebtoken allowed missing/malformed iat and auth_time through.
 Real Firebase ID tokens already contain both; update custom test token issuers.
+
+JWT and Firebase config structs add `stale_if_error: Duration` (default zero).
+Existing constructors preserve zero; builder methods opt in without changing
+constructor signatures. See [JWKS resilience](docs/jwks-resilience.md) for the
+emergency-revocation tradeoff.

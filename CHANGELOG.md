@@ -5,6 +5,10 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## Unreleased
 
+- JWKS refresh leadership is cancellation safe. JWT/Firebase issuers may opt
+  into fixed `stale_if_error` intervals; default remains fail closed. New
+  bounded outcome metrics report failed refreshes, stale use and exhaustion.
+
 - Firebase explicitly validates signed `iat` and `auth_time` presence, type and
   future timestamps; jsonwebtoken does not enforce these names itself.
 

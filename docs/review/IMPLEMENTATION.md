@@ -81,3 +81,22 @@ reject future values outside clock skew. This follows Firebase's published
 [verification requirements](https://firebase.google.com/docs/auth/admin/verify-id-tokens).
 Six focused unit tests passed; twelve signed-token variants were added to the
 full E2E suite for final execution. No change to signature/audience/expiry rules.
+
+## B1 — JWKS cancellation and stale keys
+
+Implemented cancellation-safe leadership and issuer-specific opt-in
+`stale_if_error` (zero default). Fixed deadline is original expiry plus grace;
+only a cached matching kid can be returned. Normal signature/claim checks still
+run. Successful rotation replaces keys; removed keys cannot be resurrected.
+Metrics distinguish refresh failure, stale use and exhausted grace. Existing
+constructors keep default behavior; builders opt in. Schemas regenerated.
+
+Independent review identified an old-leader/new-leader cleanup race, corrected
+by disarming under the slot lock before publication. Ten JWKS unit/integration
+tests passed with loopback permission, including concurrent failures,
+cancellation, rotation, recovery, exhaustion and cold cache. Local E2E passed
+73 gateway + 18 defaults checks; wrong-audience, expired, unknown-kid and bad
+signature tokens remain rejected during stale-key operation. Initial attempt
+against an old binary failed config loading; rebuilt binary passed. Clippy and
+schema tests passed before adding the final rotation/outage fixtures; final
+workspace checks will cover the complete patch.

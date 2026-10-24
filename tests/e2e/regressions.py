@@ -76,6 +76,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/member-hc" and self.headers.get("host") != self.server.health_host:
             status = 400
         if path == "/jwks":
+            if getattr(self.server, "jwks_outage", False):
+                status = 503
             response = self.server.jwks
         if path == "/bound":
             response["merchantId"] = dict(urllib.parse.parse_qsl(
@@ -92,7 +94,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("set-cookie", f"session=user-{count}; HttpOnly")
         if path == "/cookievary":
             self.send_header("vary", "cookie")
-        if path == "/authcache" and self.headers.get("x-auth-subject"):
+        if path == "/jwks":
+            self.send_header("cache-control", "max-age=0")
+        elif path == "/authcache" and self.headers.get("x-auth-subject"):
             self.send_header("cache-control", "private, no-store")
         elif path in ("/authshared", "/varyidentity", "/cookieset", "/cookieplain", "/cookievary"):
             self.send_header("cache-control", "public, max-age=60")
@@ -129,12 +133,12 @@ def run(binary, work):
     jwks = {"keys": [{"kty": "RSA", "kid": "regression", "use": "sig",
                       "n": b64(bytes.fromhex(modulus)), "e": "AQAB"}]}
 
-    def token(subject="11", issuer="https://regression.test", issued_at="valid"):
+    def token(subject="11", issuer="https://regression.test", issued_at="valid", audience="regression-api", expired=False, kid="regression"):
         now = int(time.time())
-        payload = {"iss": issuer, "sub": subject, "aud": "regression-api", "exp": now + 3600}
+        payload = {"iss": issuer, "sub": subject, "aud": audience, "exp": now - 3600 if expired else now + 3600}
         if issued_at != "missing":
             payload["iat"] = now - 10 if issued_at == "valid" else issued_at
-        message = b64(json.dumps({"alg": "RS256", "kid": "regression"}).encode())
+        message = b64(json.dumps({"alg": "RS256", "kid": kid}).encode())
         message += "." + b64(json.dumps(payload).encode())
         signature = subprocess.check_output(
             ["openssl", "dgst", "-sha256", "-sign", str(key)], input=message.encode())
@@ -211,7 +215,7 @@ def run(binary, work):
                                            "pool_sample_interval": "100ms"}},
             "cache": {"max_size": "64KiB", "max_object_size": "4KiB"},
             "auth": {"jwt": [{"issuer": "https://regression.test", "audience": ["regression-api"],
-                               "jwks_url": origin + "/jwks"}]},
+                               "jwks_url": origin + "/jwks", "min_key_ttl": "100ms", "stale_if_error": "5s"}]},
             "forward": {"authorization": False, "headers": ["x-merchant-id", "cookie"]},
             "cors": {"origins": ["https://app.test"]},
             "upstreams": {
@@ -342,6 +346,17 @@ def run(binary, work):
         for issued_at in ("missing", None, "not-a-timestamp", -1, time.time() + 3600, int(time.time()) + 3600):
             checks.check(request("/identity", {"authorization": token(issued_at=issued_at)})[0] == 401,
                          f"invalid iat refused: {issued_at}")
+        servers[0].jwks_outage = True
+        time.sleep(0.15)
+        checks.check(request("/identity", auth)[0] == 200, "bounded stale keys preserve valid signature verification during outage")
+        valid_token = token()
+        prefix, signature = valid_token.rsplit(".", 1)
+        bad_signature = prefix + "." + ("A" if signature[0] != "A" else "B") + signature[1:]
+        for invalid_token in (token(audience="other-api"), token(expired=True),
+                              token(kid="unknown"), bad_signature):
+            checks.check(request("/identity", {"authorization": invalid_token})[0] == 401,
+                         "stale-key use still rejects invalid claims, unknown kid or signature")
+        servers[0].jwks_outage = False
         peers = set()
         for i in range(32):
             user = {"authorization": token(subject=str(i))}

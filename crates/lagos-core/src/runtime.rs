@@ -148,12 +148,15 @@ impl Runtime {
         let mut router = crate::auth::jwt::IssuerRouter::new();
 
         if let Some(fb) = &cfg.raw.auth.firebase {
-            let verifier = Arc::new(crate::auth::firebase::FirebaseVerifier::new(
-                cfg.firebase_project_ids.clone(),
-                fb.certs_url.clone(),
-                fb.clock_skew,
-                fb.min_cert_ttl,
-            ));
+            let verifier = Arc::new(
+                crate::auth::firebase::FirebaseVerifier::new(
+                    cfg.firebase_project_ids.clone(),
+                    fb.certs_url.clone(),
+                    fb.clock_skew,
+                    fb.min_cert_ttl,
+                )
+                .with_stale_if_error(fb.stale_if_error),
+            );
             let issuers = verifier.issuers();
             router
                 .register(issuers, verifier as Arc<dyn crate::auth::TokenVerifier>)
@@ -166,15 +169,18 @@ impl Runtime {
                 .iter()
                 .filter_map(|a| crate::config::parse_algorithm(a))
                 .collect();
-            let verifier = Arc::new(crate::auth::jwt::JwtVerifier::new(
-                j.issuer.clone(),
-                j.audience.clone(),
-                j.resolved_jwks_url(),
-                algorithms,
-                j.required_claims.clone(),
-                j.clock_skew,
-                j.min_key_ttl,
-            ));
+            let verifier = Arc::new(
+                crate::auth::jwt::JwtVerifier::new(
+                    j.issuer.clone(),
+                    j.audience.clone(),
+                    j.resolved_jwks_url(),
+                    algorithms,
+                    j.required_claims.clone(),
+                    j.clock_skew,
+                    j.min_key_ttl,
+                )
+                .with_stale_if_error(j.stale_if_error),
+            );
             router
                 .register(
                     vec![j.issuer.clone()],
