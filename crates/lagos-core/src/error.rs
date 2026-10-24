@@ -43,6 +43,19 @@ impl Rejection {
         )
     }
 
+    /// Never include the supplied key or credential in a rejection.
+    pub fn limit_key(error: crate::ratelimit::KeyError) -> Self {
+        Self::new(
+            400,
+            json!({"statusCode": 400, "message": "A valid policy key is required", "error": "Bad Request"}),
+            "gateway.limit_key.rejected",
+            match error {
+                crate::ratelimit::KeyError::Missing => "missing_limit_key",
+                crate::ratelimit::KeyError::Invalid => "invalid_limit_key",
+            },
+        )
+    }
+
     /// Too many requests.
     ///
     /// Carries `retry_after` so the caller is told when to come back rather

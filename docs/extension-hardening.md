@@ -1,7 +1,8 @@
 # Extension hardening and language-independent checks
 
-Status: roadmap proposal, not implemented in 0.1.4. Configuration names, numeric
-defaults and the wire contract need review before implementation.
+Status: native per-hook/chain deadlines and optional shared execution capacity
+are implemented in unreleased source; see [execution budgets](extensions.md#execution-budgets).
+Per-name overrides and language-independent policy contracts below remain proposals.
 
 Extensions run on the request path. A slow application lookup or unfinished
 check must not make Lagos wait indefinitely or forward a request whose required

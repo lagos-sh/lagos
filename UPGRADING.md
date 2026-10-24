@@ -37,6 +37,86 @@ A deployment that does not use the response cache can build without it:
 
 ---
 
+## 0.1.8 → 0.1.9 — fail-closed policy keys, cache and cookie hardening, hostname pools (unreleased)
+
+Missing rate-limit/concurrency keys now reject with 400 by default. Previously
+such requests silently skipped the policy. On optional identity-keyed routes,
+choose `missing_key: route` or `ip` to bound anonymous traffic. Use explicit
+`skip` only when unlimited missing-key traffic is intentional. Repeated, empty,
+comma-separated or malformed header keys now always reject. Adding the public
+Rust configuration fields requires library users constructing struct literals
+to set `missing_key: MissingKey::Reject` (or another explicit policy).
+
+Shared-cache migration: cookie-bearing requests now always bypass the shared
+cache, even with public cache directives or Vary: Cookie. Set-Cookie responses
+never fill it, even if marked public. Remove irrelevant cookies at a trusted
+ingress only when the application demonstrably ignores them; do not strip
+session cookies just to recover cache hit rates.
+
+Firebase tokens must now contain unsigned numeric `iat` and `auth_time`, neither
+in the future beyond configured clock skew. Previously unsupported required
+claims in jsonwebtoken allowed missing/malformed iat and auth_time through.
+Real Firebase ID tokens already contain both; update custom test token issuers.
+
+JWT and Firebase config structs add `stale_if_error: Duration` (default zero).
+Existing constructors preserve zero; builder methods opt in without changing
+constructor signatures. See [JWKS resilience](docs/jwks-resilience.md) for the
+emergency-revocation tradeoff.
+
+Reloads now preserve limiter state for unchanged effective policy and route
+identity (including listener, prefix, host, methods, upstream, binding and
+extension scope). Changing any limiter setting creates a new bounded quota.
+Invalid extension references reject the reload while the last valid table
+continues serving. Concurrency remains owned by the gateway across reloads.
+Cache namespaces still rotate on every publication: conservative invalidation
+is retained until effective cache-policy fingerprints are independently proven.
+
+Native request extensions now default to a 2s per-hook and 5s complete-chain
+budget. Increase `timeouts.extension`/`extension_chain` for known slower trusted
+policies; zero/unlimited budgets are rejected. `limits.extension_inflight` adds
+optional immediate admission refusal. Custom Rust Timeouts/Limits struct
+literals require the new fields (or use Default update syntax). Extension trait
+signatures are unchanged. See [execution budgets](docs/extensions.md#execution-budgets).
+
+`timeouts.request_total` defaults to null. If enabled it also bounds uploads and
+SSE, including steady progress, and closes the exchange at expiry. Set it for
+the longest legitimate stream, or leave it unset in a streaming deployment.
+Existing `sse`/`upload` settings do not override it. See [resource budgets](docs/resource-budgets.md).
+
+`auth.cookie_protection` is opt-in and does not replace application CSRF
+protection by default. Enable exact trusted origins for cookie-authenticated
+unsafe methods; missing/null/ambiguous origins then reject with 403. Referer
+fallback is separately opt-in. Duplicate Authorization fields on verifying
+routes now reject with 401. AuthConfig/ResolvedConfig gain the corresponding
+optional policy field. See [cookie authentication](docs/cookie-authentication.md).
+
+Pool targets may now be hostnames. A pool that previously failed to start with
+`cannot resolve ... invalid socket addr` now starts, with one member per
+resolved address (each carrying the target's weight). IP-literal pools behave
+as before. `discovery` is opt-in; without it membership is fixed at startup.
+Library callers: `UpstreamConfig` gains `discovery: Option<DiscoveryConfig>`
+(struct literals need `discovery: None`), `Upstream::select` returns
+`Selected { target, addr }` where `addr` is the pool member to dial, and
+`upstream::Kind::Pool` names its field `targets` (a `Vec`, indexed per member)
+instead of the address-keyed `members` map.
+
+`cache.max_inflight_fill` defaults to 64 MiB and must be at least
+`max_object_size`; a configuration that raised `max_object_size` above 64 MiB
+must raise it too, or startup is refused. Under many concurrent misses some
+fills are now served without being stored rather than buffering without
+bound. Library callers building `CacheConfig` literals need the new field.
+Signing keys are refetched at least every 24 hours even if the endpoint
+advertises a longer `max-age`.
+
+**Shutdown timing.** A gateway receiving SIGTERM now exits after
+`server.graceful_shutdown` plus any `server.shutdown_grace`, instead of after
+Pingora's 300-second default (which, in Kubernetes, meant a SIGKILL at
+`terminationGracePeriodSeconds`). In-flight requests get that whole window;
+new connections are refused from the first moment, as before. If you relied
+on the long idle period to keep serving during endpoint propagation, that
+never worked (listeners were already closed); use a `preStop` sleep. See
+[deploying](docs/deploying.md#kubernetes-or-an-existing-ingress).
+
 ## 0.1.7 → 0.1.8 — shared rate limits, concurrency caps, case-insensitive deny-list
 
 No configuration change is needed. Shared counters and concurrency caps are

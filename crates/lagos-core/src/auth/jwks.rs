@@ -27,6 +27,23 @@ use super::AuthError;
 /// compromised key endpoint can make the gateway allocate.
 const MAX_KEY_SET_BYTES: u64 = 1024 * 1024;
 
+/// Longest a fetched key set is trusted, whatever `max-age` the endpoint sends.
+///
+/// Rotation is picked up only by expiry (an unknown `kid` on a fresh cache is
+/// refused, not refetched), so an endpoint advertising a year would refuse
+/// every token signed by a new key for that year and keep a revoked key valid
+/// as long. Real endpoints send hours. A configured minimum above this wins.
+const MAX_KEY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long to cache a key set: the endpoint's `max-age`, at least `min_ttl`,
+/// and at most [`MAX_KEY_TTL`] unless the operator's minimum is higher.
+fn key_set_ttl(max_age: Option<Duration>, min_ttl: Duration) -> Duration {
+    max_age
+        .unwrap_or(min_ttl)
+        .min(MAX_KEY_TTL.max(min_ttl))
+        .max(min_ttl)
+}
+
 struct Cached {
     keys: HashMap<String, DecodingKey>,
     expires_at: Instant,
@@ -40,10 +57,9 @@ impl Cached {
     /// A miss on a *fresh* cache is a bad `kid`, not a reason to refetch.
     /// Google rotation is handled by expiry, not by every unknown kid.
     fn key(&self, kid: &str) -> Result<DecodingKey, AuthError> {
-        self.keys
-            .get(kid)
-            .cloned()
-            .ok_or_else(|| AuthError::Invalid(format!("unknown signing key `{kid}`")))
+        self.keys.get(kid).cloned().ok_or_else(|| {
+            AuthError::Invalid(format!("unknown signing key `{}`", super::untrusted(kid)))
+        })
     }
 }
 
@@ -57,11 +73,27 @@ pub enum KeyFormat {
     X509Pem,
 }
 
+// A cancelled fetch must release its broadcast sender as well as its future.
+// Waiters receive a bounded failure, and the next request may lead a refresh.
+type RefreshSlot = Mutex<Option<broadcast::Sender<Result<(), String>>>>;
+struct RefreshLeader<'a>(Option<&'a RefreshSlot>);
+impl Drop for RefreshLeader<'_> {
+    fn drop(&mut self) {
+        let Some(slot) = self.0.take() else {
+            return;
+        };
+        if let Some(tx) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = tx.send(Err("certificate refresh interrupted".into()));
+        }
+    }
+}
+
 pub struct CertCache {
     client: reqwest::Client,
     url: String,
     format: KeyFormat,
     min_ttl: Duration,
+    stale_if_error: Duration,
     inner: RwLock<Option<Cached>>,
     /// Coordinates a single in-flight refresh. The mutex is never held across
     /// the HTTP call — it only publishes or subscribes to the broadcast.
@@ -87,9 +119,17 @@ impl CertCache {
             url,
             format,
             min_ttl,
+            stale_if_error: Duration::ZERO,
             inner: RwLock::new(None),
             inflight: Mutex::new(None),
         }
+    }
+
+    /// Opt in to bounded stale keys after a failed refresh. The bound is
+    /// measured from the original expiry and never extended by failures.
+    pub fn with_stale_if_error(mut self, maximum: Duration) -> Self {
+        self.stale_if_error = maximum;
+        self
     }
 
     /// Return the decoding key for `kid`.
@@ -104,7 +144,30 @@ impl CertCache {
             return cached.key(kid);
         }
 
-        self.refresh().await?;
+        if let Err(error) = self.refresh().await {
+            if !self.stale_if_error.is_zero()
+                && let Some(cached) = self.inner.read().await.as_ref()
+            {
+                // Unknown kids are never resolved with stale material.
+                if !cached.keys.contains_key(kid) {
+                    return cached.key(kid);
+                }
+                if cached
+                    .expires_at
+                    .checked_add(self.stale_if_error)
+                    .is_some_and(|until| Instant::now() < until)
+                {
+                    if let Some(metrics) = crate::metrics::metrics() {
+                        metrics.record_jwks("stale_used");
+                    }
+                    return cached.key(kid);
+                }
+                if let Some(metrics) = crate::metrics::metrics() {
+                    metrics.record_jwks("stale_exhausted");
+                }
+            }
+            return Err(error);
+        }
 
         let guard = self.inner.read().await;
         let cached = guard.as_ref().ok_or_else(|| {
@@ -146,6 +209,7 @@ impl CertCache {
             };
         }
 
+        let mut leader = RefreshLeader(Some(&self.inflight));
         let outcome = match self.fetch().await {
             Ok((keys, ttl)) => {
                 *self.inner.write().await = Some(Cached {
@@ -157,11 +221,19 @@ impl CertCache {
                 });
                 Ok(())
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                if let Some(metrics) = crate::metrics::metrics() {
+                    metrics.record_jwks("refresh_failed");
+                }
+                Err(e)
+            }
         };
 
         let notify = {
             let mut slot = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            // Disarm before publishing an empty slot: a later refresh may
+            // install its sender as soon as this mutex is released.
+            leader.0 = None;
             slot.take()
         };
         if let Some(tx) = notify {
@@ -197,9 +269,7 @@ impl CertCache {
             )));
         }
 
-        let ttl = max_age(resp.headers())
-            .unwrap_or(self.min_ttl)
-            .max(self.min_ttl);
+        let ttl = key_set_ttl(max_age(resp.headers()), self.min_ttl);
 
         // Read in chunks rather than `bytes()`, which buffers whatever arrives.
         // The endpoint is operator configuration, not caller input, but it is
@@ -352,6 +422,29 @@ pub fn decoding_key_from_x509_pem(pem: &str) -> Result<DecodingKey, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_advertised_key_lifetime_is_capped_but_the_operator_minimum_wins() {
+        let min = Duration::from_secs(60);
+        let hour = Duration::from_secs(3600);
+        assert_eq!(key_set_ttl(Some(hour), min), hour);
+        assert_eq!(key_set_ttl(None, min), min);
+        assert_eq!(key_set_ttl(Some(Duration::from_secs(1)), min), min);
+        assert_eq!(
+            key_set_ttl(Some(Duration::from_secs(365 * 86_400)), min),
+            MAX_KEY_TTL
+        );
+        // `max-age=18446744073709551615` used to overflow the expiry and make
+        // every verification refetch.
+        let huge = key_set_ttl(Some(Duration::from_secs(u64::MAX)), min);
+        assert_eq!(huge, MAX_KEY_TTL);
+        assert!(Instant::now().checked_add(huge).is_some());
+        let long_min = Duration::from_secs(2 * 86_400);
+        assert_eq!(
+            key_set_ttl(Some(Duration::from_secs(u64::MAX)), long_min),
+            long_min
+        );
+    }
     use reqwest::header::{CACHE_CONTROL, HeaderMap, HeaderValue};
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -382,6 +475,18 @@ mDzE1ub38vZH0fBp4LxDL3zeViZv7DyeAw==\n\
 -----END CERTIFICATE-----\n";
 
     fn spawn_cert_server(max_age: u64) -> (String, Arc<AtomicUsize>) {
+        spawn_cert_server_with_delay(max_age, Duration::ZERO)
+    }
+
+    fn spawn_cert_server_with_delay(max_age: u64, delay: Duration) -> (String, Arc<AtomicUsize>) {
+        spawn_controlled_cert_server(max_age, delay, Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn spawn_controlled_cert_server(
+        max_age: u64,
+        delay: Duration,
+        state: Arc<AtomicUsize>,
+    ) -> (String, Arc<AtomicUsize>) {
         let hits = Arc::new(AtomicUsize::new(0));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test cert server");
         let addr = listener.local_addr().expect("local_addr");
@@ -389,10 +494,23 @@ mDzE1ub38vZH0fBp4LxDL3zeViZv7DyeAw==\n\
         std::thread::spawn(move || {
             for incoming in listener.incoming() {
                 let Ok(mut stream) = incoming else { continue };
-                hits_clone.fetch_add(1, Ordering::SeqCst);
+                let first = hits_clone.fetch_add(1, Ordering::SeqCst) == 0;
+                let state = state.load(Ordering::SeqCst);
+                if first || state == 2 {
+                    std::thread::sleep(delay);
+                }
                 let mut buf = [0u8; 2048];
                 let _ = stream.read(&mut buf);
-                let body = serde_json::json!({ "known-kid": TEST_CERT_PEM }).to_string();
+                if state == 2 {
+                    let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                let kid = if state == 1 {
+                    "rotated-kid"
+                } else {
+                    "known-kid"
+                };
+                let body = serde_json::json!({ kid: TEST_CERT_PEM }).to_string();
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: max-age={max_age}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -401,6 +519,119 @@ mDzE1ub38vZH0fBp4LxDL3zeViZv7DyeAw==\n\
             }
         });
         (format!("http://{addr}/"), hits)
+    }
+
+    #[tokio::test]
+    async fn rotation_then_outage_cannot_resurrect_a_removed_key() {
+        let state = Arc::new(AtomicUsize::new(0));
+        let (url, _) = spawn_controlled_cert_server(3600, Duration::ZERO, state.clone());
+        let cache = CertCache::new(url, Duration::from_secs(1))
+            .with_stale_if_error(Duration::from_secs(60));
+        cache.key_for("known-kid").await.unwrap();
+        state.store(1, Ordering::SeqCst);
+        cache.inner.write().await.as_mut().unwrap().expires_at = Instant::now();
+        cache.key_for("rotated-kid").await.unwrap();
+        state.store(2, Ordering::SeqCst);
+        cache.inner.write().await.as_mut().unwrap().expires_at = Instant::now();
+        assert!(matches!(
+            cache.key_for("known-kid").await,
+            Err(AuthError::Invalid(_))
+        ));
+        assert!(cache.key_for("rotated-kid").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_expired_lookups_share_failed_refresh_and_can_retry() {
+        let state = Arc::new(AtomicUsize::new(0));
+        let (url, hits) =
+            spawn_controlled_cert_server(3600, Duration::from_millis(100), state.clone());
+        let cache = Arc::new(
+            CertCache::new(url, Duration::from_secs(1))
+                .with_stale_if_error(Duration::from_secs(60)),
+        );
+        cache.key_for("known-kid").await.unwrap();
+        cache.inner.write().await.as_mut().unwrap().expires_at = Instant::now();
+        state.store(2, Ordering::SeqCst);
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let cache = cache.clone();
+            tasks.push(tokio::spawn(
+                async move { cache.key_for("known-kid").await },
+            ));
+        }
+        for task in tasks {
+            assert!(task.await.unwrap().is_ok());
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        state.store(1, Ordering::SeqCst);
+        assert!(cache.key_for("rotated-kid").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_leader_does_not_strand_waiters() {
+        let (url, hits) = spawn_cert_server_with_delay(3600, Duration::from_millis(150));
+        let cache = Arc::new(CertCache::new(url, Duration::from_secs(1)));
+        let first = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.key_for("known-kid").await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while hits.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let waiter = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.key_for("known-kid").await }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        first.abort();
+        let _ = first.await;
+        // A waiter either receives cancellation or becomes the next leader.
+        let _ = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), cache.key_for("known-kid"))
+                .await
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_keys_are_bounded_and_recovery_replaces_them() {
+        let (url, _) = spawn_cert_server(3600);
+        let mut cache = CertCache::new(url.clone(), Duration::from_secs(1))
+            .with_stale_if_error(Duration::from_secs(60));
+        cache.key_for("known-kid").await.unwrap();
+        cache.inner.write().await.as_mut().unwrap().expires_at =
+            Instant::now() - Duration::from_secs(1);
+        cache.url = "http://127.0.0.1:1/unavailable".into();
+        assert!(cache.key_for("known-kid").await.is_ok());
+        assert!(matches!(
+            cache.key_for("unknown").await,
+            Err(AuthError::Invalid(_))
+        ));
+        cache.inner.write().await.as_mut().unwrap().expires_at =
+            Instant::now() - Duration::from_secs(61);
+        assert!(cache.key_for("known-kid").await.is_err());
+        cache.url = url;
+        assert!(cache.key_for("known-kid").await.is_ok());
+        cache.url = "http://127.0.0.1:1/unavailable".into();
+        cache.inner.write().await.as_mut().unwrap().expires_at =
+            Instant::now() - Duration::from_secs(1);
+        cache.stale_if_error = Duration::ZERO;
+        assert!(
+            cache.key_for("known-kid").await.is_err(),
+            "default stays fail closed"
+        );
+        let cold = CertCache::new(cache.url.clone(), Duration::from_secs(1))
+            .with_stale_if_error(Duration::from_secs(60));
+        assert!(cold.key_for("known-kid").await.is_err());
     }
 
     #[test]

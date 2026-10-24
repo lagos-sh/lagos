@@ -3,6 +3,71 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
+## 0.1.9 — policy hardening, hostname pools, indexed routes (unreleased)
+
+- Pools accept hostname targets. Pingora's `Backend::new` parses socket
+  addresses only, so a pool such as the README's `http://orders-1:3000` failed
+  to start. Every resolved address becomes a member that keeps its target's
+  authority, TLS name and health check, and the proxy dials the address the
+  balancer chose instead of resolving the name again. Optional per-upstream
+  `discovery: {interval, max_members}` re-resolves in the background with
+  atomic replacement; failed, empty, oversized or ambiguous refreshes keep the
+  last good members and are counted in `gateway_upstream_discovery_total`.
+- SIGTERM now exits after `server.graceful_shutdown` (25s by default). An unset
+  `shutdown_grace` was passed to Pingora as "unset", which Pingora reads as a
+  300s grace period, so every shutdown idled five minutes and ended in the
+  process manager's SIGKILL. `graceful_shutdown` was also mapped to Pingora's
+  runtime-shutdown timeout, which cancels async tasks at once; it is now the
+  drain window in which in-flight requests finish. A new end-to-end check
+  covers draining, refusal of new connections and exit time.
+- `cache.max_inflight_fill` (default 64 MiB) bounds the bytes all unfinished
+  cache fills buffer together. Before, misses on distinct keys could each hold
+  up to `max_object_size` outside `max_size`. Over-budget fills are served
+  uncached and counted in `gateway_cache_fills_abandoned_total`.
+- Token-supplied `kid` and `iss` values are escaped and truncated in rejection
+  reasons, so a crafted token cannot forge lines in the text log format.
+- Fetched signing keys are cached for at most 24 hours (or the configured
+  minimum, if higher), whatever `max-age` the endpoint sends. An uncapped
+  lifetime kept revoked keys valid and refused newly rotated keys for as long
+  as advertised, and `max-age` near `u64::MAX` made every verification refetch.
+- Route tables above 32 routes match through a segment index; at 10,000 routes
+  a lookup measured about 0.46 us instead of 35.5 us (hit). Matching semantics
+  are unchanged and covered by an equivalence test against the linear matcher.
+- CI pins third-party actions by commit, installs the pinned toolchain, builds
+  with `--locked`, checks feature combinations, and releases attest build
+  provenance for standalone archives and the published image manifest lists.
+
+- Optional `timeouts.request_total` bounds complete HTTP exchanges, including
+  progress-making streams. Timeout closes the connection and records a dedicated
+  deadline metric; omitted/null preserves existing streaming behavior.
+- Optional cookie-authentication origin protection checks unsafe requests
+  against exact trusted origins, with explicit Referer fallback. Bearer clients
+  remain supported; ambiguous Authorization fields on verifying routes reject.
+
+- Native extension hooks now have finite cooperative per-hook/chain budgets
+  (2s/5s), optional shared execution capacity, 503 timeout/capacity semantics,
+  duration/outcome metrics, and cancellation tests. No sandbox/preemption claim.
+
+- Unchanged effective limiter state survives route reloads. Reloads reject
+  missing extensions before publication, and an initial validated reload
+  closes the startup-to-watcher update gap. Cache namespaces still rotate.
+
+- JWKS refresh leadership is cancellation safe. JWT/Firebase issuers may opt
+  into fixed `stale_if_error` intervals; default remains fail closed. New
+  bounded outcome metrics report failed refreshes, stale use and exhaustion.
+
+- Firebase explicitly validates signed `iat` and `auth_time` presence, type and
+  future timestamps; jsonwebtoken does not enforce these names itself.
+
+- Shared response caching rejects every `Set-Cookie` response and bypasses
+  lookup/fill for any request with `Cookie`, including unconfigured application
+  session cookies and empty Cookie fields. Existing authorized/Vary checks remain.
+
+- Missing rate-limit and concurrency keys reject with 400 by default; explicit
+  `missing_key: route|ip|skip` selects fallback/optional behavior. Header keys
+  reject ambiguity and normalize outer whitespace. CLI diagnostics, offline
+  `expect.policy_keys`, and schemas expose the policy. See UPGRADING.
+
 ## 0.1.8 — shared rate limits, concurrency caps, case-insensitive deny-list
 
 - **Shared rate limits.** `counter: shared` puts rate-limit counters in a cache

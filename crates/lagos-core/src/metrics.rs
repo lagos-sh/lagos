@@ -48,6 +48,11 @@ pub struct Metrics {
     cache: IntCounterVec,
     shared_limit_keys: prometheus::IntCounter,
     shared_limit_errors: prometheus::IntCounter,
+    jwks: IntCounterVec,
+    extensions: HistogramVec,
+    request_deadlines: prometheus::IntCounter,
+    discovery: IntCounterVec,
+    cache_fills_abandoned: IntCounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -68,6 +73,34 @@ pub fn metrics() -> Option<&'static Metrics> {
 impl Metrics {
     fn build() -> prometheus::Result<Self> {
         Ok(Self {
+            cache_fills_abandoned: register_int_counter_vec!(
+                "gateway_cache_fills_abandoned_total",
+                "Cache fills dropped before storing; the response was still served. \
+                 object_too_large: over max_object_size. fill_budget: max_inflight_fill \
+                 was exhausted by concurrent fills.",
+                &["reason"]
+            )?,
+            discovery: register_int_counter_vec!(
+                "gateway_upstream_discovery_total",
+                "Pool membership refreshes: updated, unchanged, or failed and rejected \
+                 (both keep the current members).",
+                &["upstream", "outcome"]
+            )?,
+            request_deadlines: prometheus::register_int_counter!(
+                "gateway_request_deadlines_total",
+                "HTTP exchanges closed at the configured absolute request deadline."
+            )?,
+            extensions: register_histogram_vec!(
+                "gateway_extension_duration_seconds",
+                "Cooperative extension execution duration and outcome.",
+                &["extension", "outcome"],
+                vec![0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0]
+            )?,
+            jwks: register_int_counter_vec!(
+                "gateway_jwks_total",
+                "Signing-key refresh and bounded stale-key outcomes.",
+                &["outcome"]
+            )?,
             requests: register_int_counter_vec!(
                 "gateway_requests_total",
                 "Requests answered, by route, method and status.",
@@ -136,6 +169,46 @@ impl Metrics {
                  traffic is unaffected."
             )?,
         })
+    }
+
+    pub fn record_request_deadline(&self) {
+        self.request_deadlines.inc();
+    }
+
+    pub fn record_extension(&self, extension: &str, outcome: &str, seconds: f64) {
+        let outcome = match outcome {
+            "success" | "rejected" | "timeout" => outcome,
+            _ => "other",
+        };
+        self.extensions
+            .with_label_values(&[extension, outcome])
+            .observe(seconds);
+    }
+
+    pub fn record_cache_fill_abandoned(&self, reason: &str) {
+        let reason = match reason {
+            "object_too_large" | "fill_budget" => reason,
+            _ => "other",
+        };
+        self.cache_fills_abandoned
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    pub fn record_discovery(&self, upstream: &str, outcome: &str) {
+        let outcome = match outcome {
+            "updated" | "unchanged" | "failed" | "rejected" => outcome,
+            _ => "other",
+        };
+        self.discovery.with_label_values(&[upstream, outcome]).inc();
+    }
+
+    pub fn record_jwks(&self, outcome: &str) {
+        let outcome = match outcome {
+            "refresh_failed" | "stale_used" | "stale_exhausted" => outcome,
+            _ => "other",
+        };
+        self.jwks.with_label_values(&[outcome]).inc();
     }
 
     pub fn record_request(&self, route: &str, method: &str, status: u16, seconds: f64) {
@@ -257,7 +330,15 @@ pub fn normalize_reason(reason: &str) -> String {
         | "bad_machine_credential"
         | "missing_client_key"
         | "bad_client_key"
+        | "cookie_origin_required"
+        | "cookie_origin_denied"
+        | "cookie_origin_ambiguous"
+        | "missing_limit_key"
+        | "invalid_limit_key"
         | "rate_limited"
+        | "extension_timeout"
+        | "extension_chain_timeout"
+        | "extension_capacity"
         | "concurrency_limited"
         | "circuit_open"
         | "binding_refused"

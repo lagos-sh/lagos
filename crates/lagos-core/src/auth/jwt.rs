@@ -37,7 +37,7 @@ pub struct JwtVerifier {
     algorithms: Vec<Algorithm>,
     required_claims: Vec<String>,
     clock_skew: Duration,
-    keys: Arc<CertCache>,
+    keys: CertCache,
 }
 
 impl JwtVerifier {
@@ -56,12 +56,14 @@ impl JwtVerifier {
             algorithms,
             required_claims,
             clock_skew,
-            keys: Arc::new(CertCache::with_format(
-                jwks_url,
-                min_key_ttl,
-                KeyFormat::Jwks,
-            )),
+            keys: CertCache::with_format(jwks_url, min_key_ttl, KeyFormat::Jwks),
         }
+    }
+
+    /// Allow previously fetched keys for a fixed interval after expiry when refresh fails.
+    pub fn with_stale_if_error(mut self, maximum: Duration) -> Self {
+        self.keys = self.keys.with_stale_if_error(maximum);
+        self
     }
 
     pub fn issuer(&self) -> &str {

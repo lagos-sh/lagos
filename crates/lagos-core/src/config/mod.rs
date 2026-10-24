@@ -115,6 +115,17 @@ pub struct CacheConfig {
     #[serde(default = "default_max_object", deserialize_with = "de_byte_size")]
     #[schemars(schema_with = "schema::byte_size")]
     pub max_object_size: u64,
+    /// Body bytes all in-progress fills may buffer together. Each fill holds
+    /// its whole body until it completes, so without this, many concurrent
+    /// misses on distinct keys could buffer `max_object_size` each, outside
+    /// `max_size`. A fill that would exceed it is proxied without being
+    /// stored. At least `max_object_size`.
+    #[serde(
+        default = "default_max_inflight_fill",
+        deserialize_with = "de_byte_size"
+    )]
+    #[schemars(schema_with = "schema::byte_size")]
+    pub max_inflight_fill: u64,
     /// Freshness for a response whose upstream said nothing about caching.
     #[serde(with = "humantime_serde", default = "d60")]
     #[schemars(with = "String")]
@@ -130,6 +141,9 @@ fn default_cache_size() -> u64 {
 }
 fn default_max_object() -> u64 {
     8 * 1024 * 1024
+}
+fn default_max_inflight_fill() -> u64 {
+    64 * 1024 * 1024
 }
 fn d0() -> Duration {
     Duration::ZERO
@@ -271,7 +285,9 @@ impl<'de> Deserialize<'de> for RateLimitKey {
             "identity" => Ok(Self::Identity),
             "route" => Ok(Self::Route),
             other => match other.strip_prefix("header.") {
-                Some(name) if !name.is_empty() => Ok(Self::Header(name.to_ascii_lowercase())),
+                Some(name) if http::HeaderName::from_bytes(name.as_bytes()).is_ok() => {
+                    Ok(Self::Header(name.to_ascii_lowercase()))
+                }
                 _ => Err(serde::de::Error::custom(format!(
                     "`{other}` is not a rate-limit key; expected `ip`, `identity`, `route`, \
                      or `header.<name>`"
@@ -279,6 +295,22 @@ impl<'de> Deserialize<'de> for RateLimitKey {
             },
         }
     }
+}
+
+/// Action when a protective policy cannot derive its configured key.
+/// Malformed or repeated header keys are always rejected, even with `skip`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingKey {
+    /// Fail closed with 400. Anonymous identity policies must choose a fallback.
+    #[default]
+    Reject,
+    /// Count all requests without a key in the route-wide bucket.
+    Route,
+    /// Count the socket peer (never an untrusted forwarded header).
+    Ip,
+    /// Explicitly leave requests without a key unlimited.
+    Skip,
 }
 
 /// A rate limit, applied per route.
@@ -290,7 +322,7 @@ impl<'de> Deserialize<'de> for RateLimitKey {
 ///   key: ip
 ///   trusted_proxies: 1
 /// ```
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
     pub requests: u64,
@@ -299,6 +331,9 @@ pub struct RateLimitConfig {
     pub interval: Duration,
     #[serde(default)]
     pub key: RateLimitKey,
+    /// Missing-key policy; malformed header values always receive 400.
+    #[serde(default)]
+    pub missing_key: MissingKey,
     /// How many proxies sit in front of this gateway.
     ///
     /// `X-Forwarded-For` is appended to by each hop, so only the rightmost
@@ -345,6 +380,9 @@ pub struct ConcurrencyConfig {
     /// protect its upstream; the others bound each caller separately.
     #[serde(default)]
     pub key: Option<RateLimitKey>,
+    /// Missing-key policy; malformed header values always receive 400.
+    #[serde(default)]
+    pub missing_key: MissingKey,
     /// As `rate_limit.trusted_proxies`. Only read by `key: ip`.
     #[serde(default)]
     pub trusted_proxies: usize,
@@ -601,17 +639,21 @@ pub struct ServerConfig {
     /// still answering.
     #[serde(default)]
     pub tcp_keepalive: Option<TcpKeepaliveConfig>,
-    /// How long to wait after SIGTERM before starting to drain.
+    /// Extra drain time on SIGTERM, added to `graceful_shutdown`.
     ///
-    /// Unset by default. The window exists so a load balancer notices this
-    /// instance going away and stops sending it new connections *before* the
-    /// ones in flight are cut. Whatever is set here is spent before
-    /// `graceful_shutdown` begins, so the two together must still fit inside
-    /// the process manager's own kill deadline.
+    /// Unset means zero. Listeners stop accepting as soon as SIGTERM arrives,
+    /// so this does not keep the gateway reachable while a load balancer
+    /// catches up (use a Kubernetes `preStop` sleep for that); it only gives
+    /// in-flight requests longer. The sum must fit inside the process
+    /// manager's own kill deadline.
     #[serde(default, with = "humantime_serde::option")]
     #[schemars(with = "Option<String>")]
     pub shutdown_grace: Option<Duration>,
-    /// How long to drain in-flight requests on SIGTERM.
+    /// How long in-flight requests may finish after SIGTERM before what
+    /// remains is cancelled and the process exits.
+    ///
+    /// The gateway waits this long even when nothing is in flight: Pingora's
+    /// drain is a fixed sleep, not a count of open requests.
     ///
     /// Pingora's own default is 300s. Kubernetes SIGKILLs a pod at
     /// `terminationGracePeriodSeconds` (30s by default), so leaving it at 300
@@ -680,6 +722,20 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Timeouts {
+    /// Optional absolute HTTP exchange lifetime, including header parsing,
+    /// authentication, hooks, uploads and response streaming. Expiry closes
+    /// the exchange; it cannot replace a partially sent response with 504.
+    #[serde(default, with = "humantime_serde::option")]
+    #[schemars(with = "Option<String>")]
+    pub request_total: Option<Duration>,
+    /// Cooperative asynchronous deadline for each native extension hook.
+    #[serde(with = "humantime_serde", default = "d2")]
+    #[schemars(with = "String")]
+    pub extension: Duration,
+    /// Absolute budget for the entire sequential extension chain.
+    #[serde(with = "humantime_serde", default = "d5")]
+    #[schemars(with = "String")]
+    pub extension_chain: Duration,
     #[serde(with = "humantime_serde", default = "d5")]
     #[schemars(with = "String")]
     pub connect: Duration,
@@ -768,6 +824,9 @@ fn d300() -> Duration {
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
+            request_total: None,
+            extension: d2(),
+            extension_chain: d5(),
             connect: d5(),
             default: d30(),
             sse: d120(),
@@ -788,6 +847,10 @@ impl Default for Timeouts {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
+    /// Optional process-wide cap on executing extension chains. Saturation
+    /// rejects immediately with 503; no unbounded waiting queue is created.
+    #[serde(default)]
+    pub extension_inflight: Option<usize>,
     /// Maximum request body, e.g. `50MiB`. Default 50 MiB.
     #[serde(default = "default_max_body", deserialize_with = "de_byte_size")]
     #[schemars(schema_with = "schema::byte_size")]
@@ -839,6 +902,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            extension_inflight: None,
             max_body: default_max_body(),
             max_token: default_max_token(),
             keepalive_requests: default_keepalive_requests(),
@@ -934,6 +998,7 @@ impl ConnectionLimitConfig {
             requests: self.connections,
             interval: self.interval,
             key: RateLimitKey::Ip,
+            missing_key: MissingKey::Reject,
             trusted_proxies: 0,
             max_keys: self.max_tracked,
             // Local, always. This limiter runs in `connection_filter`, before
@@ -1017,10 +1082,11 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 ///
 /// The two forms behave differently in one way worth knowing: a **single**
 /// target keeps its hostname and is resolved per connection, so a DNS change
-/// is picked up without a restart. A **pool** resolves its members at startup,
-/// because the balancer works on addresses. In Kubernetes a Service name maps
-/// to a stable ClusterIP, so this is usually invisible — but a pool pointed at
-/// a headless service would pin the pods it saw at boot.
+/// is picked up without a restart. A **pool** works on addresses: every address
+/// a target name resolves to becomes a member, resolved once at startup unless
+/// `discovery` asks for it to be refreshed. In Kubernetes a Service name maps
+/// to a stable ClusterIP, so this is usually invisible; a pool pointed at a
+/// headless service needs `discovery` to follow its pods.
 #[derive(Debug, Clone, JsonSchema)]
 #[schemars(with = "schema::Upstream")]
 pub struct UpstreamConfig {
@@ -1031,6 +1097,42 @@ pub struct UpstreamConfig {
     pub hash_on: HashKey,
     pub health_check: Option<HealthCheckConfig>,
     pub circuit_breaker: Option<CircuitBreakerConfig>,
+    pub discovery: Option<DiscoveryConfig>,
+}
+
+/// Re-resolve a pool's target names on an interval.
+///
+/// ```yaml
+/// discovery:
+///   interval: 30s
+/// ```
+///
+/// Each refresh resolves every target off the request path and swaps the
+/// member set atomically; members present before and after keep their health
+/// state and pooled connections. A refresh that fails, returns no address for
+/// a target, exceeds `max_members`, or makes two targets share an address is
+/// discarded and the last good set stays in service.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryConfig {
+    /// How often to re-resolve. At least one second.
+    #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
+    pub interval: Duration,
+    /// Most addresses the pool may hold across all targets. A refresh that
+    /// resolves more is refused rather than truncated, so traffic is never
+    /// silently skewed toward whichever addresses happened to sort first.
+    #[serde(default = "default_max_members")]
+    pub max_members: usize,
+}
+
+/// Default and static-pool bound on resolved members.
+pub const DEFAULT_MAX_MEMBERS: usize = 256;
+/// Upper bound on `discovery.max_members`.
+pub const MAX_MEMBERS_LIMIT: usize = 4096;
+
+fn default_max_members() -> usize {
+    DEFAULT_MAX_MEMBERS
 }
 
 /// The request value a consistent hash is taken over.
@@ -1113,7 +1215,7 @@ impl UpstreamConfig {
     /// A pool is anything the balancer has to choose between, or anything whose
     /// health is being tracked.
     pub fn is_pool(&self) -> bool {
-        self.targets.len() > 1 || self.health_check.is_some()
+        self.targets.len() > 1 || self.health_check.is_some() || self.discovery.is_some()
     }
 }
 
@@ -1193,6 +1295,8 @@ struct UpstreamDetails {
     health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default)]
+    discovery: Option<DiscoveryConfig>,
 }
 
 impl<'de> Deserialize<'de> for UpstreamConfig {
@@ -1215,6 +1319,7 @@ impl<'de> Deserialize<'de> for UpstreamConfig {
                     hash_on: HashKey::default(),
                     health_check: None,
                     circuit_breaker: None,
+                    discovery: None,
                 })
             }
 
@@ -1244,6 +1349,7 @@ impl<'de> Deserialize<'de> for UpstreamConfig {
                     hash_on: long.hash_on,
                     health_check: long.health_check,
                     circuit_breaker: long.circuit_breaker,
+                    discovery: long.discovery,
                 })
             }
         }
@@ -1320,6 +1426,20 @@ pub struct AuthConfig {
     /// upstream (see SECURITY.md). Empty by default — only the header is read.
     #[serde(default)]
     pub token_cookies: Vec<String>,
+    /// Opt-in CSRF origin check when a cookie supplies the gateway credential.
+    #[serde(default)]
+    pub cookie_protection: Option<CookieProtectionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CookieProtectionConfig {
+    /// Exact trusted HTTP(S) origins; no wildcard or inferred Forwarded host.
+    pub origins: Vec<String>,
+    /// If Origin is absent, permit a trusted Referer origin. Default false.
+    /// Missing both, malformed/duplicate fields and Origin: null always refuse.
+    #[serde(default)]
+    pub referer_fallback: bool,
 }
 
 /// Credential for service-to-service callers on the `machine` tier.
@@ -1517,6 +1637,11 @@ pub struct JwtConfig {
     #[serde(with = "humantime_serde", default = "d300")]
     #[schemars(with = "String")]
     pub min_key_ttl: Duration,
+    /// Maximum stale interval after original key expiry during provider errors.
+    /// Zero (default) fails closed; stale use delays emergency key revocation.
+    #[serde(with = "humantime_serde", default = "d0")]
+    #[schemars(with = "String")]
+    pub stale_if_error: Duration,
 }
 
 fn default_algorithms() -> Vec<String> {
@@ -1555,6 +1680,11 @@ pub struct FirebaseConfig {
     #[serde(with = "humantime_serde", default = "d300")]
     #[schemars(with = "String")]
     pub min_cert_ttl: Duration,
+    /// Maximum stale interval after original certificate expiry on provider errors.
+    /// Zero (default) fails closed; stale use delays emergency key revocation.
+    #[serde(with = "humantime_serde", default = "d0")]
+    #[schemars(with = "String")]
+    pub stale_if_error: Duration,
 }
 
 fn default_certs_url() -> String {
@@ -1931,6 +2061,7 @@ pub struct ResolvedConfig {
     pub base_paths: Vec<String>,
     /// Compiled cross-origin policy.
     pub cors: Option<crate::cors::Cors>,
+    pub cookie_protection: Option<crate::csrf::CookieProtection>,
     /// Environment variables the document referenced, for `validate` output.
     pub referenced_env: Vec<String>,
     /// Those that fell back to a default — the ones that differ between a
@@ -2186,6 +2317,32 @@ impl GatewayConfig {
                 ));
             }
         }
+        if self
+            .timeouts
+            .request_total
+            .is_some_and(|d| d.is_zero() || std::time::Instant::now().checked_add(d).is_none())
+        {
+            return Err(ConfigError::invalid(
+                "timeouts.request_total must be a positive, representable duration, or null",
+            ));
+        }
+        if self.timeouts.extension.is_zero()
+            || self.timeouts.extension_chain.is_zero()
+            || self.timeouts.extension > self.timeouts.extension_chain
+        {
+            return Err(ConfigError::invalid(
+                "extension timeouts must be positive and extension must not exceed extension_chain",
+            ));
+        }
+        if self
+            .limits
+            .extension_inflight
+            .is_some_and(|n| n == 0 || n > tokio::sync::Semaphore::MAX_PERMITS)
+        {
+            return Err(ConfigError::invalid(
+                "limits.extension_inflight must be positive and within Tokio semaphore capacity",
+            ));
+        }
         if self.timeouts.connect.is_zero() || self.timeouts.downstream_read.is_zero() {
             return Err(ConfigError::invalid(
                 "timeouts.connect and timeouts.downstream_read must be greater than zero",
@@ -2230,6 +2387,22 @@ impl GatewayConfig {
                     )));
                 }
                 target.url = url;
+            }
+            if let Some(d) = &normalized.discovery {
+                if d.interval < Duration::from_secs(1) {
+                    return Err(ConfigError::invalid(format!(
+                        "upstreams.{name}.discovery.interval is {:?}; it must be at least 1s \
+                         so refreshes cannot load the resolver continuously",
+                        d.interval
+                    )));
+                }
+                if d.max_members == 0 || d.max_members > MAX_MEMBERS_LIMIT {
+                    return Err(ConfigError::invalid(format!(
+                        "upstreams.{name}.discovery.max_members is {}; it must be between 1 \
+                         and {MAX_MEMBERS_LIMIT}",
+                        d.max_members
+                    )));
+                }
             }
             upstreams.insert(name.clone(), normalized);
         }
@@ -2338,6 +2511,17 @@ impl GatewayConfig {
             }
         }
 
+        if let Some(c) = &self.cache
+            && c.max_inflight_fill < c.max_object_size
+        {
+            return Err(ConfigError::invalid(format!(
+                "cache.max_inflight_fill ({} bytes) is smaller than cache.max_object_size \
+                 ({} bytes), so the largest objects could never be stored; raise it or \
+                 lower max_object_size",
+                c.max_inflight_fill, c.max_object_size
+            )));
+        }
+
         for (name, up) in &self.upstreams {
             if let Some(cb) = &up.circuit_breaker {
                 if cb.failures == 0 {
@@ -2372,8 +2556,23 @@ impl GatewayConfig {
             None => None,
         };
 
+        let cookie_protection = self
+            .auth
+            .cookie_protection
+            .as_ref()
+            .map(|policy| {
+                if self.auth.token_cookies.is_empty() {
+                    return Err(ConfigError::invalid(
+                        "auth.cookie_protection requires auth.token_cookies",
+                    ));
+                }
+                crate::csrf::CookieProtection::compile(policy)
+                    .map_err(|e| ConfigError::invalid(format!("auth.cookie_protection: {e}")))
+            })
+            .transpose()?;
         Ok(ResolvedConfig {
             cors,
+            cookie_protection,
             raw: self,
             trusted_proxy_ips,
             upstreams,
@@ -3287,6 +3486,49 @@ routes:
             .expect_err("unlisted proxies refused");
         assert!(forged.to_string().contains("concurrency cap"), "{forged}");
         assert!(table(&route("{ max: 5, key: nope }")).is_err());
+    }
+
+    #[test]
+    fn the_cache_fill_budget_must_fit_the_largest_object() {
+        let routes = "routes:\n  public: [{prefix: /p, upstream: u}]\nupstreams: {u: http://u:1}\n";
+        let ok = parse(&format!("cache: {{}}\n{routes}")).expect("defaults parse");
+        let c = ok.raw.cache.as_ref().expect("cache");
+        assert_eq!(c.max_inflight_fill, 64 * 1024 * 1024);
+        let Err(err) = parse(&format!(
+            "cache: {{max_object_size: 8MiB, max_inflight_fill: 1MiB}}\n{routes}"
+        )) else {
+            panic!("a budget below one object must be refused")
+        };
+        assert!(err.to_string().contains("max_inflight_fill"));
+    }
+
+    #[test]
+    fn discovery_settings_are_bounded() {
+        let ok =
+            parse("upstreams:\n  u: {targets: [http://pods:80], discovery: {interval: 30s}}\nroutes:\n  public: [{prefix: /p, upstream: u}]\n")
+                .expect("discovery parses");
+        let d = ok.upstreams["u"].discovery.as_ref().expect("kept");
+        assert_eq!(d.max_members, DEFAULT_MAX_MEMBERS);
+        assert!(
+            ok.upstreams["u"].is_pool(),
+            "one name with discovery is a pool"
+        );
+
+        for (yaml, needle) in [
+            ("{interval: 500ms}", "at least 1s"),
+            ("{interval: 30s, max_members: 0}", "between 1"),
+            ("{interval: 30s, max_members: 5000}", "between 1"),
+        ] {
+            let text = format!(
+                "upstreams:\n  u: {{targets: [http://pods:80], discovery: {yaml}}}\nroutes:\n  public: [{{prefix: /p, upstream: u}}]\n"
+            );
+            let Err(err) = parse(&text) else {
+                panic!("{yaml} must be refused")
+            };
+            let err = err.to_string();
+            assert!(err.contains(needle), "{yaml}: {err}");
+        }
+        assert!(parse("upstreams:\n  u: {url: http://pods:80, discovery: {}}\nroutes:\n  public: [{prefix: /p, upstream: u}]\n").is_err());
     }
 
     #[test]

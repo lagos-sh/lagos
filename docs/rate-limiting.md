@@ -205,3 +205,26 @@ time, before the TLS handshake and before a connection costs a task or a file
 descriptor. It is never shared: there is nowhere to await a round trip that early,
 and a connection flood is exactly the moment a gateway must not be waiting on a
 cache to decide anything.
+
+## Missing and ambiguous keys
+
+Rate limits and concurrency caps default to `missing_key: reject`: a missing
+key receives 400. This also applies to anonymous callers of an identity-keyed
+optional route. Choose `missing_key: route` for a shared fallback bucket,
+`missing_key: ip` for the socket peer (never a forwarded address), or explicitly
+`missing_key: skip` for optional enforcement. IP fallback without a socket
+address still rejects. These fields are available in route defaults too.
+
+Header keys must be one nonempty, visible ASCII opaque value, without commas
+or embedded whitespace. Leading/trailing HTTP spaces and tabs normalize to
+the same key. Duplicate fields, including identical fields, and malformed
+values always receive 400, regardless of missing-key policy. Header names are
+validated HTTP field names and case insensitive. Header values are case
+sensitive; Lagos cannot infer application-specific aliases.
+
+A `header.*` selector counts client-controlled input: a caller can rotate it.
+Use `identity` for verified JWT subjects and a route/IP limit to protect routes
+from clients that can mint arbitrary header values. `lagos explain`, `diff`
+and effective configuration show missing-key policy; offline tests may assert
+`expect.policy_keys` with `request.headers`, synthetic `identity` and optional
+`peer_ip`. Offline tests check requirements, not live quota counts.

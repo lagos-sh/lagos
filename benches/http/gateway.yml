@@ -1,0 +1,24 @@
+server:
+  listen: 127.0.0.1:19100
+  threads: ${THREADS:-2}
+  service_name: load-gateway
+
+cache:
+  max_size: 64MiB
+
+upstreams:
+  origin: http://127.0.0.1:19101
+
+auth:
+  jwt:
+    - issuer: https://issuer.test
+      audience: [e2e-api]
+      jwks_url: http://127.0.0.1:9405/jwks
+      algorithms: [RS256]
+
+routes:
+  public:
+    - { id: proxy, prefix: /public, upstream: origin, methods: [GET] }
+    - { id: cached, prefix: /cached, upstream: origin, methods: [GET], cache: true }
+  authenticated:
+    - { id: jwt, prefix: /private, upstream: origin, methods: [GET] }

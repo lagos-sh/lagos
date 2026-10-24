@@ -744,7 +744,14 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
             },
             None => String::new(),
         };
-        println!("  {name:<16} {}{health}{breaker}", urls.join(", "));
+        let discovery = match &up.discovery {
+            Some(d) => format!("  [refresh every {:?}]", d.interval),
+            None => String::new(),
+        };
+        println!(
+            "  {name:<16} {}{health}{discovery}{breaker}",
+            urls.join(", ")
+        );
     }
     Ok(())
 }
@@ -946,6 +953,10 @@ fn explain(
                 crate::config::RateLimitKey::Header(h) => format!("header `{h}`"),
             }
         );
+        println!(
+            "  missing key: {:?}; malformed header keys: 400",
+            rl.missing_key
+        );
         if matches!(rl.key, crate::config::RateLimitKey::Ip) && rl.trusted_proxies == 0 {
             println!(
                 "  note: trusted_proxies is 0, so the socket peer is used —\n\
@@ -968,6 +979,13 @@ fn explain(
             }
         );
         println!(
+            "  missing key: {:?}; malformed header keys: 400",
+            cap.missing_key
+        );
+        if cap.per_caller() && cap.missing_key == crate::config::MissingKey::Route {
+            println!("  missing-key route fallback: 503 when the shared fallback cap is full");
+        }
+        println!(
             "  over the cap: {} at once, never queued",
             if cap.per_caller() { "429" } else { "503" }
         );
@@ -985,8 +1003,24 @@ fn explain(
         println!();
     }
 
+    if route.auth.verifies()
+        && let Some(policy) = &cfg.raw.auth.cookie_protection
+    {
+        println!(
+            "Cookie origin protection: unsafe cookie-authenticated methods require an exact trusted origin; Referer fallback: {}",
+            policy.referer_fallback
+        );
+    }
+
     if !route.extensions.is_empty() {
         println!("Extensions\n");
+        println!(
+            "  per hook: {:?}; complete chain: {:?}; concurrent chains: {:?}",
+            cfg.raw.timeouts.extension,
+            cfg.raw.timeouts.extension_chain,
+            cfg.raw.limits.extension_inflight
+        );
+        println!("  cooperative timeout/capacity refusal: 503");
         for (i, e) in route.extensions.iter().enumerate() {
             println!("  {}. {e}", i + 1);
         }

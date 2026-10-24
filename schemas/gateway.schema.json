@@ -33,6 +33,33 @@
                 }
               ]
             },
+            "cookie_protection": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/CookieProtectionConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Opt-in CSRF origin check when a cookie supplies the gateway credential."
+            },
             "firebase": {
               "anyOf": [
                 {
@@ -161,6 +188,42 @@
               "default": "1m",
               "description": "Freshness for a response whose upstream said nothing about caching.",
               "type": "string"
+            },
+            "max_inflight_fill": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "pattern": "^\\s*[0-9]+\\s*([bB]|[kKmMgG]([bB]|[iI][bB])?)?\\s*$",
+                      "type": "string"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "default": 67108864,
+              "description": "Body bytes all in-progress fills may buffer together. Each fill holds\nits whole body until it completes, so without this, many concurrent\nmisses on distinct keys could buffer `max_object_size` each, outside\n`max_size`. A fill that would exceed it is proxied without being\nstored. At least `max_object_size`.",
+              "examples": [
+                52428800,
+                "50mb",
+                "8 MiB"
+              ]
             },
             "max_object_size": {
               "anyOf": [
@@ -504,6 +567,22 @@
               ],
               "description": "Requests allowed upstream at once, per key."
             },
+            "missing_key": {
+              "allOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/MissingKey"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Missing-key policy; malformed header values always receive 400."
+            },
             "trusted_proxies": {
               "anyOf": [
                 {
@@ -582,6 +661,51 @@
         }
       ],
       "description": "How fast one address may open new connections.\n\nThis counts *accepts*, not live connections: the accept hook is never told\nabout a close, so a population count kept from there would drift upward\nuntil it refused everyone. The absolute request-header deadline closes\nsockets that never finish a header, but long-lived responses can still\naccumulate; this is not a concurrent-connection ceiling."
+    },
+    "CookieProtectionConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origins": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "description": "Exact trusted HTTP(S) origins; no wildcard or inferred Forwarded host."
+            },
+            "referer_fallback": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": false,
+              "description": "If Origin is absent, permit a trusted Referer origin. Default false.\nMissing both, malformed/duplicate fields and Origin: null always refuse."
+            }
+          },
+          "required": [
+            "origins"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ]
     },
     "CorsConfig": {
       "anyOf": [
@@ -711,6 +835,43 @@
         }
       ]
     },
+    "DiscoveryConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "interval": {
+              "description": "How often to re-resolve. At least one second.",
+              "type": "string"
+            },
+            "max_members": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 256,
+              "description": "Most addresses the pool may hold across all targets. A refresh that\nresolves more is refused rather than truncated, so traffic is never\nsilently skewed toward whichever addresses happened to sort first."
+            }
+          },
+          "required": [
+            "interval"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Re-resolve a pool's target names on an interval.\n\n```yaml\ndiscovery:\n  interval: 30s\n```\n\nEach refresh resolves every target off the request path and swaps the\nmember set atomically; members present before and after keep their health\nstate and pooled connections. A refresh that fails, returns no address for\na target, exceeds `max_members`, or makes two targets share an address is\ndiscarded and the last good set stays in service."
+    },
     "DnsConfig": {
       "anyOf": [
         {
@@ -778,6 +939,11 @@
                 }
               ],
               "description": "Firebase project IDs whose tokens are accepted. A token is routed to a\nproject by its `iss` claim; unknown issuers are refused.\n\nOnly project *IDs* are needed. Unlike the Firebase Admin SDK, verifying\na token requires no service-account credentials, so this gateway holds\nno private keys."
+            },
+            "stale_if_error": {
+              "default": "0s",
+              "description": "Maximum stale interval after original certificate expiry on provider errors.\nZero (default) fails closed; stale use delays emergency key revocation.",
+              "type": "string"
             }
           },
           "required": [
@@ -1249,6 +1415,11 @@
               ],
               "default": [],
               "description": "Claims that must be present beyond the standard set."
+            },
+            "stale_if_error": {
+              "default": "0s",
+              "description": "Maximum stale interval after original key expiry during provider errors.\nZero (default) fails closed; stale use delays emergency key revocation.",
+              "type": "string"
             }
           },
           "required": [
@@ -1310,6 +1481,24 @@
                 }
               ],
               "description": "Refuse connections from an address that opens them too quickly.\n\nOff by default, and deliberately so: an address is not a caller. Behind\nan ingress controller *every* connection arrives from one address, and\nturning this on there would throttle the whole gateway. It is the right\ncontrol only where Lagos is genuinely the edge."
+            },
+            "extension_inflight": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Optional process-wide cap on executing extension chains. Saturation\nrejects immediately with 503; no unbounded waiting queue is created."
             },
             "keepalive_requests": {
               "anyOf": [
@@ -1507,6 +1696,31 @@
       ],
       "description": "Prometheus exposition.\n\nOn a listener of its own, never the traffic port: scrape endpoints are for\noperators, and putting one on the public socket makes internal route names\nand upstream health readable by anyone who can reach the gateway."
     },
+    "MissingKey": {
+      "description": "Action when a protective policy cannot derive its configured key.\nMalformed or repeated header keys are always rejected, even with `skip`.",
+      "oneOf": [
+        {
+          "const": "reject",
+          "description": "Fail closed with 400. Anonymous identity policies must choose a fallback.",
+          "type": "string"
+        },
+        {
+          "const": "route",
+          "description": "Count all requests without a key in the route-wide bucket.",
+          "type": "string"
+        },
+        {
+          "const": "ip",
+          "description": "Count the socket peer (never an untrusted forwarded header).",
+          "type": "string"
+        },
+        {
+          "const": "skip",
+          "description": "Explicitly leave requests without a key unlimited.",
+          "type": "string"
+        }
+      ]
+    },
     "ObservabilityConfig": {
       "anyOf": [
         {
@@ -1640,6 +1854,22 @@
               "default": 100000,
               "description": "Ceiling on tracked keys. Keys come from requests, so this is what stops\na flood of distinct callers growing the process without bound.\n\nOnly meaningful for `counter: exact`; the sketch has fixed memory."
             },
+            "missing_key": {
+              "allOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/MissingKey"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ],
+              "description": "Missing-key policy; malformed header values always receive 400."
+            },
             "mode": {
               "allOf": [
                 {
@@ -1700,7 +1930,7 @@
     "RateLimitKey": {
       "anyOf": [
         {
-          "pattern": "^(ip|identity|route|header\\..+)$",
+          "pattern": "^(ip|identity|route|header\\.[!#$%&'*+.^_`|~0-9A-Za-z-]+)$",
           "type": "string"
         },
         {
@@ -2326,7 +2556,7 @@
           "properties": {
             "graceful_shutdown": {
               "default": "25s",
-              "description": "How long to drain in-flight requests on SIGTERM.\n\nPingora's own default is 300s. Kubernetes SIGKILLs a pod at\n`terminationGracePeriodSeconds` (30s by default), so leaving it at 300\nmeans every rollout ends in a hard kill mid-drain. Keep this a little\nunder whatever the pod spec allows.",
+              "description": "How long in-flight requests may finish after SIGTERM before what\nremains is cancelled and the process exits.\n\nThe gateway waits this long even when nothing is in flight: Pingora's\ndrain is a fixed sleep, not a count of open requests.\n\nPingora's own default is 300s. Kubernetes SIGKILLs a pod at\n`terminationGracePeriodSeconds` (30s by default), so leaving it at 300\nmeans every rollout ends in a hard kill mid-drain. Keep this a little\nunder whatever the pod spec allows.",
               "type": "string"
             },
             "health_path": {
@@ -2390,7 +2620,7 @@
                 }
               ],
               "default": null,
-              "description": "How long to wait after SIGTERM before starting to drain.\n\nUnset by default. The window exists so a load balancer notices this\ninstance going away and stops sending it new connections *before* the\nones in flight are cut. Whatever is set here is spent before\n`graceful_shutdown` begins, so the two together must still fit inside\nthe process manager's own kill deadline."
+              "description": "Extra drain time on SIGTERM, added to `graceful_shutdown`.\n\nUnset means zero. Listeners stop accepting as soon as SIGTERM arrives,\nso this does not keep the gateway reachable while a load balancer\ncatches up (use a Kubernetes `preStop` sleep for that); it only gives\nin-flight requests longer. The sum must fit inside the process\nmanager's own kill deadline."
             },
             "tcp_keepalive": {
               "anyOf": [
@@ -2585,6 +2815,32 @@
               "description": "How long a single write to the client may stall.\n\nPingora leaves this unset, so a client that stops reading mid-response\npins the exchange indefinitely. This is the slow-read half of\nslowloris, and it is the cheaper half to mount.",
               "type": "string"
             },
+            "extension": {
+              "default": "2s",
+              "description": "Cooperative asynchronous deadline for each native extension hook.",
+              "type": "string"
+            },
+            "extension_chain": {
+              "default": "5s",
+              "description": "Absolute budget for the entire sequential extension chain.",
+              "type": "string"
+            },
+            "request_total": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Optional absolute HTTP exchange lifetime, including header parsing,\nauthentication, hooks, uploads and response streaming. Expiry closes\nthe exchange; it cannot replace a partially sent response with 504."
+            },
             "sse": {
               "default": "2m",
               "description": "Applied to routes flagged `sse`, which must outlive the default budget.",
@@ -2681,7 +2937,7 @@
           ]
         }
       ],
-      "description": "A backend, or a pool of them.\n\nThe short form is a bare URL:\n\n```yaml\nupstreams:\n  users: http://users:3000\n```\n\nSeveral backends make it a pool, with optional weights, a balancing\nalgorithm and health checking:\n\n```yaml\nupstreams:\n  users:\n    targets:\n      - http://users-1:3000\n      - url: http://users-2:3000\n        weight: 3\n    balance: round_robin\n    health_check:\n      path: /health\n      interval: 10s\n```\n\nThe two forms behave differently in one way worth knowing: a **single**\ntarget keeps its hostname and is resolved per connection, so a DNS change\nis picked up without a restart. A **pool** resolves its members at startup,\nbecause the balancer works on addresses. In Kubernetes a Service name maps\nto a stable ClusterIP, so this is usually invisible — but a pool pointed at\na headless service would pin the pods it saw at boot."
+      "description": "A backend, or a pool of them.\n\nThe short form is a bare URL:\n\n```yaml\nupstreams:\n  users: http://users:3000\n```\n\nSeveral backends make it a pool, with optional weights, a balancing\nalgorithm and health checking:\n\n```yaml\nupstreams:\n  users:\n    targets:\n      - http://users-1:3000\n      - url: http://users-2:3000\n        weight: 3\n    balance: round_robin\n    health_check:\n      path: /health\n      interval: 10s\n```\n\nThe two forms behave differently in one way worth knowing: a **single**\ntarget keeps its hostname and is resolved per connection, so a DNS change\nis picked up without a restart. A **pool** works on addresses: every address\na target name resolves to becomes a member, resolved once at startup unless\n`discovery` asks for it to be refreshed. In Kubernetes a Service name maps\nto a stable ClusterIP, so this is usually invisible; a pool pointed at a\nheadless service needs `discovery` to follow its pods."
     },
     "UpstreamDetails": {
       "anyOf": [
@@ -2741,6 +2997,32 @@
                   "anyOf": [
                     {
                       "$ref": "#/definitions/CircuitBreakerConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            "discovery": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/DiscoveryConfig"
                     },
                     {
                       "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",

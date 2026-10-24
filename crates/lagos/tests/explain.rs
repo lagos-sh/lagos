@@ -231,3 +231,71 @@ fn ordinary_explain_does_not_claim_host_failure_is_method_failure() {
     assert!(secure.contains("✓ secure  (group: authenticated)"));
     assert!(secure.contains("a valid token is required"));
 }
+
+#[test]
+fn key_admission_is_explained_diffed_and_checked_offline() {
+    let dir = Scratch::new();
+    let config = "upstreams: {users: 'http://127.0.0.1:1'}\nroutes:\n  public:\n    - id: keyed\n      prefix: /keyed\n      upstream: users\n      rate_limit: {requests: 1, key: header.x-client}\n";
+    std::fs::write(dir.0.join("gateway.yml"), config).unwrap();
+    assert!(
+        dir.explain(&["--path", "/keyed"])
+            .contains("missing key: Reject")
+    );
+    std::fs::write(
+        dir.0.join("new.yml"),
+        config.replace(
+            "key: header.x-client",
+            "key: header.x-client, missing_key: route",
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lagos"))
+        .current_dir(&dir.0)
+        .args(["diff", "gateway.yml", "new.yml"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("missing_key")
+    );
+    std::fs::write(
+        dir.0.join("gateway.test.yml"),
+        r#"
+tests:
+  - name: absent
+    request: {path: /keyed}
+    expect: {result: route, route: keyed, policy_keys: false}
+  - name: valid
+    request: {path: /keyed, headers: {X-Client: ' alice '}}
+    expect: {result: route, route: keyed, policy_keys: true}
+  - name: duplicate
+    request: {path: /keyed, headers: {X-Client: alice, x-client: bob}}
+    expect: {result: route, route: keyed, policy_keys: false}
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lagos"))
+        .current_dir(&dir.0)
+        .args(["test", "gateway.yml"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?} {:?}",
+        output.stdout,
+        output.stderr
+    );
+    std::fs::write(
+        dir.0.join("gateway.yml"),
+        config.replace("header.x-client", "header.bad name"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lagos"))
+        .current_dir(&dir.0)
+        .args(["validate", "gateway.yml"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}

@@ -219,6 +219,12 @@ impl std::fmt::Debug for SharedCounters {
 }
 
 impl SharedCounters {
+    pub(super) fn same_backend(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.backend, &other.backend)
+            && self.prefix == other.prefix
+            && self.batch == other.batch
+    }
+
     pub fn new(
         cfg: &crate::config::RateLimitConfig,
         shared: &crate::config::SharedCountersConfig,
@@ -698,6 +704,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reuse_requires_the_same_backend_and_namespace() {
+        let backend = Arc::new(FakeBackend::default());
+        let old = counters(10, backend.clone());
+        let mut new = counters(10, backend);
+        assert!(old.same_backend(&new));
+        new.prefix = "other:".into();
+        assert!(!old.same_backend(&new));
+        assert!(!old.same_backend(&counters(10, Arc::new(FakeBackend::default()))));
+    }
+
     fn counters(requests: u64, backend: Arc<FakeBackend>) -> SharedCounters {
         counters_with(requests, Duration::from_secs(60), 4096, backend)
     }
@@ -711,6 +728,7 @@ mod tests {
         let cfg = crate::config::RateLimitConfig {
             requests,
             interval,
+            missing_key: crate::config::MissingKey::Reject,
             key: crate::config::RateLimitKey::Ip,
             trusted_proxies: 0,
             max_keys: 1000,
@@ -1128,6 +1146,7 @@ mod tests {
         let mut cfg = crate::config::RateLimitConfig {
             requests: 10,
             interval: Duration::from_secs(60),
+            missing_key: crate::config::MissingKey::Reject,
             key: crate::config::RateLimitKey::Ip,
             trusted_proxies: 0,
             max_keys: 10,
@@ -1160,6 +1179,7 @@ mod tests {
         let cfg = crate::config::RateLimitConfig {
             requests: 10,
             interval: Duration::from_secs(60),
+            missing_key: crate::config::MissingKey::Reject,
             key: crate::config::RateLimitKey::Ip,
             trusted_proxies: 0,
             max_keys: 10_000,

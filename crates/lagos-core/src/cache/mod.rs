@@ -62,7 +62,10 @@ pub struct Cache {
 impl Cache {
     pub fn new(cfg: &CacheConfig) -> Self {
         let max_object = usize::try_from(cfg.max_object_size).unwrap_or(usize::MAX);
-        let storage = Box::leak(Box::new(MemoryStorage::new(cfg.max_size, max_object)));
+        let max_fill = usize::try_from(cfg.max_inflight_fill).unwrap_or(usize::MAX);
+        let storage = Box::leak(Box::new(
+            MemoryStorage::new(cfg.max_size, max_object).with_fill_budget(max_fill),
+        ));
 
         // The eviction manager decides *which* keys to drop; the storage is
         // separately bounded by bytes. Both are needed: the manager keeps the
@@ -116,6 +119,7 @@ mod tests {
         Cache::new(&CacheConfig {
             max_size: 4096,
             max_object_size: 64,
+            max_inflight_fill: 4096,
             default_ttl: Duration::from_secs(60),
             stale_while_revalidate: Duration::ZERO,
         })

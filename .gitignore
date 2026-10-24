@@ -7,3 +7,6 @@ target/
 
 # Local-only build settings (shared target dir, path overrides)
 .cargo/config.toml
+
+# Python fixture bytecode
+__pycache__/

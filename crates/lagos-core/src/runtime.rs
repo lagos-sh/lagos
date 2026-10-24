@@ -99,16 +99,7 @@ impl Runtime {
             boot.block_on(verify_shared_counters(factory, &table))?;
         }
 
-        let referenced: Vec<String> = table.extension_names().map(String::from).collect();
-        let missing = self
-            .extensions
-            .missing(referenced.iter().map(String::as_str));
-        if !missing.is_empty() {
-            anyhow::bail!(
-                "routes reference extensions that are not registered: {}",
-                missing.join(", ")
-            );
-        }
+        self.extensions.validate(&table)?;
 
         tracing::info!(
             routes = table.len(),
@@ -148,12 +139,15 @@ impl Runtime {
         let mut router = crate::auth::jwt::IssuerRouter::new();
 
         if let Some(fb) = &cfg.raw.auth.firebase {
-            let verifier = Arc::new(crate::auth::firebase::FirebaseVerifier::new(
-                cfg.firebase_project_ids.clone(),
-                fb.certs_url.clone(),
-                fb.clock_skew,
-                fb.min_cert_ttl,
-            ));
+            let verifier = Arc::new(
+                crate::auth::firebase::FirebaseVerifier::new(
+                    cfg.firebase_project_ids.clone(),
+                    fb.certs_url.clone(),
+                    fb.clock_skew,
+                    fb.min_cert_ttl,
+                )
+                .with_stale_if_error(fb.stale_if_error),
+            );
             let issuers = verifier.issuers();
             router
                 .register(issuers, verifier as Arc<dyn crate::auth::TokenVerifier>)
@@ -166,15 +160,18 @@ impl Runtime {
                 .iter()
                 .filter_map(|a| crate::config::parse_algorithm(a))
                 .collect();
-            let verifier = Arc::new(crate::auth::jwt::JwtVerifier::new(
-                j.issuer.clone(),
-                j.audience.clone(),
-                j.resolved_jwks_url(),
-                algorithms,
-                j.required_claims.clone(),
-                j.clock_skew,
-                j.min_key_ttl,
-            ));
+            let verifier = Arc::new(
+                crate::auth::jwt::JwtVerifier::new(
+                    j.issuer.clone(),
+                    j.audience.clone(),
+                    j.resolved_jwks_url(),
+                    algorithms,
+                    j.required_claims.clone(),
+                    j.clock_skew,
+                    j.min_key_ttl,
+                )
+                .with_stale_if_error(j.stale_if_error),
+            );
             router
                 .register(
                     vec![j.issuer.clone()],
@@ -196,18 +193,7 @@ impl Runtime {
             Some(Arc::new(router))
         };
 
-        let conf = pingora::server::configuration::ServerConf {
-            graceful_shutdown_timeout_seconds: Some(cfg.raw.server.graceful_shutdown.as_secs()),
-            // Spent before draining starts, so a load balancer can stop sending
-            // new connections here while the in-flight ones still finish.
-            grace_period_seconds: cfg.raw.server.shutdown_grace.map(|d| d.as_secs()),
-            threads: cfg.raw.server.threads,
-            // Idle upstream connections held for reuse. The main thing setting
-            // the gateway's steady-state memory once it is busy.
-            upstream_keepalive_pool_size: cfg.raw.limits.upstream_pool,
-            ..Default::default()
-        };
-        let mut server = Server::new_with_opt_and_conf(None, conf);
+        let mut server = Server::new_with_opt_and_conf(None, server_conf(&cfg));
         server.bootstrap();
 
         // Pools that health-check need their checker running: the balancer is
@@ -229,7 +215,8 @@ impl Runtime {
         app.server_options = Some(downstream_server_options(&cfg));
         let mut proxy = Service::new(
             "Lagos public proxy".into(),
-            DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read),
+            DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read)
+                .with_request_deadline(cfg.raw.timeouts.request_total),
         );
         add_listener(&mut proxy, &cfg.raw.server.listen, &cfg);
         server.add_service(proxy);
@@ -247,7 +234,8 @@ impl Runtime {
             app.server_options = Some(downstream_server_options(&cfg));
             let mut svc = Service::new(
                 "Lagos internal proxy".into(),
-                DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read),
+                DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read)
+                    .with_request_deadline(cfg.raw.timeouts.request_total),
             );
             add_listener(&mut svc, addr, &cfg);
             server.add_service(svc);
@@ -266,6 +254,7 @@ impl Runtime {
                 RouteReloader {
                     provider,
                     config: cfg.clone(),
+                    extensions: self.extensions.clone(),
                     shared: shared_counters.clone(),
                     public: routes.clone(),
                     machine: cfg
@@ -397,6 +386,35 @@ fn add_listener<A>(
 /// downstream side on a protocol whose stream-multiplexing attacks (Rapid
 /// Reset and its relatives) are only bounded by Pingora's `H2Options`, which
 /// nothing here has had reason to tune.
+/// Longest Pingora waits for blocking threads once the drain has ended.
+const RUNTIME_SHUTDOWN_SECS: u64 = 1;
+
+/// Pingora's server settings from the gateway configuration.
+///
+/// On SIGTERM, Pingora 0.9 closes its listeners at once and then sleeps for
+/// `grace_period_seconds` while the runtimes keep serving in-flight requests.
+/// That sleep is the whole drain: the runtime shutdown that follows cancels
+/// any async task still running and waits `graceful_shutdown_timeout_seconds`
+/// only for blocking threads. So `graceful_shutdown` (plus any
+/// `shutdown_grace`) is the grace period. Leaving it unset would mean
+/// Pingora's 300s, so every SIGTERM would end in the process manager's SIGKILL.
+fn server_conf(cfg: &ResolvedConfig) -> pingora::server::configuration::ServerConf {
+    let drain = cfg
+        .raw
+        .server
+        .graceful_shutdown
+        .saturating_add(cfg.raw.server.shutdown_grace.unwrap_or_default());
+    pingora::server::configuration::ServerConf {
+        grace_period_seconds: Some(drain.as_secs()),
+        graceful_shutdown_timeout_seconds: Some(RUNTIME_SHUTDOWN_SECS),
+        threads: cfg.raw.server.threads,
+        // Idle upstream connections held for reuse. The main thing setting
+        // the gateway's steady-state memory once it is busy.
+        upstream_keepalive_pool_size: cfg.raw.limits.upstream_pool,
+        ..Default::default()
+    }
+}
+
 fn downstream_server_options(cfg: &ResolvedConfig) -> pingora::apps::HttpServerOptions {
     let mut opts = pingora::apps::HttpServerOptions::default();
     opts.keepalive_request_limit = match cfg.raw.limits.keepalive_requests {
@@ -416,6 +434,7 @@ struct RouteReloader {
     /// Kept so a reload is validated against the same upstreams and listeners
     /// the running gateway was booted with.
     config: Arc<ResolvedConfig>,
+    extensions: ExtensionRegistry,
     shared: Option<crate::ratelimit::SharedCounterFactory>,
     public: SharedRoutes,
     machine: Option<SharedRoutes>,
@@ -426,6 +445,7 @@ struct RouteReloader {
 impl RouteReloader {
     async fn publish(&self, table: crate::routes::RouteTable) -> anyhow::Result<usize> {
         self.config.validate_table(&table)?;
+        self.extensions.validate(&table)?;
         if let Some(factory) = &self.shared {
             verify_shared_counters(factory, &table).await?;
         }
@@ -442,7 +462,9 @@ impl RouteReloader {
 #[async_trait::async_trait]
 impl BackgroundService for RouteReloader {
     async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
-        let mut last = self.mtime();
+        // Force a validated first load: a change between startup loading and
+        // this background task must not become an unobserved baseline.
+        let mut last = None;
         let mut ticker = tokio::time::interval(self.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -773,6 +795,7 @@ mod shared_limit_tests {
         RouteReloader {
             provider: Arc::new(InlineRouteProvider::new(config.raw.routes.groups())),
             config,
+            extensions: ExtensionRegistry::new(),
             shared: Some(factory),
             public: SharedRoutes::new(table),
             machine: None,
@@ -788,6 +811,30 @@ mod shared_limit_tests {
             &cfg.raw.defaults,
             reloader.shared.as_ref(),
         )
+    }
+
+    #[tokio::test]
+    async fn missing_extension_reload_keeps_last_valid_table() {
+        let reloader = reloader(Arc::new(Store::default()));
+        let original = reloader.public.load();
+        let groups = serde_yaml_ng::from_str(
+            "public: [{prefix: /users, upstream: users, extensions: [unregistered]}]",
+        )
+        .unwrap();
+        let table = crate::routes::RouteTable::build(groups);
+        assert!(
+            reloader
+                .publish(table)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unregistered")
+        );
+        assert!(Arc::ptr_eq(&original, &reloader.public.load()));
+        assert_eq!(
+            original.cache_namespace(),
+            reloader.public.load().cache_namespace()
+        );
     }
 
     #[tokio::test]
@@ -844,5 +891,31 @@ mod shared_limit_tests {
         );
         assert_eq!(reloader.publish(local).await.unwrap(), 1);
         assert_eq!(backend.probes.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod server_conf_tests {
+    use super::*;
+
+    fn resolved(server: &str) -> ResolvedConfig {
+        let text = format!(
+            "server: {server}\nupstreams: {{u: http://u:1}}\nroutes:\n  public: [{{prefix: /p, upstream: u}}]\n"
+        );
+        let (raw, expanded) = GatewayConfig::parse("test.yml", &text).unwrap();
+        raw.resolve(&expanded).unwrap()
+    }
+
+    #[test]
+    fn the_drain_is_pingoras_grace_period_never_its_five_minute_default() {
+        let conf = server_conf(&resolved("{}"));
+        assert_eq!(conf.grace_period_seconds, Some(25));
+        assert_eq!(
+            conf.graceful_shutdown_timeout_seconds,
+            Some(RUNTIME_SHUTDOWN_SECS)
+        );
+
+        let conf = server_conf(&resolved("{shutdown_grace: 5s, graceful_shutdown: 20s}"));
+        assert_eq!(conf.grace_period_seconds, Some(25));
     }
 }

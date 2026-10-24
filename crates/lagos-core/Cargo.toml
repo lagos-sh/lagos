@@ -64,3 +64,12 @@ workspace = true
 
 [dev-dependencies]
 jsonschema = { version = "0.28", default-features = false }
+
+[[bench]]
+name = "policy"
+harness = false
+
+[[bench]]
+name = "cache"
+harness = false
+required-features = ["cache"]

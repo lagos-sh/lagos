@@ -45,6 +45,9 @@ struct TestRequest {
     query: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    /// Socket peer for offline key fallback checks; no proxy trust is inferred.
+    #[serde(default)]
+    peer_ip: Option<String>,
     /// Synthetic, already-verified identity for evaluating `bind`.
     #[serde(default)]
     identity: Option<TestIdentity>,
@@ -93,6 +96,9 @@ struct Expected {
     /// required is checked here; keys themselves are never read offline.
     #[serde(default)]
     client_key: Option<ClientKeyState>,
+    /// Whether configured key requirements pass (does not execute counters).
+    #[serde(default)]
+    policy_keys: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -131,6 +137,7 @@ struct Actual {
     upstream_path: Option<String>,
     bindings: Option<bool>,
     client_key: Option<ClientKeyState>,
+    policy_keys: Option<bool>,
 }
 
 impl Actual {
@@ -143,6 +150,7 @@ impl Actual {
             upstream_path: None,
             bindings: None,
             client_key: None,
+            policy_keys: None,
         }
     }
 }
@@ -220,6 +228,24 @@ fn validate_case(case: &TestCase) -> anyhow::Result<()> {
             case.name
         );
     }
+    for (name, value) in &case.request.headers {
+        if http::HeaderName::from_bytes(name.as_bytes()).is_err()
+            || http::HeaderValue::from_str(value).is_err()
+        {
+            bail!("test `{}`: invalid HTTP header fixture", case.name);
+        }
+    }
+    if case
+        .request
+        .identity
+        .as_ref()
+        .is_some_and(|i| i.subject.is_empty())
+    {
+        bail!(
+            "test `{}`: synthetic identity subject must not be empty",
+            case.name
+        );
+    }
     if case.request.method.trim().is_empty() {
         bail!("test `{}`: request.method is empty", case.name);
     }
@@ -233,6 +259,7 @@ fn validate_case(case: &TestCase) -> anyhow::Result<()> {
         || case.expect.upstream_path.is_some()
         || case.expect.bindings.is_some()
         || case.expect.client_key.is_some()
+        || case.expect.policy_keys.is_some()
     {
         bail!(
             "test `{}`: route, tier, upstream, upstream_path, bindings, and client_key apply only to a route result",
@@ -288,6 +315,39 @@ fn decide(cfg: &ResolvedConfig, table: &RouteTable, request: &TestRequest) -> Ac
             })
         }))
     };
+    let mut headers = http::HeaderMap::new();
+    for (name, value) in &request.headers {
+        let (Ok(name), Ok(value)) = (
+            http::HeaderName::from_bytes(name.as_bytes()),
+            http::HeaderValue::from_str(value),
+        ) else {
+            continue;
+        }; // validate_case reports invalid fixture input.
+        headers.append(name, value);
+    }
+    let requirements = route
+        .rate_limit
+        .as_ref()
+        .map(|r| (&r.key, r.missing_key))
+        .into_iter()
+        .chain(route.concurrency.as_ref().map(|c| (c.key(), c.missing_key)));
+    let policy_keys = requirements.into_iter().all(|(key, missing)| {
+        crate::ratelimit::admission_key(
+            key,
+            missing,
+            0,
+            &route.id,
+            request
+                .identity
+                .as_ref()
+                .filter(|_| route.auth.verifies())
+                .map(|i| i.subject.as_str()),
+            None,
+            request.peer_ip.as_deref(),
+            &headers,
+        )
+        .is_ok()
+    });
     Actual {
         result: ResultKind::Route,
         route: Some(route.id.clone()),
@@ -295,6 +355,7 @@ fn decide(cfg: &ResolvedConfig, table: &RouteTable, request: &TestRequest) -> Ac
         upstream: Some(route.upstream.clone()),
         upstream_path: Some(format!("/{}", route.upstream_path(&canonical))),
         bindings,
+        policy_keys: Some(policy_keys),
         client_key: Some(if matches!(request.listener, Listener::Internal) {
             ClientKeyState::Off
         } else {
@@ -351,6 +412,14 @@ fn compare(expected: &Expected, actual: &Actual) -> Vec<String> {
         differences.push(format!(
             "client_key: expected {want:?}, got {:?}",
             actual.client_key
+        ));
+    }
+    if let Some(want) = expected.policy_keys
+        && Some(want) != actual.policy_keys
+    {
+        differences.push(format!(
+            "policy_keys: expected {want}, got {:?}",
+            actual.policy_keys
         ));
     }
     differences
@@ -518,6 +587,12 @@ pub(super) fn diff(old: &str, new: &str, allow_unset: bool) -> anyhow::Result<()
     }
     for group in new_groups.difference(&old_groups) {
         println!("+ client key exempt group {group}");
+        changes += 1;
+    }
+    if format!("{:?}", old_cfg.raw.auth.cookie_protection)
+        != format!("{:?}", new_cfg.raw.auth.cookie_protection)
+    {
+        println!("~ auth.cookie_protection: policy changed (origins hidden)");
         changes += 1;
     }
     if old_cfg.base_paths != new_cfg.base_paths {

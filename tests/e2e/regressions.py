@@ -7,6 +7,7 @@ files and loopback listeners; no configuration in the checkout is modified.
 
 import base64
 import collections
+import concurrent.futures
 import http.client
 import http.server
 import json
@@ -57,10 +58,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with self.server.count_lock:
             self.server.counts[path] += 1
             count = self.server.counts[path]
+        if path == "/keycapfallback":
+            self.server.hold_started.set()
+            self.server.hold_release.wait(3)
         body = self.rfile.read(int(self.headers.get("content-length", "0"))).decode()
         response = {
             "origin": count,
             "language": self.headers.get("accept-language"),
+            "cookie": self.headers.get("cookie"),
             "body": body,
             "subject": self.headers.get("x-auth-subject"),
             "port": self.server.server_port,
@@ -71,6 +76,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/member-hc" and self.headers.get("host") != self.server.health_host:
             status = 400
         if path == "/jwks":
+            if getattr(self.server, "jwks_outage", False):
+                status = 503
             response = self.server.jwks
         if path == "/bound":
             response["merchantId"] = dict(urllib.parse.parse_qsl(
@@ -83,9 +90,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("vary", "*")
         elif path == "/varyidentity":
             self.send_header("vary", "x-auth-subject")
-        if path == "/authcache" and self.headers.get("x-auth-subject"):
+        if path == "/cookieset":
+            self.send_header("set-cookie", f"session=user-{count}; HttpOnly")
+        if path == "/cookievary":
+            self.send_header("vary", "cookie")
+        if path == "/jwks":
+            self.send_header("cache-control", "max-age=0")
+        elif path == "/authcache" and self.headers.get("x-auth-subject"):
             self.send_header("cache-control", "private, no-store")
-        elif path in ("/authshared", "/varyidentity"):
+        elif path in ("/authshared", "/varyidentity", "/cookieset", "/cookieplain", "/cookievary"):
             self.send_header("cache-control", "public, max-age=60")
             if path == "/authshared":
                 response["subject"] = None
@@ -120,12 +133,12 @@ def run(binary, work):
     jwks = {"keys": [{"kty": "RSA", "kid": "regression", "use": "sig",
                       "n": b64(bytes.fromhex(modulus)), "e": "AQAB"}]}
 
-    def token(subject="11", issuer="https://regression.test", issued_at="valid"):
+    def token(subject="11", issuer="https://regression.test", issued_at="valid", audience="regression-api", expired=False, kid="regression"):
         now = int(time.time())
-        payload = {"iss": issuer, "sub": subject, "aud": "regression-api", "exp": now + 3600}
+        payload = {"iss": issuer, "sub": subject, "aud": audience, "exp": now - 3600 if expired else now + 3600}
         if issued_at != "missing":
             payload["iat"] = now - 10 if issued_at == "valid" else issued_at
-        message = b64(json.dumps({"alg": "RS256", "kid": "regression"}).encode())
+        message = b64(json.dumps({"alg": "RS256", "kid": kid}).encode())
         message += "." + b64(json.dumps(payload).encode())
         signature = subprocess.check_output(
             ["openssl", "dgst", "-sha256", "-sign", str(key)], input=message.encode())
@@ -137,6 +150,8 @@ def run(binary, work):
     try:
         for _ in range(2):
             server = Fixture(("127.0.0.1", 0), Handler)
+            server.hold_started = threading.Event()
+            server.hold_release = threading.Event()
             server.jwks = jwks
             server.counts = collections.Counter()
             server.count_lock = threading.Lock()
@@ -152,9 +167,17 @@ def run(binary, work):
         groups = {
             "public": [
                 {"prefix": f"/{path}", "upstream": "origin", "cache": True}
-                for path in ("vary", "star", "write", "large", "cb/cached")
+                for path in ("vary", "star", "write", "large", "cb/cached", "cookieset", "cookieplain", "cookievary")
             ] + [
                 {"id": "swap", "prefix": "/swap", "upstream": "origin", "cache": True},
+                {"prefix": "/keylimit", "upstream": "origin", "rate_limit": {
+                    "requests": 1, "interval": "60s", "key": "header.x-client"}},
+                {"prefix": "/keycap", "upstream": "origin", "concurrency": {
+                    "max": 1, "key": "header.x-client"}},
+                {"prefix": "/keycapfallback", "upstream": "origin", "concurrency": {
+                    "max": 1, "key": "header.x-client", "missing_key": "route"}},
+                {"prefix": "/keyfallback", "upstream": "origin", "rate_limit": {
+                    "requests": 1, "interval": "60s", "key": "header.x-client", "missing_key": "route"}},
                 {"prefix": "/healthprobe", "upstream": "health"},
                 {"prefix": "/memberprobe", "upstream": "memberhealth"},
                 {"prefix": "/mixedprobe", "upstream": "mixedhealth"},
@@ -191,9 +214,10 @@ def run(binary, work):
             "observability": {"metrics": {"listen": f"127.0.0.1:{metrics}",
                                            "pool_sample_interval": "100ms"}},
             "cache": {"max_size": "64KiB", "max_object_size": "4KiB"},
-            "auth": {"jwt": [{"issuer": "https://regression.test", "audience": ["regression-api"],
-                               "jwks_url": origin + "/jwks"}]},
-            "forward": {"authorization": False, "headers": ["x-merchant-id"]},
+            "auth": {"token_cookies": ["access_token"], "cookie_protection": {
+                         "origins": ["https://app.test"], "referer_fallback": True}, "jwt": [{"issuer": "https://regression.test", "audience": ["regression-api"],
+                               "jwks_url": origin + "/jwks", "min_key_ttl": "100ms", "stale_if_error": "5s"}]},
+            "forward": {"authorization": False, "headers": ["x-merchant-id", "cookie"]},
             "cors": {"origins": ["https://app.test"]},
             "upstreams": {
                 "origin": origin,
@@ -253,7 +277,40 @@ def run(binary, work):
             raise AssertionError("timed out: " + description)
 
         wait_until(lambda: request("/health")[0] == 200, "gateway startup", timeout=30)
+        for path in ("/keylimit", "/keycap"):
+            for headers in ({}, {"x-client": ""}, {"x-client": "a,b"}, {"x-client": "a b"},
+                            [("x-client", "a"), ("x-client", "a")]):
+                checks.check(request(path, headers)[0] == 400, "absent or ambiguous policy key refused: " + path)
+            checks.check(request(path, {"x-client": "alice"})[0] == 200, "valid policy key admitted: " + path)
+        checks.check(request("/keylimit", {"x-client": " alice "})[0] == 429,
+                     "equivalent header formatting cannot reset quota")
+        checks.check(request("/keyfallback")[0] == 200 and request("/keyfallback")[0] == 429,
+                     "explicit route fallback counts missing header requests")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            held = executor.submit(request, "/keycapfallback")
+            checks.check(servers[0].hold_started.wait(3), "fallback request holds its upstream slot")
+            checks.check(request("/keycapfallback")[0] == 503, "concurrent fallback request cannot skip cap")
+            servers[0].hold_release.set()
+            checks.check(held.result()[0] == 200 and request("/keycapfallback")[0] == 200,
+                         "completed fallback request releases its slot")
         auth = {"authorization": token()}
+        cookie_auth = {"cookie": "access_token=" + token().removeprefix("Bearer ")}
+        checks.check(request("/bound?merchantId=11", cookie_auth)[0] == 200,
+                     "safe cookie-authenticated request remains valid")
+        for extra, status in [({}, 403), ({"origin": "null"}, 403),
+                              ({"origin": "https://evil.test"}, 403),
+                              ({"origin": "https://app.test"}, 200),
+                              ({"referer": "https://app.test/page"}, 200),
+                              ({"origin": "https://evil.test", "referer": "https://app.test/page"}, 403)]:
+            checks.check(request("/bound?merchantId=11", {**cookie_auth, **extra}, method="POST")[0] == status,
+                         "unsafe cookie request follows exact Origin/Referer policy")
+        checks.check(request("/bound?merchantId=11", [*cookie_auth.items(), ("origin", "https://app.test"),
+                     ("origin", "https://app.test")], method="POST")[0] == 403,
+                     "duplicate Origin cannot authorize cookie mutation")
+        checks.check(request("/bound?merchantId=11", auth, method="POST")[0] == 200,
+                     "non-browser bearer client requires no Origin")
+        checks.check(request("/bound?merchantId=11", [*auth.items(), *auth.items()])[0] == 401,
+                     "duplicate Authorization is ambiguous even when both values match")
         checks.check(request("/bound?merchantId=11", auth)[0] == 200, "a unique ownership parameter passes")
         for query in ("merchantId=11&merchantId=12", "merchantId=11&%6derchantId=12",
                       "merchantId=11&merchantId", "merchantId=11&merchantId=11"):
@@ -271,6 +328,17 @@ def run(binary, work):
         checks.check("accept-language" in varies and "origin" in varies, "CORS preserves upstream Vary")
         checks.check(request("/star")[1] != request("/star")[1], "Vary star is never reused")
 
+        set_a, set_b = request("/cookieset"), request("/cookieset")
+        checks.check(set_a[1] != set_b[1] and set_a[2]["set-cookie"] != set_b[2]["set-cookie"],
+                     "even public Set-Cookie responses never replay another session")
+        for path in ("/cookieplain", "/cookievary"):
+            anonymous_cookie = request(path)[1]
+            for cookie in ("session=alice", "session=bob", "", "session=alice"):
+                status, data, _ = request(path, {"cookie": cookie})
+                checks.check(status == 200 and data["cookie"] == (cookie or None) and data != anonymous_cookie,
+                             "cookie request bypasses anonymous cache: " + path)
+            checks.check(request(path)[1] == anonymous_cookie,
+                         "personalized cookie fills cannot replace the anonymous entry: " + path)
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             a = request("/write", method=method, body="first")[1]
             b = request("/write", method=method, body="second")[1]
@@ -296,6 +364,17 @@ def run(binary, work):
         for issued_at in ("missing", None, "not-a-timestamp", -1, time.time() + 3600, int(time.time()) + 3600):
             checks.check(request("/identity", {"authorization": token(issued_at=issued_at)})[0] == 401,
                          f"invalid iat refused: {issued_at}")
+        servers[0].jwks_outage = True
+        time.sleep(0.15)
+        checks.check(request("/identity", auth)[0] == 200, "bounded stale keys preserve valid signature verification during outage")
+        valid_token = token()
+        prefix, signature = valid_token.rsplit(".", 1)
+        bad_signature = prefix + "." + ("A" if signature[0] != "A" else "B") + signature[1:]
+        for invalid_token in (token(audience="other-api"), token(expired=True),
+                              token(kid="unknown"), bad_signature):
+            checks.check(request("/identity", {"authorization": invalid_token})[0] == 401,
+                         "stale-key use still rejects invalid claims, unknown kid or signature")
+        servers[0].jwks_outage = False
         peers = set()
         for i in range(32):
             user = {"authorization": token(subject=str(i))}
@@ -466,10 +545,14 @@ def run_defaults(binary, work):
                         config_path.write_text(json.dumps(config))
                         groups["public"].append({"prefix": "/fresh", "upstream": "origin"})
                         publish(groups)
-                        wait_until(lambda: request("/fresh", "POST") == 404 and "gateway.routes.reloaded" in log_path.read_text(),
-                                   "defaults route reload")
-                        checks.check(request("/fresh") == 200 and request("/fresh") == 429,
+                        # Wait for the new route itself, consuming its one
+                        # allowed request. An earlier reload log plus a 404
+                        # cannot establish that this replacement is active.
+                        wait_until(lambda: request("/fresh") == 200, "defaults route reload")
+                        checks.check(request("/fresh", "POST") == 404 and request("/fresh") == 429,
                                      "reload retains captured startup defaults despite main-file edits")
+                        checks.check(request("/inherit") == 429,
+                                     "unchanged effective limiter keeps spent quota across reload")
                         groups["public"][0].update(methods=["POST"], rate_limit=None, retry=None)
                         publish(groups)
                         wait_until(lambda: request("/inherit", "POST") == 200, "explicit policy reload")
