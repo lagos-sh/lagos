@@ -15,7 +15,6 @@ on:
 # registry secret. `contents: read` narrows the default token everywhere else.
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -34,19 +33,24 @@ jobs:
     outputs:
       version: ${{ steps.release_version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: 1.98.0
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       # A tag usually points at a commit main already tested, but "usually" is
       # not a property you want in a published artifact. This is the same suite
       # as ci.yml.
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo check -p lagos-core --no-default-features
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: cargo check --locked -p lagos-core --no-default-features
+      - run: cargo test --locked -p lagos-core --no-default-features --lib
+      - run: cargo check --locked -p lagos-core --no-default-features --features shared-limits
+      - run: cargo check --locked -p lagos-core --no-default-features --features cache
+      - run: cargo check --locked -p lagos-core --no-default-features --features otel
       - name: End-to-end suite
         run: ./tests/e2e/run.sh
 
@@ -73,7 +77,7 @@ jobs:
       # licence the allow-list does not cover, or a new advisory, reached a
       # release unnoticed.
       - name: cargo deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
 
@@ -112,6 +116,9 @@ jobs:
       schema_release: ${{ needs.verify.outputs.version }}
 
   build:
+    permissions:
+      contents: read
+      packages: write
     name: Build ${{ matrix.platform }}
     needs: [verify, native]
     strategy:
@@ -128,7 +135,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Platform slug
         run: |
@@ -136,9 +143,9 @@ jobs:
           echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
           echo "LAGOS_SCHEMA_RELEASE=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -146,7 +153,7 @@ jobs:
 
       - name: Image labels
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
@@ -156,7 +163,7 @@ jobs:
       # runner instead.
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           build-args: LAGOS_SCHEMA_RELEASE=${{ env.LAGOS_SCHEMA_RELEASE }}
@@ -175,7 +182,7 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -184,7 +191,7 @@ jobs:
 
       - name: Build and push extension builder by digest
         id: builder_build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           build-args: LAGOS_SCHEMA_RELEASE=${{ env.LAGOS_SCHEMA_RELEASE }}
@@ -202,7 +209,7 @@ jobs:
           digest="${{ steps.builder_build.outputs.digest }}"
           touch "/tmp/builder-digests/${digest#sha256:}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: builder-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/builder-digests/*
@@ -210,26 +217,33 @@ jobs:
           retention-days: 1
 
   merge:
+    permissions:
+      contents: read
+      packages: write
+      # Provenance for the published manifest lists, signed with the job's
+      # OIDC identity. Nothing else in this job uses either.
+      id-token: write
+      attestations: write
     name: Publish manifest
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/builder-digests
           pattern: builder-digests-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -237,7 +251,7 @@ jobs:
 
       - name: Tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # No `{{major}}` while this is 0.x: a floating `0` tag would move
@@ -263,11 +277,25 @@ jobs:
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Inspect
-        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        id: index
+        run: |
+          ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect "$ref"
+          echo "digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+
+      # The per-architecture builds above set `provenance: false` because a
+      # push-by-digest has no tag to hang attestations on. The manifest list is
+      # what users pull, so it is attested here, after it exists, by digest.
+      - name: Attest image
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
 
       - name: Builder tags
         id: builder_meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}
           tags: |
@@ -286,7 +314,18 @@ jobs:
             $(printf '${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Inspect extension builder
-        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}:${{ steps.builder_meta.outputs.version }}
+        id: builder_index
+        run: |
+          ref=${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}:${{ steps.builder_meta.outputs.version }}
+          docker buildx imagetools inspect "$ref"
+          echo "digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+
+      - name: Attest extension builder
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.BUILDER_IMAGE_NAME }}
+          subject-digest: ${{ steps.builder_index.outputs.digest }}
+          push-to-registry: true
 
       # Distroless has no shell, so this also proves the entrypoint resolves and
       # the binary's dynamic linkage is satisfied in the runtime image — the two
@@ -342,11 +381,13 @@ jobs:
     permissions:
       contents: write
       packages: read
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: native-*
           merge-multiple: true
@@ -355,6 +396,10 @@ jobs:
         run: |
           cp install.sh release-assets/install.sh
           python3 release/package.py checksums --directory release-assets --version "${GITHUB_REF_NAME#v}"
+      - name: Attest standalone archives, installer and checksums
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: release-assets/*
       - name: Publish GitHub Release after all smoke checks
         run: |
           if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft'); then
