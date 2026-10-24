@@ -744,7 +744,14 @@ fn routes(path: Option<String>) -> anyhow::Result<()> {
             },
             None => String::new(),
         };
-        println!("  {name:<16} {}{health}{breaker}", urls.join(", "));
+        let discovery = match &up.discovery {
+            Some(d) => format!("  [refresh every {:?}]", d.interval),
+            None => String::new(),
+        };
+        println!(
+            "  {name:<16} {}{health}{discovery}{breaker}",
+            urls.join(", ")
+        );
     }
     Ok(())
 }

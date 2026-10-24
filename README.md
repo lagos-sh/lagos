@@ -810,10 +810,38 @@ HTTP checks use each member's own Host header (including its port), scheme,
 and TLS server name. Targets must resolve to distinct address-and-port pairs;
 ambiguous duplicates prevent startup.
 
-Pool discovery resolves configured targets at startup. A target that cannot be
-resolved prevents startup. Pool membership is static; DNS-based membership
-refresh is not provided. Review service discovery requirements before using
-pools with changing backend addresses.
+Pool targets may be names or IP literals. Every address a name resolves to
+becomes a member with that target's weight, Host header, TLS server name and
+health check, and Lagos dials exactly the address the balancer chose. Names are
+resolved at startup; a target that cannot be resolved prevents startup. A name
+that resolves to both IPv4 and IPv6 addresses should have a health check, since
+members of an unreachable family would otherwise fail requests (Lagos logs a
+warning at startup when it sees this).
+
+Membership is static unless `discovery` is set, which re-resolves every target
+in the background, for example to follow a Kubernetes headless Service:
+
+```yaml
+upstreams:
+  orders:
+    targets:
+      - http://orders-headless.shop.svc.cluster.local:3000
+    discovery:
+      interval: 30s     # at least 1s
+      max_members: 256  # default 256, at most 4096
+    health_check:
+      path: /health
+```
+
+Each refresh replaces the member set atomically; members present before and
+after keep their health state and pooled connections, and removed members stop
+receiving new requests. A refresh is discarded, keeping the current members,
+when a lookup fails or takes over 5s (or the interval, if shorter), a target
+resolves to no addresses, the result exceeds `max_members`, two targets share
+an address, or an address moves from one target to another. Outcomes are
+counted in `gateway_upstream_discovery_total{upstream,outcome}` with `updated`,
+`unchanged`, `failed` and `rejected`; current membership is in
+`gateway_pool_backends`. Lookups run off the request path.
 
 ### Retries
 

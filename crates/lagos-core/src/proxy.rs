@@ -405,7 +405,7 @@ impl Gateway {
             let target = self
                 .upstreams
                 .get(&ctx.upstream_name)
-                .and_then(|u| u.select(b"").map(|t| t.addr.clone()))
+                .and_then(|u| u.select(b"").map(|s| s.target.addr.clone()))
                 .unwrap_or_else(|| "?".to_string());
             let _ = writeln!(
                 out,
@@ -1551,16 +1551,14 @@ impl ProxyHttp for Gateway {
         // the Host header from the same backend, and a second selection could
         // name a different one.
         let key = self.hash_key(session, ctx);
-        let target = upstream
-            .select(key.as_bytes())
-            .ok_or_else(|| {
-                pingora::Error::explain(
-                    pingora::ErrorType::ConnectError,
-                    "every backend in the pool is unhealthy",
-                )
-                .into_up()
-            })?
-            .clone();
+        let selected = upstream.select(key.as_bytes()).ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::ConnectError,
+                "every backend in the pool is unhealthy",
+            )
+            .into_up()
+        })?;
+        let target = selected.target.clone();
 
         // Resolved here rather than inside `HttpPeer::new`, which takes anything
         // `ToInetSocketAddrs` and unwraps it (pingora-core 0.9
@@ -1573,7 +1571,13 @@ impl ProxyHttp for Gateway {
         // blocking `getaddrinfo` off this worker thread: it is one of two, and
         // a slow resolver holding both is a gateway outage rather than a
         // gateway slowdown.
-        let addrs = self.resolver.addresses(&target.addr).await?;
+        let addrs = match selected.addr {
+            // A pool member is the address the balancer chose. Resolving the
+            // target's name again could pick another member, or one that
+            // health checks have taken out of rotation.
+            Some(addr) => Arc::new(vec![addr]),
+            None => self.resolver.addresses(&target.addr).await?,
+        };
         let start = *ctx
             .dns_start
             .get_or_insert_with(|| self.dns_next.fetch_add(1, Ordering::Relaxed));

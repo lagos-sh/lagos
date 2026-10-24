@@ -51,6 +51,7 @@ pub struct Metrics {
     jwks: IntCounterVec,
     extensions: HistogramVec,
     request_deadlines: prometheus::IntCounter,
+    discovery: IntCounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -71,6 +72,12 @@ pub fn metrics() -> Option<&'static Metrics> {
 impl Metrics {
     fn build() -> prometheus::Result<Self> {
         Ok(Self {
+            discovery: register_int_counter_vec!(
+                "gateway_upstream_discovery_total",
+                "Pool membership refreshes: updated, unchanged, or failed and rejected \
+                 (both keep the current members).",
+                &["upstream", "outcome"]
+            )?,
             request_deadlines: prometheus::register_int_counter!(
                 "gateway_request_deadlines_total",
                 "HTTP exchanges closed at the configured absolute request deadline."
@@ -168,6 +175,14 @@ impl Metrics {
         self.extensions
             .with_label_values(&[extension, outcome])
             .observe(seconds);
+    }
+
+    pub fn record_discovery(&self, upstream: &str, outcome: &str) {
+        let outcome = match outcome {
+            "updated" | "unchanged" | "failed" | "rejected" => outcome,
+            _ => "other",
+        };
+        self.discovery.with_label_values(&[upstream, outcome]).inc();
     }
 
     pub fn record_jwks(&self, outcome: &str) {

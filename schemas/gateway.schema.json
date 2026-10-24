@@ -799,6 +799,43 @@
         }
       ]
     },
+    "DiscoveryConfig": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "interval": {
+              "description": "How often to re-resolve. At least one second.",
+              "type": "string"
+            },
+            "max_members": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": 256,
+              "description": "Most addresses the pool may hold across all targets. A refresh that\nresolves more is refused rather than truncated, so traffic is never\nsilently skewed toward whichever addresses happened to sort first."
+            }
+          },
+          "required": [
+            "interval"
+          ],
+          "type": "object"
+        },
+        {
+          "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+          "type": "string"
+        }
+      ],
+      "description": "Re-resolve a pool's target names on an interval.\n\n```yaml\ndiscovery:\n  interval: 30s\n```\n\nEach refresh resolves every target off the request path and swaps the\nmember set atomically; members present before and after keep their health\nstate and pooled connections. A refresh that fails, returns no address for\na target, exceeds `max_members`, or makes two targets share an address is\ndiscarded and the last good set stays in service."
+    },
     "DnsConfig": {
       "anyOf": [
         {
@@ -2864,7 +2901,7 @@
           ]
         }
       ],
-      "description": "A backend, or a pool of them.\n\nThe short form is a bare URL:\n\n```yaml\nupstreams:\n  users: http://users:3000\n```\n\nSeveral backends make it a pool, with optional weights, a balancing\nalgorithm and health checking:\n\n```yaml\nupstreams:\n  users:\n    targets:\n      - http://users-1:3000\n      - url: http://users-2:3000\n        weight: 3\n    balance: round_robin\n    health_check:\n      path: /health\n      interval: 10s\n```\n\nThe two forms behave differently in one way worth knowing: a **single**\ntarget keeps its hostname and is resolved per connection, so a DNS change\nis picked up without a restart. A **pool** resolves its members at startup,\nbecause the balancer works on addresses. In Kubernetes a Service name maps\nto a stable ClusterIP, so this is usually invisible — but a pool pointed at\na headless service would pin the pods it saw at boot."
+      "description": "A backend, or a pool of them.\n\nThe short form is a bare URL:\n\n```yaml\nupstreams:\n  users: http://users:3000\n```\n\nSeveral backends make it a pool, with optional weights, a balancing\nalgorithm and health checking:\n\n```yaml\nupstreams:\n  users:\n    targets:\n      - http://users-1:3000\n      - url: http://users-2:3000\n        weight: 3\n    balance: round_robin\n    health_check:\n      path: /health\n      interval: 10s\n```\n\nThe two forms behave differently in one way worth knowing: a **single**\ntarget keeps its hostname and is resolved per connection, so a DNS change\nis picked up without a restart. A **pool** works on addresses: every address\na target name resolves to becomes a member, resolved once at startup unless\n`discovery` asks for it to be refreshed. In Kubernetes a Service name maps\nto a stable ClusterIP, so this is usually invisible; a pool pointed at a\nheadless service needs `discovery` to follow its pods."
     },
     "UpstreamDetails": {
       "anyOf": [
@@ -2924,6 +2961,32 @@
                   "anyOf": [
                     {
                       "$ref": "#/definitions/CircuitBreakerConfig"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            "discovery": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/DiscoveryConfig"
                     },
                     {
                       "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",

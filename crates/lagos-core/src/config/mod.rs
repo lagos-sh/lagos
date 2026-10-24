@@ -1064,10 +1064,11 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 ///
 /// The two forms behave differently in one way worth knowing: a **single**
 /// target keeps its hostname and is resolved per connection, so a DNS change
-/// is picked up without a restart. A **pool** resolves its members at startup,
-/// because the balancer works on addresses. In Kubernetes a Service name maps
-/// to a stable ClusterIP, so this is usually invisible — but a pool pointed at
-/// a headless service would pin the pods it saw at boot.
+/// is picked up without a restart. A **pool** works on addresses: every address
+/// a target name resolves to becomes a member, resolved once at startup unless
+/// `discovery` asks for it to be refreshed. In Kubernetes a Service name maps
+/// to a stable ClusterIP, so this is usually invisible; a pool pointed at a
+/// headless service needs `discovery` to follow its pods.
 #[derive(Debug, Clone, JsonSchema)]
 #[schemars(with = "schema::Upstream")]
 pub struct UpstreamConfig {
@@ -1078,6 +1079,42 @@ pub struct UpstreamConfig {
     pub hash_on: HashKey,
     pub health_check: Option<HealthCheckConfig>,
     pub circuit_breaker: Option<CircuitBreakerConfig>,
+    pub discovery: Option<DiscoveryConfig>,
+}
+
+/// Re-resolve a pool's target names on an interval.
+///
+/// ```yaml
+/// discovery:
+///   interval: 30s
+/// ```
+///
+/// Each refresh resolves every target off the request path and swaps the
+/// member set atomically; members present before and after keep their health
+/// state and pooled connections. A refresh that fails, returns no address for
+/// a target, exceeds `max_members`, or makes two targets share an address is
+/// discarded and the last good set stays in service.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryConfig {
+    /// How often to re-resolve. At least one second.
+    #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
+    pub interval: Duration,
+    /// Most addresses the pool may hold across all targets. A refresh that
+    /// resolves more is refused rather than truncated, so traffic is never
+    /// silently skewed toward whichever addresses happened to sort first.
+    #[serde(default = "default_max_members")]
+    pub max_members: usize,
+}
+
+/// Default and static-pool bound on resolved members.
+pub const DEFAULT_MAX_MEMBERS: usize = 256;
+/// Upper bound on `discovery.max_members`.
+pub const MAX_MEMBERS_LIMIT: usize = 4096;
+
+fn default_max_members() -> usize {
+    DEFAULT_MAX_MEMBERS
 }
 
 /// The request value a consistent hash is taken over.
@@ -1160,7 +1197,7 @@ impl UpstreamConfig {
     /// A pool is anything the balancer has to choose between, or anything whose
     /// health is being tracked.
     pub fn is_pool(&self) -> bool {
-        self.targets.len() > 1 || self.health_check.is_some()
+        self.targets.len() > 1 || self.health_check.is_some() || self.discovery.is_some()
     }
 }
 
@@ -1240,6 +1277,8 @@ struct UpstreamDetails {
     health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default)]
+    discovery: Option<DiscoveryConfig>,
 }
 
 impl<'de> Deserialize<'de> for UpstreamConfig {
@@ -1262,6 +1301,7 @@ impl<'de> Deserialize<'de> for UpstreamConfig {
                     hash_on: HashKey::default(),
                     health_check: None,
                     circuit_breaker: None,
+                    discovery: None,
                 })
             }
 
@@ -1291,6 +1331,7 @@ impl<'de> Deserialize<'de> for UpstreamConfig {
                     hash_on: long.hash_on,
                     health_check: long.health_check,
                     circuit_breaker: long.circuit_breaker,
+                    discovery: long.discovery,
                 })
             }
         }
@@ -2328,6 +2369,22 @@ impl GatewayConfig {
                     )));
                 }
                 target.url = url;
+            }
+            if let Some(d) = &normalized.discovery {
+                if d.interval < Duration::from_secs(1) {
+                    return Err(ConfigError::invalid(format!(
+                        "upstreams.{name}.discovery.interval is {:?}; it must be at least 1s \
+                         so refreshes cannot load the resolver continuously",
+                        d.interval
+                    )));
+                }
+                if d.max_members == 0 || d.max_members > MAX_MEMBERS_LIMIT {
+                    return Err(ConfigError::invalid(format!(
+                        "upstreams.{name}.discovery.max_members is {}; it must be between 1 \
+                         and {MAX_MEMBERS_LIMIT}",
+                        d.max_members
+                    )));
+                }
             }
             upstreams.insert(name.clone(), normalized);
         }
@@ -3400,6 +3457,35 @@ routes:
             .expect_err("unlisted proxies refused");
         assert!(forged.to_string().contains("concurrency cap"), "{forged}");
         assert!(table(&route("{ max: 5, key: nope }")).is_err());
+    }
+
+    #[test]
+    fn discovery_settings_are_bounded() {
+        let ok =
+            parse("upstreams:\n  u: {targets: [http://pods:80], discovery: {interval: 30s}}\nroutes:\n  public: [{prefix: /p, upstream: u}]\n")
+                .expect("discovery parses");
+        let d = ok.upstreams["u"].discovery.as_ref().expect("kept");
+        assert_eq!(d.max_members, DEFAULT_MAX_MEMBERS);
+        assert!(
+            ok.upstreams["u"].is_pool(),
+            "one name with discovery is a pool"
+        );
+
+        for (yaml, needle) in [
+            ("{interval: 500ms}", "at least 1s"),
+            ("{interval: 30s, max_members: 0}", "between 1"),
+            ("{interval: 30s, max_members: 5000}", "between 1"),
+        ] {
+            let text = format!(
+                "upstreams:\n  u: {{targets: [http://pods:80], discovery: {yaml}}}\nroutes:\n  public: [{{prefix: /p, upstream: u}}]\n"
+            );
+            let Err(err) = parse(&text) else {
+                panic!("{yaml} must be refused")
+            };
+            let err = err.to_string();
+            assert!(err.contains(needle), "{yaml}: {err}");
+        }
+        assert!(parse("upstreams:\n  u: {url: http://pods:80, discovery: {}}\nroutes:\n  public: [{prefix: /p, upstream: u}]\n").is_err());
     }
 
     #[test]

@@ -404,3 +404,14 @@ unsafe methods; missing/null/ambiguous origins then reject with 403. Referer
 fallback is separately opt-in. Duplicate Authorization fields on verifying
 routes now reject with 401. AuthConfig/ResolvedConfig gain the corresponding
 optional policy field. See [cookie authentication](docs/cookie-authentication.md).
+
+Pool targets may now be hostnames. A pool that previously failed to start with
+`cannot resolve ... invalid socket addr` now starts, with one member per
+resolved address (each carrying the target's weight). IP-literal pools behave
+as before. `discovery` is opt-in; without it membership is fixed at startup.
+Library callers: `UpstreamConfig` gains `discovery: Option<DiscoveryConfig>`
+(struct literals need `discovery: None`), `Upstream::select` returns
+`Selected { target, addr }` where `addr` is the pool member to dial, and
+`upstream::Kind::Pool` names its field `targets` (a `Vec`, indexed per member)
+instead of the address-keyed `members` map.
+

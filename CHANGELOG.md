@@ -5,6 +5,21 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## 0.1.9 - Unreleased
 
+- Pools accept hostname targets. Pingora's `Backend::new` parses socket
+  addresses only, so a pool such as the README's `http://orders-1:3000` failed
+  to start. Every resolved address becomes a member that keeps its target's
+  authority, TLS name and health check, and the proxy dials the address the
+  balancer chose instead of resolving the name again. Optional per-upstream
+  `discovery: {interval, max_members}` re-resolves in the background with
+  atomic replacement; failed, empty, oversized or ambiguous refreshes keep the
+  last good members and are counted in `gateway_upstream_discovery_total`.
+- Route tables above 32 routes match through a segment index; at 10,000 routes
+  a lookup measured about 0.46 us instead of 35.5 us (hit). Matching semantics
+  are unchanged and covered by an equivalence test against the linear matcher.
+- CI pins third-party actions by commit, installs the pinned toolchain, builds
+  with `--locked`, checks feature combinations, and releases attest build
+  provenance for standalone archives and the published image manifest lists.
+
 - Optional `timeouts.request_total` bounds complete HTTP exchanges, including
   progress-making streams. Timeout closes the connection and records a dedicated
   deadline metric; omitted/null preserves existing streaming behavior.

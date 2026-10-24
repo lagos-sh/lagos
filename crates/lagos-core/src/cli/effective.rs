@@ -197,6 +197,7 @@ fn project(
                 "hash_on": s.hidden("upstreams"),
                 "health_check": s.safe("upstreams", json!(upstream.health_check.as_ref().map(|health| json!({"path": REDACTED, "interval": format!("{:?}", health.interval), "timeout": format!("{:?}", health.timeout), "healthy_after": health.healthy_after, "unhealthy_after": health.unhealthy_after})))),
                 "circuit_breaker": s.safe("upstreams", json!(upstream.circuit_breaker.as_ref().map(|breaker| json!({"failures": breaker.failures, "window": format!("{:?}", breaker.window), "cooldown": format!("{:?}", breaker.cooldown), "successes_to_close": breaker.successes_to_close, "max_trials": breaker.max_trials})))),
+                "discovery": s.safe("upstreams", json!(upstream.discovery.as_ref().map(|d| json!({"interval": format!("{:?}", d.interval), "max_members": d.max_members})))),
                 "target_count": s.safe("upstreams", json!(upstream.targets.len()))
             })
         })
