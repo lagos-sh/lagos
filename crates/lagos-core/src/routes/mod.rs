@@ -847,7 +847,11 @@ impl RouteTable {
         // host already; only allocate for the ones that do not.
         let m = ascii_cased(method, u8::is_ascii_lowercase, str::to_ascii_uppercase);
         let h = host.map(|h| {
-            ascii_cased(normalize_host(h), u8::is_ascii_uppercase, str::to_ascii_lowercase)
+            ascii_cased(
+                normalize_host(h),
+                u8::is_ascii_uppercase,
+                str::to_ascii_lowercase,
+            )
         });
 
         if let Some(index) = &self.lookup {
