@@ -171,3 +171,13 @@ route-default checks. Corrected two fixture assumptions: configured credential
 stripping removes empty Cookie fields; and an old reload log plus 404 cannot
 prove a new route is active. The test now waits for that new route's admitted
 request and verifies its next request is limited.
+
+## C1 — baseline before matcher optimization
+
+Added a dependency-free release-mode benchmark covering route counts 10–10,000,
+hits/misses/build, header key/plan, rate lookup, RS256 verification, upstream
+selection and literal warm DNS. Full-run resource measurements and raw samples
+are committed in docs/performance. An initial upstream fixture omitted required
+routes; after fixing that fixture the complete benchmark exited successfully.
+The host C compiler cache was read-only; disabling ccache allowed release builds.
+No whole-gateway throughput or HTTP latency is inferred from microbenchmarks.
