@@ -181,3 +181,41 @@ are committed in docs/performance. An initial upstream fixture omitted required
 routes; after fixing that fixture the complete benchmark exited successfully.
 The host C compiler cache was read-only; disabling ccache allowed release builds.
 No whole-gateway throughput or HTTP latency is inferred from microbenchmarks.
+
+## C2–C3 — route index and request-path allocations
+
+Segment trie for tables above 32 routes (`routes/index.rs`), equivalence-tested
+against the linear predicate; `prefix_candidates` (explain/why-not) unchanged.
+p50 at 10,000 routes: hit 35.5 us -> 0.46 us, miss 70.3 us -> 0.08 us; build
+about 30% slower. `match_request` no longer allocates for an already
+upper-case method / lower-case host (about 10 ns per lookup). Data in
+docs/performance.
+
+## D1 — hostname pools and opt-in discovery (item 13)
+
+Confirmed bug: Pingora 0.9 `Backend::new` parses socket addresses only, so any
+hostname pool target (the README example) failed at startup. Fixed: every
+resolved address becomes a member carrying its target index; the proxy dials
+the selected address. Opt-in `discovery: {interval, max_members}` refreshes in
+the balancer's background service; failed/empty/oversized/ambiguous answers
+keep the last good set. `gateway_upstream_discovery_total` counts outcomes.
+Not covered end to end: `localhost` is dual-stack and the Python members bind
+IPv4 only, so unit tests (scripted resolver, real LoadBalancer) cover it.
+
+## E1 — CI, supply chain, version
+
+Actions pinned by SHA (all 12 verified with `git ls-remote`), toolchain 1.98.0,
+`--locked`, feature combinations, least-privilege release token, provenance for
+archives and image manifest lists (attestation steps unverified until a tagged
+release runs). Fresh `cargo deny` found three advisories; patched. Workspace,
+lockfile and starter images bumped to 0.1.9 (images not yet published).
+
+Final checks at the branch tip (this session): `cargo fmt --check`, `cargo clippy
+--locked --workspace --all-targets -D warnings`, lean clippy, `cargo test
+--locked --workspace` (462 passed), lean lib tests (407 passed), feature checks
+(shared-limits, cache, otel), `cargo deny check` (online), `tests/e2e/run.sh`
+(218 passed, 0 failed).
+
+Still pending: 9 (multi-replica guarantees doc pass), 12 beyond matcher
+(profiling-driven), 14 (cache benchmarks), 15/16 review, 18 (branch protection:
+read-only inspection and manual steps), 20 (SECURITY/ROADMAP sync).
