@@ -249,6 +249,7 @@ fn project(
                 "graceful_shutdown": s.safe("server.graceful_shutdown", json!(format!("{:?}", c.server.graceful_shutdown)))
             },
             "timeouts": {
+                "request_total": s.safe("timeouts.request_total", json!(c.timeouts.request_total.map(|d| format!("{d:?}")))),
                 "extension": timeout("extension", c.timeouts.extension), "extension_chain": timeout("extension_chain", c.timeouts.extension_chain),
                 "connect": timeout("connect", c.timeouts.connect), "default": timeout("default", c.timeouts.default), "sse": timeout("sse", c.timeouts.sse), "upload": timeout("upload", c.timeouts.upload),
                 "upstream_idle": timeout("upstream_idle", c.timeouts.upstream_idle), "downstream_read": timeout("downstream_read", c.timeouts.downstream_read),

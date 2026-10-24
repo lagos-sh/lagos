@@ -2680,6 +2680,22 @@
               "description": "Absolute budget for the entire sequential extension chain.",
               "type": "string"
             },
+            "request_total": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Optional absolute HTTP exchange lifetime, including header parsing,\nauthentication, hooks, uploads and response streaming. Expiry closes\nthe exchange; it cannot replace a partially sent response with 504."
+            },
             "sse": {
               "default": "2m",
               "description": "Applied to routes flagged `sse`, which must outlive the default budget.",

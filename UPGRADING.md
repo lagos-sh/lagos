@@ -392,3 +392,8 @@ policies; zero/unlimited budgets are rejected. `limits.extension_inflight` adds
 optional immediate admission refusal. Custom Rust Timeouts/Limits struct
 literals require the new fields (or use Default update syntax). Extension trait
 signatures are unchanged. See [execution budgets](docs/extensions.md#execution-budgets).
+
+`timeouts.request_total` defaults to null. If enabled it also bounds uploads and
+SSE, including steady progress, and closes the exchange at expiry. Set it for
+the longest legitimate stream, or leave it unset in a streaming deployment.
+Existing `sse`/`upload` settings do not override it. See [resource budgets](docs/resource-budgets.md).

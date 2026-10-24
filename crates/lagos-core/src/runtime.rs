@@ -226,7 +226,8 @@ impl Runtime {
         app.server_options = Some(downstream_server_options(&cfg));
         let mut proxy = Service::new(
             "Lagos public proxy".into(),
-            DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read),
+            DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read)
+                .with_request_deadline(cfg.raw.timeouts.request_total),
         );
         add_listener(&mut proxy, &cfg.raw.server.listen, &cfg);
         server.add_service(proxy);
@@ -244,7 +245,8 @@ impl Runtime {
             app.server_options = Some(downstream_server_options(&cfg));
             let mut svc = Service::new(
                 "Lagos internal proxy".into(),
-                DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read),
+                DeadlineProxy::new(app, cfg.raw.timeouts.downstream_read)
+                    .with_request_deadline(cfg.raw.timeouts.request_total),
             );
             add_listener(&mut svc, addr, &cfg);
             server.add_service(svc);

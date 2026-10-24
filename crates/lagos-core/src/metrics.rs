@@ -50,6 +50,7 @@ pub struct Metrics {
     shared_limit_errors: prometheus::IntCounter,
     jwks: IntCounterVec,
     extensions: HistogramVec,
+    request_deadlines: prometheus::IntCounter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -70,6 +71,10 @@ pub fn metrics() -> Option<&'static Metrics> {
 impl Metrics {
     fn build() -> prometheus::Result<Self> {
         Ok(Self {
+            request_deadlines: prometheus::register_int_counter!(
+                "gateway_request_deadlines_total",
+                "HTTP exchanges closed at the configured absolute request deadline."
+            )?,
             extensions: register_histogram_vec!(
                 "gateway_extension_duration_seconds",
                 "Cooperative extension execution duration and outcome.",
@@ -149,6 +154,10 @@ impl Metrics {
                  traffic is unaffected."
             )?,
         })
+    }
+
+    pub fn record_request_deadline(&self) {
+        self.request_deadlines.inc();
     }
 
     pub fn record_extension(&self, extension: &str, outcome: &str, seconds: f64) {

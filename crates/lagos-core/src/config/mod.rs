@@ -704,6 +704,12 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Timeouts {
+    /// Optional absolute HTTP exchange lifetime, including header parsing,
+    /// authentication, hooks, uploads and response streaming. Expiry closes
+    /// the exchange; it cannot replace a partially sent response with 504.
+    #[serde(default, with = "humantime_serde::option")]
+    #[schemars(with = "Option<String>")]
+    pub request_total: Option<Duration>,
     /// Cooperative asynchronous deadline for each native extension hook.
     #[serde(with = "humantime_serde", default = "d2")]
     #[schemars(with = "String")]
@@ -800,6 +806,7 @@ fn d300() -> Duration {
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
+            request_total: None,
             extension: d2(),
             extension_chain: d5(),
             connect: d5(),
@@ -2235,6 +2242,15 @@ impl GatewayConfig {
                      reconcile nothing and leave every limit per-process",
                 ));
             }
+        }
+        if self
+            .timeouts
+            .request_total
+            .is_some_and(|d| d.is_zero() || std::time::Instant::now().checked_add(d).is_none())
+        {
+            return Err(ConfigError::invalid(
+                "timeouts.request_total must be a positive, representable duration, or null",
+            ));
         }
         if self.timeouts.extension.is_zero()
             || self.timeouts.extension_chain.is_zero()

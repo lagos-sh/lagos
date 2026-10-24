@@ -3,7 +3,7 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## Unreleased
+## 0.1.9 - Unreleased
 
 - Native extension hooks now have finite cooperative per-hook/chain budgets
   (2s/5s), optional shared execution capacity, 503 timeout/capacity semantics,

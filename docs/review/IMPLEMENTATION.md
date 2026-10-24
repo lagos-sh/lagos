@@ -135,3 +135,18 @@ upgrade guide and extension proposal now reflect implemented behavior.
 Additional reload review found the public store API can receive a new shared
 backend even though runtime configuration is frozen. Reuse now also requires
 same backend Arc/namespace/batch settings; a focused backend-identity test passed.
+
+## A4 — absolute exchange budget and honest ingress limits
+
+Added optional `timeouts.request_total`, covering dispatched HTTP sessions
+through header/auth/hook/upload/stream completion. Expiry closes the exchange,
+with a dedicated metric, rather than misclassifying it as an upstream timeout
+or claiming an impossible replacement status after streaming starts. Existing
+constructor/default SSE behavior remains compatible. Parser-level custom
+header bytes and global live-connection limits remain explicit ingress duties;
+Pingora's existing approximate 1 MiB/256-field parser protection is documented.
+
+Three downstream unit tests and five local E2E checks passed: stalled upstream,
+progressing stream, incomplete header, concurrency release and metric. Full
+suite also now makes its intentionally optional anonymous identity quota use
+explicit `missing_key: skip` rather than depending on the old implicit bypass.

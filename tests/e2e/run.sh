@@ -1061,7 +1061,7 @@ routes:
       prefix: quota
       upstream: echo
       methods: [GET]
-      rate_limit: { requests: 2, interval: 1m, key: identity }
+      rate_limit: { requests: 2, interval: 1m, key: identity, missing_key: skip }
   machine:
     - { id: jobs, prefix: jobs, upstream: echo, methods: [GET] }
 EOF
@@ -1139,6 +1139,13 @@ if python3 "$E2E/regressions.py" "$BIN/lagos"; then
   ok "filter interaction regression suite"
 else
   bad "filter interaction regression suite"
+fi
+
+say "absolute exchange deadlines"
+if python3 "$E2E/deadlines.py" "$BIN/lagos"; then
+  ok "absolute deadline regression suite"
+else
+  bad "absolute deadline regression suite"
 fi
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
