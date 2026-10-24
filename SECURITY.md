@@ -86,6 +86,14 @@ reviewer knows what is already covered.
   when no `Authorization: Bearer` header is present; they count as authorized
   for the cache, and are removed from `Cookie` when `forward.authorization` is
   off — [`auth/mod.rs`](crates/lagos-core/src/auth/mod.rs)
+- Optional `stale_if_error` reuses only previously verified keys for a
+  matching `kid`, for a bounded time past expiry; a cold cache or unknown `kid`
+  still fails closed — [`auth/jwks.rs`](crates/lagos-core/src/auth/jwks.rs)
+- Optional `auth.cookie_protection` requires an exact trusted `Origin` (Referer
+  only if enabled) on unsafe cookie-authenticated requests; missing, `null`,
+  duplicate or malformed values refuse — [`csrf.rs`](crates/lagos-core/src/csrf.rs)
+- Duplicate `Authorization` fields refuse on verifying routes instead of picking
+  one credential
 - Machine credentials compared in constant time
 - Machine routes live on a separate listener, so they are absent from the public
   gateway rather than merely guarded on it
@@ -111,11 +119,30 @@ reviewer knows what is already covered.
 - CORS origins matched whole; `credentials: true` with `*` refused at startup;
   `Vary: Origin` always set when an origin is echoed
 
+**Response cache**
+
+- Authentication and ownership bindings run before lookup; keys are
+  length-framed over route, upstream, host, method, URI and the route
+  generation, so reloads and routes never share entries —
+  [`cache/`](crates/lagos-core/src/cache/)
+- Every request carrying `Cookie` bypasses lookup and fill, and every
+  `Set-Cookie` response is ineligible at fill and at hit. This is Lagos policy:
+  Pingora 0.9's cache helper allows `Set-Cookie` on otherwise cacheable responses
+- `Vary` uses the effective forwarded identity; wildcard and malformed `Vary`
+  are not cached
+
 **Limits**
 
 - Request bodies capped by declared length and by streamed bytes
 - Bearer tokens capped before being decoded or verified
 - Rate limits keyed on IP, header or route applied *before* token verification
+- A missing rate-limit or concurrency key refuses with `400` unless the route
+  explicitly chooses `missing_key: route`, `ip` or `skip`; duplicate and
+  malformed key headers always refuse, so header tricks cannot skip a limit
+- Optional `timeouts.request_total` closes an exchange at an absolute deadline,
+  however steadily it progresses
+- Native extension hooks run under per-hook and per-chain budgets with optional
+  admission capacity (cooperative only; see Known gaps)
 - Client address counted from the right of `X-Forwarded-For` only for allowlisted
   proxy socket peers; untrusted prefixes are removed before forwarding
 - Absolute request-header deadline and downstream read, write, drain and
@@ -149,22 +176,21 @@ news.
   whole gateway. It is off by default for that reason, which means the default
   deployment has no connection control of its own.
 - **No request-header size limit of our own.** Whatever Pingora's HTTP/1
-  parser accepts, the gateway accepts. Bound it at the ingress.
-- **No total-request deadline.** The timeouts are per read, per write and per
-  connect. A client that makes slow but steady progress can stay well inside all
-  of them for a long time.
+  parser accepts (256 fields and roughly 1 MiB in 0.9), the gateway accepts. A
+  check after parsing would not bound parser memory, so none is claimed. Bound
+  it at the ingress.
+- **The total-request deadline is opt-in.** `timeouts.request_total` is unset
+  by default so SSE and long uploads keep working; without it, a client making
+  slow but steady progress stays inside the per-read and per-write budgets.
 - **No downstream TLS and no HTTP/2 on the listener.** Terminate at an ingress.
   If plaintext h2 is ever enabled here, Pingora's `H2Options` (stream and
   header-list limits, and its malformed-stream budget) will need tuning for the
   Rapid Reset family — today they are simply not reachable.
-- **Rate limiting is per process.** A limit of 100/min across three replicas
-  admits up to 300/min. A shared backend fits behind the same `Limiter`
-  interface; nothing implements one yet.
-- **No CSRF check for token cookies.** A token read from a cookie is sent by
+- **Cookie CSRF protection is opt-in.** A token read from a cookie is sent by
   the browser on its own, including on requests a cross-site page starts.
-  Lagos does not inspect `Origin` or require a CSRF token; that protection is
-  the cookie's `SameSite` attribute or the application's. Off unless
-  `auth.token_cookies` is set.
+  Unless `auth.cookie_protection` is configured, Lagos does not inspect
+  `Origin`; that protection is the cookie's `SameSite` attribute or the
+  application's. Even when enabled it checks origin, not a per-session token.
 - **Rate limiting is per process unless `counter: shared` is configured.** With
   the local counters a limit of 100/min across three replicas admits up to
   300/min. Sharing counters closes that, with two caveats of its own: in the
@@ -181,9 +207,19 @@ news.
   refuse traffic or to unlimit it. Do not point `shared_counters` at a cache
   that untrusted code can write, give it credentials of its own, and set
   `prefix` so the keyspace is identifiable.
-- **No stale-while-error on JWKS.** If an identity provider is unreachable when
-  the key cache expires, verification fails closed and authenticated traffic
-  stops, even though the cached keys were almost certainly still valid.
+- **JWKS stale-while-error is opt-in and delays revocation.** By default an
+  unreachable identity provider at key expiry fails closed. With
+  `stale_if_error`, a key the provider revoked during the outage stays usable
+  until that window ends. See [signing-key outages](docs/jwks-resilience.md).
+- **Concurrency caps, circuit breakers, caches and key caches are per
+  process.** See [running several replicas](docs/deploying.md#running-several-replicas).
+- **Extension budgets are cooperative.** A hook that blocks a thread, spawns
+  detached work or performs remote side effects is not stopped by its timeout.
+  Native extensions are trusted code, not a sandbox.
+- **Pool discovery trusts DNS.** Whoever controls the resolver answers for a
+  pool target with `discovery` decides which addresses receive that traffic,
+  within `max_members`. The same is true of single-target upstreams, which
+  resolve per connection.
 - **Secrets are ordinary `String`s in memory.** `Debug` is redacted, but there
   is no zeroization and no `mlock`. A core dump or a heap read finds them.
 - **No request-body inspection.** No WAF, no schema validation, no content
@@ -229,11 +265,3 @@ Coordinated. We will agree a date with you, publish a GitHub advisory with a
 CVE, and credit you unless you would rather we did not. If a report goes
 unanswered for 90 days, publish — an unresponsive maintainer is not a reason to
 leave users unaware.
-
-## Shared-cache cookie boundary (unreleased)
-
-Every Cookie-bearing request bypasses shared lookup and fill. Every Set-Cookie
-response is ineligible at both fill and hit checks. This is a Lagos policy:
-Pingora 0.9's RFC cache helper permits Set-Cookie on otherwise cacheable
-responses. Authentication and ownership bindings still run before lookup;
-Vary uses effective forwarded identity, and route generations isolate reloads.

@@ -562,6 +562,12 @@ JWT verification. Duplicate issuer registrations fail startup.
 Lagos verifies tokens issued elsewhere; it does not provide a login flow or
 issue identity-provider access tokens.
 
+If the key endpoint is unreachable when cached keys expire, verification fails
+closed. An issuer may opt into `stale_if_error: 5m` (also on `auth.firebase`)
+to keep using previously verified keys, for a matching `kid` only and for at
+most that long past expiry; signatures and claims are still checked. See
+[signing-key outages](docs/jwks-resilience.md) for the revocation tradeoff.
+
 ### Firebase ID tokens
 
 ```yaml
@@ -607,9 +613,12 @@ auth:
   `header`, `cookie`, or `-`.
 
 A browser attaches cookies to requests on its own, so a cookie token is an
-ambient credential that a cross-site page can make the browser send. Lagos
-performs no CSRF check: set the cookie `SameSite=Lax` or `Strict`, or keep the
-application's own CSRF protection. See [SECURITY.md](SECURITY.md).
+ambient credential that a cross-site page can make the browser send. By default
+Lagos performs no CSRF check: set the cookie `SameSite=Lax` or `Strict`, or keep
+the application's own CSRF protection. `auth.cookie_protection` optionally
+requires an exact trusted `Origin` on unsafe methods authenticated by a token
+cookie, with Referer fallback only if enabled; bearer-header clients are
+unaffected. See [browser-cookie origin protection](docs/cookie-authentication.md).
 
 Startup refuses `token_cookies` without any `jwt` or `firebase` verifier,
 names that are not valid cookie names, and a name listed twice.
@@ -891,7 +900,8 @@ or opens again. Shed requests receive `503` with `Retry-After`.
 Only requests that need an upstream consume trials. Cache hits and local
 refusals, such as rate limiting, do not count as upstream recovery. Health
 checks assess individual backend availability; circuit breakers track outcomes
-for the logical upstream.
+for the logical upstream. Breaker state is per process: each replica opens and
+closes its own circuit (see [running several replicas](docs/deploying.md#running-several-replicas)).
 
 ### Rate limiting
 
@@ -978,6 +988,12 @@ boot.
 
 Full reference, including the clock assumptions and what each setting trades:
 [rate limiting](docs/rate-limiting.md).
+
+A request without the key a limit or concurrency cap is keyed on (no header,
+no verified identity) is refused with `400` by default. Set
+`missing_key: route`, `ip` or `skip` on the limit to choose a fallback bucket
+or optional enforcement instead; duplicate or malformed key headers are always
+refused. See [missing and ambiguous keys](docs/rate-limiting.md#missing-and-ambiguous-keys).
 
 `shared` needs `interval` of at least `1s`; exact mode also requires whole
 seconds. Approximate mode requires `sync` shorter than `interval`. These rules
@@ -1242,6 +1258,11 @@ much is being written — something a flat `downstream_write` cannot express, si
 a large response legitimately takes longer than a small one. Turn it on where
 responses are big enough that a slow reader is worth the memory it holds; leave
 it off if real clients are on genuinely poor links.
+
+`timeouts.request_total` (off by default) bounds a whole HTTP exchange,
+including uploads and streams that keep making progress, and closes it at
+expiry. Header-size and live-connection ceilings belong at the ingress; see
+[request resource budgets](docs/resource-budgets.md).
 
 See the [configuration types](crates/lagos-core/src/config/mod.rs) for every
 field and default.
@@ -1596,7 +1617,11 @@ impl Extension for WorkspaceContext {
 
 `plan.set()` replaces any client-supplied copy of that header. Missing extension
 registrations fail startup; requests referencing an unavailable extension fail
-closed.
+closed. Hooks run under cooperative budgets (`timeouts.extension`, default 2s,
+and `timeouts.extension_chain`, default 5s) and an optional
+`limits.extension_inflight` cap; an expired or refused hook answers `503`.
+Extensions are trusted native code and are not preempted or sandboxed; see
+[execution budgets](docs/extensions.md#execution-budgets).
 
 ### Route providers
 
