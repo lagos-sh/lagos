@@ -589,6 +589,12 @@ pub(super) fn diff(old: &str, new: &str, allow_unset: bool) -> anyhow::Result<()
         println!("+ client key exempt group {group}");
         changes += 1;
     }
+    if format!("{:?}", old_cfg.raw.auth.cookie_protection)
+        != format!("{:?}", new_cfg.raw.auth.cookie_protection)
+    {
+        println!("~ auth.cookie_protection: policy changed (origins hidden)");
+        changes += 1;
+    }
     if old_cfg.base_paths != new_cfg.base_paths {
         println!(
             "~ mounts: {:?} → {:?}",

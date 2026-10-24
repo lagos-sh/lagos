@@ -150,3 +150,18 @@ Three downstream unit tests and five local E2E checks passed: stalled upstream,
 progressing stream, incomplete header, concurrency release and metric. Full
 suite also now makes its intentionally optional anonymous identity quota use
 explicit `missing_key: skip` rather than depending on the old implicit bypass.
+
+## A5 — opt-in browser-cookie origin policy
+
+Implemented exact trusted Origin tuples for unsafe gateway-cookie requests,
+with separately opt-in Referer fallback only when Origin is absent. Null,
+missing, malformed, duplicate and untrusted fields fail closed. Bearer clients
+and safe methods retain JWT verification. Config validation rejects wildcards,
+non-HTTP origins, paths and userinfo; a regression caught URL parser wildcard
+permissiveness and the explicit rejection now passes. Duplicate Authorization
+fields reject on verifying routes instead of selecting one credential.
+
+Two focused CSRF tests passed and Clippy passed. Local E2E exercised safe cookie
+requests, unsafe positive/negative Origin/Referer cases, duplicate Origin,
+bearer compatibility and repeated credentials. Application CSRF responsibilities,
+SameSite/deployment choices and default-disabled migration are documented.

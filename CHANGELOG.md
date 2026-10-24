@@ -5,6 +5,13 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## 0.1.9 - Unreleased
 
+- Optional `timeouts.request_total` bounds complete HTTP exchanges, including
+  progress-making streams. Timeout closes the connection and records a dedicated
+  deadline metric; omitted/null preserves existing streaming behavior.
+- Optional cookie-authentication origin protection checks unsafe requests
+  against exact trusted origins, with explicit Referer fallback. Bearer clients
+  remain supported; ambiguous Authorization fields on verifying routes reject.
+
 - Native extension hooks now have finite cooperative per-hook/chain budgets
   (2s/5s), optional shared execution capacity, 503 timeout/capacity semantics,
   duration/outcome metrics, and cancellation tests. No sandbox/preemption claim.

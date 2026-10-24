@@ -1367,6 +1367,20 @@ pub struct AuthConfig {
     /// upstream (see SECURITY.md). Empty by default — only the header is read.
     #[serde(default)]
     pub token_cookies: Vec<String>,
+    /// Opt-in CSRF origin check when a cookie supplies the gateway credential.
+    #[serde(default)]
+    pub cookie_protection: Option<CookieProtectionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CookieProtectionConfig {
+    /// Exact trusted HTTP(S) origins; no wildcard or inferred Forwarded host.
+    pub origins: Vec<String>,
+    /// If Origin is absent, permit a trusted Referer origin. Default false.
+    /// Missing both, malformed/duplicate fields and Origin: null always refuse.
+    #[serde(default)]
+    pub referer_fallback: bool,
 }
 
 /// Credential for service-to-service callers on the `machine` tier.
@@ -1988,6 +2002,7 @@ pub struct ResolvedConfig {
     pub base_paths: Vec<String>,
     /// Compiled cross-origin policy.
     pub cors: Option<crate::cors::Cors>,
+    pub cookie_protection: Option<crate::csrf::CookieProtection>,
     /// Environment variables the document referenced, for `validate` output.
     pub referenced_env: Vec<String>,
     /// Those that fell back to a default — the ones that differ between a
@@ -2455,8 +2470,23 @@ impl GatewayConfig {
             None => None,
         };
 
+        let cookie_protection = self
+            .auth
+            .cookie_protection
+            .as_ref()
+            .map(|policy| {
+                if self.auth.token_cookies.is_empty() {
+                    return Err(ConfigError::invalid(
+                        "auth.cookie_protection requires auth.token_cookies",
+                    ));
+                }
+                crate::csrf::CookieProtection::compile(policy)
+                    .map_err(|e| ConfigError::invalid(format!("auth.cookie_protection: {e}")))
+            })
+            .transpose()?;
         Ok(ResolvedConfig {
             cors,
+            cookie_protection,
             raw: self,
             trusted_proxy_ips,
             upstreams,

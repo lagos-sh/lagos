@@ -996,6 +996,15 @@ fn explain(
         println!();
     }
 
+    if route.auth.verifies()
+        && let Some(policy) = &cfg.raw.auth.cookie_protection
+    {
+        println!(
+            "Cookie origin protection: unsafe cookie-authenticated methods require an exact trusted origin; Referer fallback: {}",
+            policy.referer_fallback
+        );
+    }
+
     if !route.extensions.is_empty() {
         println!("Extensions\n");
         println!(

@@ -1119,8 +1119,38 @@ impl ProxyHttp for Gateway {
         if route.auth.verifies() {
             // The header first: a client that sets one means it. A token
             // cookie is read only when there is no bearer header at all.
+            if session
+                .req_header()
+                .headers
+                .get_all(http::header::AUTHORIZATION)
+                .iter()
+                .nth(1)
+                .is_some()
+            {
+                return self
+                    .reject(
+                        session,
+                        ctx,
+                        Rejection::invalid_token("ambiguous_authorization"),
+                    )
+                    .await;
+            }
             let from_header = authorization.as_deref().and_then(crate::auth::bearer_token);
             let bearer = from_header.or(cookie_token.as_deref());
+            if from_header.is_none()
+                && cookie_token.is_some()
+                && let Some(policy) = &self.cfg.cookie_protection
+                && let Err(reason) =
+                    policy.check(&session.req_header().headers, &session.req_header().method)
+            {
+                return self
+                    .reject(
+                        session,
+                        ctx,
+                        Rejection::forbidden("Cookie request origin is not permitted", reason),
+                    )
+                    .await;
+            }
             if bearer.is_some() {
                 ctx.credential = Some(if from_header.is_some() {
                     "header"

@@ -397,3 +397,10 @@ signatures are unchanged. See [execution budgets](docs/extensions.md#execution-b
 SSE, including steady progress, and closes the exchange at expiry. Set it for
 the longest legitimate stream, or leave it unset in a streaming deployment.
 Existing `sse`/`upload` settings do not override it. See [resource budgets](docs/resource-budgets.md).
+
+`auth.cookie_protection` is opt-in and does not replace application CSRF
+protection by default. Enable exact trusted origins for cookie-authenticated
+unsafe methods; missing/null/ambiguous origins then reject with 403. Referer
+fallback is separately opt-in. Duplicate Authorization fields on verifying
+routes now reject with 401. AuthConfig/ResolvedConfig gain the corresponding
+optional policy field. See [cookie authentication](docs/cookie-authentication.md).

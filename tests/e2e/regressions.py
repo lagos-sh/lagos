@@ -214,7 +214,8 @@ def run(binary, work):
             "observability": {"metrics": {"listen": f"127.0.0.1:{metrics}",
                                            "pool_sample_interval": "100ms"}},
             "cache": {"max_size": "64KiB", "max_object_size": "4KiB"},
-            "auth": {"jwt": [{"issuer": "https://regression.test", "audience": ["regression-api"],
+            "auth": {"token_cookies": ["access_token"], "cookie_protection": {
+                         "origins": ["https://app.test"], "referer_fallback": True}, "jwt": [{"issuer": "https://regression.test", "audience": ["regression-api"],
                                "jwks_url": origin + "/jwks", "min_key_ttl": "100ms", "stale_if_error": "5s"}]},
             "forward": {"authorization": False, "headers": ["x-merchant-id", "cookie"]},
             "cors": {"origins": ["https://app.test"]},
@@ -293,6 +294,23 @@ def run(binary, work):
             checks.check(held.result()[0] == 200 and request("/keycapfallback")[0] == 200,
                          "completed fallback request releases its slot")
         auth = {"authorization": token()}
+        cookie_auth = {"cookie": "access_token=" + token().removeprefix("Bearer ")}
+        checks.check(request("/bound?merchantId=11", cookie_auth)[0] == 200,
+                     "safe cookie-authenticated request remains valid")
+        for extra, status in [({}, 403), ({"origin": "null"}, 403),
+                              ({"origin": "https://evil.test"}, 403),
+                              ({"origin": "https://app.test"}, 200),
+                              ({"referer": "https://app.test/page"}, 200),
+                              ({"origin": "https://evil.test", "referer": "https://app.test/page"}, 403)]:
+            checks.check(request("/bound?merchantId=11", {**cookie_auth, **extra}, method="POST")[0] == status,
+                         "unsafe cookie request follows exact Origin/Referer policy")
+        checks.check(request("/bound?merchantId=11", [*cookie_auth.items(), ("origin", "https://app.test"),
+                     ("origin", "https://app.test")], method="POST")[0] == 403,
+                     "duplicate Origin cannot authorize cookie mutation")
+        checks.check(request("/bound?merchantId=11", auth, method="POST")[0] == 200,
+                     "non-browser bearer client requires no Origin")
+        checks.check(request("/bound?merchantId=11", [*auth.items(), *auth.items()])[0] == 401,
+                     "duplicate Authorization is ambiguous even when both values match")
         checks.check(request("/bound?merchantId=11", auth)[0] == 200, "a unique ownership parameter passes")
         for query in ("merchantId=11&merchantId=12", "merchantId=11&%6derchantId=12",
                       "merchantId=11&merchantId", "merchantId=11&merchantId=11"):
