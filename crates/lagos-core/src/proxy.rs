@@ -1591,7 +1591,8 @@ impl ProxyHttp for Gateway {
         })?;
         let mut peer = HttpPeer::new(addr, target.tls, target.sni.clone());
         peer.options.connection_timeout = Some(self.cfg.raw.timeouts.connect);
-        peer.options.total_connection_timeout = Some(self.cfg.raw.timeouts.connect * 2);
+        peer.options.total_connection_timeout =
+            Some(self.cfg.raw.timeouts.connect.saturating_mul(2));
         peer.options.read_timeout = Some(ctx.timeout);
         peer.options.write_timeout = Some(ctx.timeout);
         peer.options.idle_timeout = Some(self.cfg.raw.timeouts.upstream_idle);
