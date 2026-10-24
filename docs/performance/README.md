@@ -101,3 +101,25 @@ noise. Hits are dominated by fixed per-lookup work rather than body size (a
 1 MiB hit costs about 1.5x a 1 KiB one, since bodies are shared slices).
 Peak RSS in `cache-*-resources.txt` (about 2.4 GB) is the benchmark's own warm
 sets of 1,024 bodies up to 1 MiB, not gateway overhead.
+
+### Binary cache keys
+
+The storage used the hex `CacheKey::combined()` string as its map key, which
+formats and allocates on every lookup. It now uses the 16-byte
+`combined_bin()` hash (same hash, so the same collision properties). Three
+runs, p50 ns/op, `cache-binary-key.csv`:
+
+| Workload | Body | String key (after budget) | Binary key |
+| --- | ---: | ---: | ---: |
+| miss lookup | – | 578–579 | 255–256 |
+| hit | 1 KiB | 1,470–1,681 | 1,099–1,351 |
+| hit | 64 KiB | 1,509–1,522 | 1,146–1,186 |
+| hit | 1 MiB | 2,304–2,323 | 1,941–1,993 |
+| fill | 1 KiB | 4,139–4,199 | 3,687–3,897 |
+| fill, evicting | 1 MiB | 115,881–117,472 | 99,758–104,106 |
+| hit, 6 threads (aggregate) | 1 KiB | 414–552 | 368–477 |
+
+`cache_meta_deserialize` (about 715 ns) is now the largest fixed cost of a
+hit. `CacheMeta` is not `Clone` in pingora-cache 0.9, so every lookup must
+rebuild it from the stored halves; rebuilding it through `CacheMeta::new`
+would drop internal fields, so that cost is left alone.

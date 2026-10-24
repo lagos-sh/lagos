@@ -42,7 +42,7 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use pingora::Result;
 use pingora::cache::CacheMeta;
-use pingora::cache::key::{CacheHashKey, CacheKey};
+use pingora::cache::key::{CacheHashKey, CacheKey, HashBinary};
 use pingora::cache::storage::{
     HandleHit, HandleMiss, HitHandler, MissFinishType, MissHandler, PurgeOutcome, PurgeTarget,
     PurgeType, Storage,
@@ -60,21 +60,22 @@ struct Entry {
 impl Entry {
     /// What this entry costs the cache. The metadata is counted too — a cache
     /// of many tiny bodies is mostly headers.
-    fn weight(&self, key: &str) -> u32 {
+    fn weight(&self) -> u32 {
         let total = self
             .body
             .len()
             .saturating_add(self.internal.len())
             .saturating_add(self.header.len())
-            .saturating_add(key.len())
-            .saturating_add(std::mem::size_of::<Self>())
-            .saturating_add(std::mem::size_of::<String>());
+            .saturating_add(std::mem::size_of::<HashBinary>())
+            .saturating_add(std::mem::size_of::<Self>());
         u32::try_from(total).unwrap_or(u32::MAX)
     }
 }
 
 pub struct MemoryStorage {
-    entries: moka::sync::Cache<String, Arc<Entry>>,
+    /// Keyed by the binary key hash: the hex `combined()` form would format
+    /// and allocate a `String` on every lookup.
+    entries: moka::sync::Cache<HashBinary, Arc<Entry>>,
     max_object_bytes: usize,
     /// Body bytes currently buffered by unfinished fills.
     filling: AtomicUsize,
@@ -87,7 +88,7 @@ impl MemoryStorage {
             entries: moka::sync::Cache::builder()
                 // Weighted by bytes, so eviction happens on the bound that
                 // actually matters.
-                .weigher(|k: &String, v: &Arc<Entry>| v.weight(k))
+                .weigher(|_: &HashBinary, v: &Arc<Entry>| v.weight())
                 .max_capacity(max_bytes)
                 .build(),
             max_object_bytes,
@@ -141,7 +142,7 @@ impl Storage for MemoryStorage {
         key: &CacheKey,
         _trace: &SpanHandle,
     ) -> Result<Option<(CacheMeta, HitHandler)>> {
-        let Some(entry) = self.entries.get(&key.combined()) else {
+        let Some(entry) = self.entries.get(&key.combined_bin()) else {
             return Ok(None);
         };
         let meta = CacheMeta::deserialize(&entry.internal, &entry.header)?;
@@ -164,7 +165,7 @@ impl Storage for MemoryStorage {
         let (internal, header) = meta.serialize()?;
         Ok(Box::new(Miss {
             storage: self,
-            key: key.combined(),
+            key: key.combined_bin(),
             internal,
             header,
             body: BytesMut::new(),
@@ -178,7 +179,7 @@ impl Storage for MemoryStorage {
         _purge_type: PurgeType,
         _trace: &SpanHandle,
     ) -> Result<PurgeOutcome> {
-        let hash = target.key().combined();
+        let hash = target.key().combined_bin();
         if self.entries.remove(&hash).is_some() {
             // This storage keeps one generation per key and no entry identity,
             // so there is nothing for the eviction manager to reconcile.
@@ -194,7 +195,7 @@ impl Storage for MemoryStorage {
         meta: &CacheMeta,
         _trace: &SpanHandle,
     ) -> Result<bool> {
-        let hash = key.combined();
+        let hash = key.combined_bin();
         let Some(existing) = self.entries.get(&hash) else {
             return Ok(false);
         };
@@ -281,7 +282,7 @@ impl HandleHit for Hit {
 /// fits.
 struct Miss {
     storage: &'static MemoryStorage,
-    key: String,
+    key: HashBinary,
     internal: Vec<u8>,
     header: Vec<u8>,
     body: BytesMut,
@@ -351,7 +352,7 @@ impl HandleMiss for Miss {
         });
         // The eviction manager must count the same metadata and key costs as
         // storage. Empty bodies still occupy memory and must have weight.
-        let size = entry.weight(&key) as usize;
+        let size = entry.weight() as usize;
         self.storage.entries.insert(key, entry);
         Ok(MissFinishType::Created(size))
     }
@@ -361,6 +362,10 @@ impl HandleMiss for Miss {
 mod tests {
     use super::*;
 
+    fn hash(name: &str) -> HashBinary {
+        CacheKey::new(name, "").combined_bin()
+    }
+
     fn storage(max_bytes: u64, max_object: usize) -> &'static MemoryStorage {
         Box::leak(Box::new(MemoryStorage::new(max_bytes, max_object)))
     }
@@ -369,7 +374,7 @@ mod tests {
     async fn store(s: &'static MemoryStorage, key: &str, body: &[u8]) {
         let mut miss = Miss {
             storage: s,
-            key: key.to_string(),
+            key: hash(key),
             internal: Vec::new(),
             header: Vec::new(),
             body: BytesMut::new(),
@@ -387,7 +392,7 @@ mod tests {
         let s = storage(1 << 20, 100);
         let mut miss = Miss {
             storage: s,
-            key: "k".into(),
+            key: hash("k"),
             internal: Vec::new(),
             header: Vec::new(),
             body: BytesMut::new(),
@@ -424,7 +429,7 @@ mod tests {
     fn miss(s: &'static MemoryStorage, key: &str) -> Miss {
         Miss {
             storage: s,
-            key: key.into(),
+            key: hash(key),
             internal: Vec::new(),
             header: Vec::new(),
             body: BytesMut::new(),
@@ -489,7 +494,7 @@ mod tests {
         let s = storage(1 << 20, 1 << 20);
         let mut miss = Miss {
             storage: s,
-            key: "k".into(),
+            key: hash("k"),
             internal: Vec::new(),
             header: Vec::new(),
             body: BytesMut::new(),

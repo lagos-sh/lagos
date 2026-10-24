@@ -152,6 +152,15 @@ fn main() {
         })
     });
 
+    // What a hit must pay before touching the body: `CacheMeta` is not
+    // `Clone`, so every lookup rebuilds it from the stored halves.
+    let (internal, header) = meta.serialize().expect("serialize");
+    measure("cache_meta_deserialize", 0, 200, OPS, || {
+        for _ in 0..OPS {
+            black_box(CacheMeta::deserialize(&internal, &header).expect("deserialize"));
+        }
+    });
+
     // Concurrent readers on one shared storage: aggregate ns per hit across
     // all threads, so lower means more total throughput.
     let body = Bytes::from(vec![7u8; 1024]);
