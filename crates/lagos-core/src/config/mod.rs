@@ -704,6 +704,14 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Timeouts {
+    /// Cooperative asynchronous deadline for each native extension hook.
+    #[serde(with = "humantime_serde", default = "d2")]
+    #[schemars(with = "String")]
+    pub extension: Duration,
+    /// Absolute budget for the entire sequential extension chain.
+    #[serde(with = "humantime_serde", default = "d5")]
+    #[schemars(with = "String")]
+    pub extension_chain: Duration,
     #[serde(with = "humantime_serde", default = "d5")]
     #[schemars(with = "String")]
     pub connect: Duration,
@@ -792,6 +800,8 @@ fn d300() -> Duration {
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
+            extension: d2(),
+            extension_chain: d5(),
             connect: d5(),
             default: d30(),
             sse: d120(),
@@ -812,6 +822,10 @@ impl Default for Timeouts {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
+    /// Optional process-wide cap on executing extension chains. Saturation
+    /// rejects immediately with 503; no unbounded waiting queue is created.
+    #[serde(default)]
+    pub extension_inflight: Option<usize>,
     /// Maximum request body, e.g. `50MiB`. Default 50 MiB.
     #[serde(default = "default_max_body", deserialize_with = "de_byte_size")]
     #[schemars(schema_with = "schema::byte_size")]
@@ -863,6 +877,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            extension_inflight: None,
             max_body: default_max_body(),
             max_token: default_max_token(),
             keepalive_requests: default_keepalive_requests(),
@@ -2220,6 +2235,23 @@ impl GatewayConfig {
                      reconcile nothing and leave every limit per-process",
                 ));
             }
+        }
+        if self.timeouts.extension.is_zero()
+            || self.timeouts.extension_chain.is_zero()
+            || self.timeouts.extension > self.timeouts.extension_chain
+        {
+            return Err(ConfigError::invalid(
+                "extension timeouts must be positive and extension must not exceed extension_chain",
+            ));
+        }
+        if self
+            .limits
+            .extension_inflight
+            .is_some_and(|n| n == 0 || n > tokio::sync::Semaphore::MAX_PERMITS)
+        {
+            return Err(ConfigError::invalid(
+                "limits.extension_inflight must be positive and within Tokio semaphore capacity",
+            ));
         }
         if self.timeouts.connect.is_zero() || self.timeouts.downstream_read.is_zero() {
             return Err(ConfigError::invalid(

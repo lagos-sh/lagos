@@ -5,6 +5,10 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## Unreleased
 
+- Native extension hooks now have finite cooperative per-hook/chain budgets
+  (2s/5s), optional shared execution capacity, 503 timeout/capacity semantics,
+  duration/outcome metrics, and cancellation tests. No sandbox/preemption claim.
+
 - Unchanged effective limiter state survives route reloads. Reloads reject
   missing extensions before publication, and an initial validated reload
   closes the startup-to-watcher update gap. Cache namespaces still rotate.

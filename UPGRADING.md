@@ -385,3 +385,10 @@ Invalid extension references reject the reload while the last valid table
 continues serving. Concurrency remains owned by the gateway across reloads.
 Cache namespaces still rotate on every publication: conservative invalidation
 is retained until effective cache-policy fingerprints are independently proven.
+
+Native request extensions now default to a 2s per-hook and 5s complete-chain
+budget. Increase `timeouts.extension`/`extension_chain` for known slower trusted
+policies; zero/unlimited budgets are rejected. `limits.extension_inflight` adds
+optional immediate admission refusal. Custom Rust Timeouts/Limits struct
+literals require the new fields (or use Default update syntax). Extension trait
+signatures are unchanged. See [execution budgets](docs/extensions.md#execution-budgets).

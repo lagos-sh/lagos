@@ -49,6 +49,7 @@ pub struct Metrics {
     shared_limit_keys: prometheus::IntCounter,
     shared_limit_errors: prometheus::IntCounter,
     jwks: IntCounterVec,
+    extensions: HistogramVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -69,6 +70,12 @@ pub fn metrics() -> Option<&'static Metrics> {
 impl Metrics {
     fn build() -> prometheus::Result<Self> {
         Ok(Self {
+            extensions: register_histogram_vec!(
+                "gateway_extension_duration_seconds",
+                "Cooperative extension execution duration and outcome.",
+                &["extension", "outcome"],
+                vec![0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0]
+            )?,
             jwks: register_int_counter_vec!(
                 "gateway_jwks_total",
                 "Signing-key refresh and bounded stale-key outcomes.",
@@ -142,6 +149,16 @@ impl Metrics {
                  traffic is unaffected."
             )?,
         })
+    }
+
+    pub fn record_extension(&self, extension: &str, outcome: &str, seconds: f64) {
+        let outcome = match outcome {
+            "success" | "rejected" | "timeout" => outcome,
+            _ => "other",
+        };
+        self.extensions
+            .with_label_values(&[extension, outcome])
+            .observe(seconds);
     }
 
     pub fn record_jwks(&self, outcome: &str) {
@@ -274,6 +291,9 @@ pub fn normalize_reason(reason: &str) -> String {
         | "missing_limit_key"
         | "invalid_limit_key"
         | "rate_limited"
+        | "extension_timeout"
+        | "extension_chain_timeout"
+        | "extension_capacity"
         | "concurrency_limited"
         | "circuit_open"
         | "binding_refused"

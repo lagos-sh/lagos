@@ -132,3 +132,34 @@ may require source changes. Pin the builder and runtime image tags together,
 test the custom image, and read [UPGRADING.md](../UPGRADING.md) before changing
 the pin. Existing handwritten custom binaries continue to work; adopting this
 folder convention is optional.
+
+## Execution budgets
+
+Unreleased source enforces cooperative native hook budgets:
+
+```yaml
+timeouts:
+  extension: 2s       # per hook, default
+  extension_chain: 5s # whole sequential chain, default
+limits:
+  extension_inflight: 64 # optional; omitted means no extra execution cap
+```
+
+Durations must be positive, and a hook budget cannot exceed the chain budget.
+Saturation rejects immediately with 503 without queueing. Timeout also returns
+503, stops the chain and never forwards a partial header plan upstream. A hook's
+explicit rejection keeps its status. Permits are released before rejection
+response I/O, including timeout and cancellation. Registry clones passed to
+public and internal listeners share the execution cap; custom runtimes should
+use one registry/configuration per process budget.
+
+`gateway_extension_duration_seconds{extension,outcome}` records configured hook
+names and success/rejection/timeout, without caller data. Explain/effective
+configuration and schema output include the budgets. Limits cover request hooks;
+constructors must independently bound their own startup work.
+
+Native extensions remain trusted. Tokio timeouts require cooperative futures;
+blocking native code cannot be preempted. Dropping a future does not undo remote
+side effects or cancel tasks spawned separately by an extension. Give extension
+HTTP clients their own shorter timeouts and make remote actions cancellation
+safe. Language-independent checks and per-name overrides remain proposals.

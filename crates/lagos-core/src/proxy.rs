@@ -1358,33 +1358,27 @@ impl ProxyHttp for Gateway {
             }
         }
 
-        for name in &route.extensions {
-            let Some(ext) = self.extensions.get(name) else {
-                // Startup validation should make this unreachable; failing
-                // closed here means a missing policy hook can never be skipped.
-                return self
-                    .reject(
-                        session,
-                        ctx,
-                        Rejection::unavailable(
-                            "Gateway misconfigured",
-                            format!("missing_extension_{name}"),
-                        ),
-                    )
-                    .await;
-            };
-            let mut cx = ExtensionContext {
-                path: &ctx.path,
-                method: &method,
-                query: ctx.query.as_deref(),
-                route,
-                identity: identity.as_ref(),
-                client_headers: &session.req_header().headers,
-                plan: &mut plan,
-            };
-            if let Err(rej) = ext.on_request(&mut cx).await {
-                return self.reject(session, ctx, rej).await;
-            }
+        let mut cx = ExtensionContext {
+            path: &ctx.path,
+            method: &method,
+            query: ctx.query.as_deref(),
+            route,
+            identity: identity.as_ref(),
+            client_headers: &session.req_header().headers,
+            plan: &mut plan,
+        };
+        if let Err(rejection) = self
+            .extensions
+            .run_chain(
+                &mut cx,
+                self.cfg.raw.timeouts.extension,
+                self.cfg.raw.timeouts.extension_chain,
+                self.cfg.raw.limits.extension_inflight,
+            )
+            .await
+        {
+            // Runner and its permit have dropped before rejection response I/O.
+            return self.reject(session, ctx, rejection).await;
         }
 
         ctx.plan = plan;

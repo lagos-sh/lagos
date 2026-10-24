@@ -115,3 +115,23 @@ operator/filesystem limitation of polling.
 `cargo test --offline -p lagos-core --features shared-limits reload --lib`:
 6 passed. Additional unchanged-inheritance test is included in final workspace
 execution. E2E now asserts spent quota survives an unrelated reload.
+
+## B3 — cooperative extension budgets
+
+Implemented 2s hook / 5s chain defaults, optional immediate admission cap shared
+by registry clones across listeners, and fixed 503 refusal reasons. Partial
+plans stay local until success. Permits drop before rejection response I/O and
+on cancellation. Duration/outcome histograms identify configured hooks.
+Independent review corrected pre-poll chain-expiry handling and unchecked or
+conflicting capacity initialization. Native hooks remain trusted/cooperative;
+blocking code, detached work and remote side effects are not preempted.
+
+Seven focused extension tests passed (success, rejection, hook/chain timeouts,
+capacity sharing and cancellation); configuration validation cases added for
+final run. Clippy passed before final narrow capacity/deadline review changes;
+final workspace checks cover those changes. Schema, explain/effective output,
+upgrade guide and extension proposal now reflect implemented behavior.
+
+Additional reload review found the public store API can receive a new shared
+backend even though runtime configuration is frozen. Reuse now also requires
+same backend Arc/namespace/batch settings; a focused backend-identity test passed.

@@ -998,6 +998,13 @@ fn explain(
 
     if !route.extensions.is_empty() {
         println!("Extensions\n");
+        println!(
+            "  per hook: {:?}; complete chain: {:?}; concurrent chains: {:?}",
+            cfg.raw.timeouts.extension,
+            cfg.raw.timeouts.extension_chain,
+            cfg.raw.limits.extension_inflight
+        );
+        println!("  cooperative timeout/capacity refusal: 503");
         for (i, e) in route.extensions.iter().enumerate() {
             println!("  {}. {e}", i + 1);
         }

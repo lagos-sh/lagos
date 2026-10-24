@@ -1337,6 +1337,24 @@
               ],
               "description": "Refuse connections from an address that opens them too quickly.\n\nOff by default, and deliberately so: an address is not a caller. Behind\nan ingress controller *every* connection arrives from one address, and\nturning this on there would throttle the whole gateway. It is the right\ncontrol only where Lagos is genuinely the edge."
             },
+            "extension_inflight": {
+              "anyOf": [
+                {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                {
+                  "pattern": "(^|[^$])(\\$\\$)*\\$\\{[ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*(:-[^}\\r\\n]*)?\\}",
+                  "type": "string"
+                }
+              ],
+              "default": null,
+              "description": "Optional process-wide cap on executing extension chains. Saturation\nrejects immediately with 503; no unbounded waiting queue is created."
+            },
             "keepalive_requests": {
               "anyOf": [
                 {
@@ -2650,6 +2668,16 @@
             "downstream_write": {
               "default": "30s",
               "description": "How long a single write to the client may stall.\n\nPingora leaves this unset, so a client that stops reading mid-response\npins the exchange indefinitely. This is the slow-read half of\nslowloris, and it is the cheaper half to mount.",
+              "type": "string"
+            },
+            "extension": {
+              "default": "2s",
+              "description": "Cooperative asynchronous deadline for each native extension hook.",
+              "type": "string"
+            },
+            "extension_chain": {
+              "default": "5s",
+              "description": "Absolute budget for the entire sequential extension chain.",
               "type": "string"
             },
             "sse": {
