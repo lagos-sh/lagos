@@ -123,3 +123,60 @@ runs, p50 ns/op, `cache-binary-key.csv`:
 hit. `CacheMeta` is not `Clone` in pingora-cache 0.9, so every lookup must
 rebuild it from the stored halves; rebuilding it through `CacheMeta::new`
 would drop internal fields, so that cost is left alone.
+
+## Whole-gateway HTTP load (C5)
+
+`benches/http/run.sh [requests] [concurrency]` starts the release gateway
+(`benches/http/gateway.yml`, default 2 worker threads), a bun origin and a
+JWKS fixture, and drives four routes with ApacheBench keep-alive: proxied,
+cache hit, JWT-authenticated proxy, and an unrouted 404. Everything shares the
+6-core host, so the numbers compare workloads; they are not a capacity
+figure. ab reports whole-millisecond percentiles only. `http-baseline.csv`
+(100,000 requests, concurrency 32):
+
+| Workload | req/s | p50 / p99 ms | Gateway CPU |
+| --- | ---: | --- | ---: |
+| proxy | 27,215 | 1 / 2 | 172% |
+| cache hit | 40,731 | 1 / 1 | 177% |
+| JWT proxy | 17,535 | 2 / 3 | 182% |
+| 404 refusal | 63,358 | 0 / 1 | 170% |
+
+The gateway saturates its two workers in every case. Flat `perf` profiles
+(symbols via `CARGO_PROFILE_RELEASE_STRIP=false
+CARGO_PROFILE_RELEASE_DEBUG=line-tables-only PERF=1`) grouped by component:
+
+| Workload | Largest shares of gateway CPU |
+| --- | --- |
+| proxy | Pingora 24%, allocator 22%, Lagos 15%, http/bytes 10%, tokio 7%, mem* 6%, logging 5% |
+| cache hit | allocator 19%, Pingora 19%, Lagos 13%, http/bytes 8%, logging 7% |
+| JWT proxy | RSA verification (ring) 27%, allocator 17%, Pingora 14%, Lagos 10% |
+| 404 refusal | logging 17%, Pingora 16%, allocator 14%, Lagos 13% |
+
+No single Lagos function exceeds 2.5%, so no Lagos-side refactor is justified
+by this profile. Call-graph profiles could not be taken on this host
+(`perf_event_paranoid=2` and the per-user perf mlock budget refused them under
+load), so allocator time is not attributed to callers.
+
+### Measured but not adopted: jemalloc
+
+A throwaway build with `tikv-jemallocator` 0.6 as the global allocator, three
+alternating rounds of 60,000 requests each against the same origin and token:
+
+| Workload | glibc req/s | jemalloc req/s | Median |
+| --- | --- | --- | ---: |
+| proxy | 27,256–28,349 | 30,763–32,229 | +12.3% |
+| cache hit | 40,432–42,374 | 44,220–45,591 | +9.5% |
+| JWT proxy | 16,856–17,683 | 19,895–20,706 | +15.2% |
+| 404 refusal | 62,540–63,827 | 65,790–66,805 | +5.2% |
+| peak RSS | 22.4–23.1 MiB | 20.7–21.6 MiB | −6.1% |
+
+The ranges do not overlap. It is not adopted here because it adds a C
+dependency to the static musl and multi-architecture release builds, which
+need their own verification; it is the largest measured lever available.
+
+### Not attempted: verified-token caching
+
+RS256 verification is 27% of CPU on authenticated traffic. Caching successful
+verifications by token hash would remove most of it, but it is a security
+design (expiry, key rotation and revocation, memory bounds) rather than an
+optimization, and is left for a dedicated change.
