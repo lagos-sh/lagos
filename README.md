@@ -1060,6 +1060,7 @@ headroom, since an over-count of one matters most at `max: 1`.
 cache:
   max_size: 256MiB
   max_object_size: 8MiB
+  max_inflight_fill: 64MiB   # bytes all unfinished fills may buffer together
   default_ttl: 60s
 
 routes:
@@ -1073,12 +1074,18 @@ routes:
 Caching is opt-in per route. Lagos uses Pingora's cache lifecycle with a custom
 memory store. Storage and eviction accounting include metadata costs, and
 object size is checked during filling. Only complete objects are stored;
-oversized responses continue downstream without being cached.
+oversized responses continue downstream without being cached. Bodies still
+arriving count against `max_inflight_fill`, so concurrent misses on many keys
+cannot buffer more than that on top of `max_size`; a fill over the budget is
+served without being stored and counted in
+`gateway_cache_fills_abandoned_total{reason}`.
 
 | Condition | Cache behavior |
 |---|---|
 | `Cache-Control: private` or `no-store` | Not stored or reused |
 | Request contains `Authorization` | Reuse and storage require explicit permission in the response cache policy |
+| Request contains `Cookie` (any cookie, even empty) | Bypasses lookup and storage |
+| Response sets `Set-Cookie` | Not stored, and never served from cache |
 | Method other than `GET` or `HEAD`, or an SSE route | Bypasses caching |
 | `Vary: *` or malformed `Vary` | Not reusable |
 | Route has no `cache: true` | Bypasses caching |

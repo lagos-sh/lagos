@@ -13,6 +13,12 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   `discovery: {interval, max_members}` re-resolves in the background with
   atomic replacement; failed, empty, oversized or ambiguous refreshes keep the
   last good members and are counted in `gateway_upstream_discovery_total`.
+- `cache.max_inflight_fill` (default 64 MiB) bounds the bytes all unfinished
+  cache fills buffer together. Before, misses on distinct keys could each hold
+  up to `max_object_size` outside `max_size`. Over-budget fills are served
+  uncached and counted in `gateway_cache_fills_abandoned_total`.
+- Token-supplied `kid` and `iss` values are escaped and truncated in rejection
+  reasons, so a crafted token cannot forge lines in the text log format.
 - Fetched signing keys are cached for at most 24 hours (or the configured
   minimum, if higher), whatever `max-age` the endpoint sends. An uncapped
   lifetime kept revoked keys valid and refused newly rotated keys for as long

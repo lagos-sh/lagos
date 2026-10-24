@@ -100,6 +100,14 @@ Library callers: `UpstreamConfig` gains `discovery: Option<DiscoveryConfig>`
 `upstream::Kind::Pool` names its field `targets` (a `Vec`, indexed per member)
 instead of the address-keyed `members` map.
 
+`cache.max_inflight_fill` defaults to 64 MiB and must be at least
+`max_object_size`; a configuration that raised `max_object_size` above 64 MiB
+must raise it too, or startup is refused. Under many concurrent misses some
+fills are now served without being stored rather than buffering without
+bound. Library callers building `CacheConfig` literals need the new field.
+Signing keys are refetched at least every 24 hours even if the endpoint
+advertises a longer `max-age`.
+
 ## 0.1.7 → 0.1.8 — shared rate limits, concurrency caps, case-insensitive deny-list
 
 No configuration change is needed. Shared counters and concurrency caps are
