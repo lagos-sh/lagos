@@ -57,6 +57,25 @@ should come from a Kubernetes Secret. Check that every required variable named
 in `gateway.yml` has a source in the Deployment before rollout; the image
 build can only validate the structure when production values are unset.
 
+On SIGTERM Lagos refuses new connections at once and gives in-flight requests
+`server.graceful_shutdown` (default 25s) to finish. Kubernetes keeps routing to
+a terminating pod until its endpoints update, so add a short `preStop` sleep and
+keep the total inside `terminationGracePeriodSeconds`:
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 40
+  containers:
+    - name: lagos
+      lifecycle:
+        preStop:
+          sleep:
+            seconds: 5   # Kubernetes 1.30+; older clusters need an image with `sleep`
+```
+
+The distroless image has no shell, so an `exec` hook running `sleep` only works
+in an image that provides it.
+
 If you add `server.internal_listen` for machine routes, give it a separate
 internal Service and restrict network access to that port. Keep the metrics
 listener private as well. Lagos discards arriving `X-Forwarded-For` by default.

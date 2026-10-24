@@ -2556,7 +2556,7 @@
           "properties": {
             "graceful_shutdown": {
               "default": "25s",
-              "description": "How long to drain in-flight requests on SIGTERM.\n\nPingora's own default is 300s. Kubernetes SIGKILLs a pod at\n`terminationGracePeriodSeconds` (30s by default), so leaving it at 300\nmeans every rollout ends in a hard kill mid-drain. Keep this a little\nunder whatever the pod spec allows.",
+              "description": "How long in-flight requests may finish after SIGTERM before what\nremains is cancelled and the process exits.\n\nThe gateway waits this long even when nothing is in flight: Pingora's\ndrain is a fixed sleep, not a count of open requests.\n\nPingora's own default is 300s. Kubernetes SIGKILLs a pod at\n`terminationGracePeriodSeconds` (30s by default), so leaving it at 300\nmeans every rollout ends in a hard kill mid-drain. Keep this a little\nunder whatever the pod spec allows.",
               "type": "string"
             },
             "health_path": {
@@ -2620,7 +2620,7 @@
                 }
               ],
               "default": null,
-              "description": "How long to wait after SIGTERM before starting to drain.\n\nUnset by default. The window exists so a load balancer notices this\ninstance going away and stops sending it new connections *before* the\nones in flight are cut. Whatever is set here is spent before\n`graceful_shutdown` begins, so the two together must still fit inside\nthe process manager's own kill deadline."
+              "description": "Extra drain time on SIGTERM, added to `graceful_shutdown`.\n\nUnset means zero. Listeners stop accepting as soon as SIGTERM arrives,\nso this does not keep the gateway reachable while a load balancer\ncatches up (use a Kubernetes `preStop` sleep for that); it only gives\nin-flight requests longer. The sum must fit inside the process\nmanager's own kill deadline."
             },
             "tcp_keepalive": {
               "anyOf": [

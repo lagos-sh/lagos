@@ -1540,8 +1540,14 @@ or another proxy — see [Where Lagos sits](#where-lagos-sits) — and restrict
 direct access to upstreams that trust injected identity. HTTPS upstream targets
 are supported.
 
-`server.graceful_shutdown` defaults to `25s`. Configure the surrounding process
-manager or Kubernetes termination grace period to allow that drain to finish.
+On SIGTERM the gateway stops accepting connections immediately, lets requests
+already in flight finish for `server.graceful_shutdown` (default `25s`, plus
+`server.shutdown_grace` if set), then cancels what remains and exits. The wait
+is fixed, so an idle gateway also takes the full drain to exit. Keep the sum
+under the process manager's kill deadline (Kubernetes
+`terminationGracePeriodSeconds`, 30s by default). Because new connections are
+refused at once, give a load balancer time to deregister the pod with a
+`preStop` sleep rather than with `shutdown_grace`.
 Keep internal and metrics listeners restricted to their intended networks.
 
 ## Architecture and extensions

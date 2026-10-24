@@ -1148,5 +1148,12 @@ else
   bad "absolute deadline regression suite"
 fi
 
+say "graceful shutdown"
+if python3 "$E2E/shutdown.py" "$BIN/lagos"; then
+  ok "shutdown regression suite"
+else
+  bad "shutdown regression suite"
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

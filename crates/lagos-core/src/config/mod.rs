@@ -639,17 +639,21 @@ pub struct ServerConfig {
     /// still answering.
     #[serde(default)]
     pub tcp_keepalive: Option<TcpKeepaliveConfig>,
-    /// How long to wait after SIGTERM before starting to drain.
+    /// Extra drain time on SIGTERM, added to `graceful_shutdown`.
     ///
-    /// Unset by default. The window exists so a load balancer notices this
-    /// instance going away and stops sending it new connections *before* the
-    /// ones in flight are cut. Whatever is set here is spent before
-    /// `graceful_shutdown` begins, so the two together must still fit inside
-    /// the process manager's own kill deadline.
+    /// Unset means zero. Listeners stop accepting as soon as SIGTERM arrives,
+    /// so this does not keep the gateway reachable while a load balancer
+    /// catches up (use a Kubernetes `preStop` sleep for that); it only gives
+    /// in-flight requests longer. The sum must fit inside the process
+    /// manager's own kill deadline.
     #[serde(default, with = "humantime_serde::option")]
     #[schemars(with = "Option<String>")]
     pub shutdown_grace: Option<Duration>,
-    /// How long to drain in-flight requests on SIGTERM.
+    /// How long in-flight requests may finish after SIGTERM before what
+    /// remains is cancelled and the process exits.
+    ///
+    /// The gateway waits this long even when nothing is in flight: Pingora's
+    /// drain is a fixed sleep, not a count of open requests.
     ///
     /// Pingora's own default is 300s. Kubernetes SIGKILLs a pod at
     /// `terminationGracePeriodSeconds` (30s by default), so leaving it at 300

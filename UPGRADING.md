@@ -108,6 +108,15 @@ bound. Library callers building `CacheConfig` literals need the new field.
 Signing keys are refetched at least every 24 hours even if the endpoint
 advertises a longer `max-age`.
 
+**Shutdown timing.** A gateway receiving SIGTERM now exits after
+`server.graceful_shutdown` plus any `server.shutdown_grace`, instead of after
+Pingora's 300-second default (which, in Kubernetes, meant a SIGKILL at
+`terminationGracePeriodSeconds`). In-flight requests get that whole window;
+new connections are refused from the first moment, as before. If you relied
+on the long idle period to keep serving during endpoint propagation, that
+never worked (listeners were already closed); use a `preStop` sleep. See
+[deploying](docs/deploying.md#kubernetes-or-an-existing-ingress).
+
 ## 0.1.7 → 0.1.8 — shared rate limits, concurrency caps, case-insensitive deny-list
 
 No configuration change is needed. Shared counters and concurrency caps are

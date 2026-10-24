@@ -13,6 +13,13 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   `discovery: {interval, max_members}` re-resolves in the background with
   atomic replacement; failed, empty, oversized or ambiguous refreshes keep the
   last good members and are counted in `gateway_upstream_discovery_total`.
+- SIGTERM now exits after `server.graceful_shutdown` (25s by default). An unset
+  `shutdown_grace` was passed to Pingora as "unset", which Pingora reads as a
+  300s grace period, so every shutdown idled five minutes and ended in the
+  process manager's SIGKILL. `graceful_shutdown` was also mapped to Pingora's
+  runtime-shutdown timeout, which cancels async tasks at once; it is now the
+  drain window in which in-flight requests finish. A new end-to-end check
+  covers draining, refusal of new connections and exit time.
 - `cache.max_inflight_fill` (default 64 MiB) bounds the bytes all unfinished
   cache fills buffer together. Before, misses on distinct keys could each hold
   up to `max_object_size` outside `max_size`. Over-budget fills are served
