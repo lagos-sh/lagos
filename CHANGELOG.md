@@ -3,7 +3,7 @@
 Behaviour changes and the config needed to preserve existing behaviour are in
 [UPGRADING.md](UPGRADING.md).
 
-## 0.1.9 — policy hardening, hostname pools, indexed routes (unreleased)
+## 0.1.9 — policy hardening, hostname pools, indexed routes
 
 - Pools accept hostname targets. Pingora's `Backend::new` parses socket
   addresses only, so a pool such as the README's `http://orders-1:3000` failed
