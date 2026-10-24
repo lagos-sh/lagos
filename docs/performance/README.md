@@ -39,3 +39,35 @@ a local load run with an origin and the same gateway build/configuration.
 
 The manual `Policy benchmarks` workflow records environment and CSV artifacts;
 it does not gate ordinary contributor PRs on noisy performance thresholds.
+
+## Segment index (C2)
+
+`policy-after.csv` and `policy-after-resources.txt` were taken with the same
+command, machine and toolchain after adding `routes/index.rs`. Tables above 32
+routes use an arena-backed segment trie; smaller tables keep the linear scan,
+which the baseline showed is already cheap and contiguous. p50 batch ns/op:
+
+| Workload | Routes | Linear | Indexed |
+| --- | ---: | ---: | ---: |
+| mixed hit | 10 | 67.03 | 68.97 (linear path; noise) |
+| mixed hit | 100 | 223.38 | 146.25 |
+| mixed hit | 1,000 | 2,139.19 | 195.78 |
+| mixed hit | 10,000 | 35,512.84 | 460.59 |
+| miss | 100 | 328.88 | 77.31 |
+| miss | 1,000 | 4,592.66 | 76.78 |
+| miss | 10,000 | 70,278.91 | 77.53 |
+| table build | 100 | 48,327 | 69,831 |
+| table build | 1,000 | 561,858 | 747,959 |
+| table build | 10,000 | 9,432,745 | 12,236,142 |
+
+Lookup cost now follows the number of configured path segments a request
+shares with the table rather than the route count. The price is roughly 30%
+more build time (about 2.8 ms more at 10,000 routes), paid once per startup or
+reload, off the request path. Other workloads moved within run-to-run noise.
+
+Equivalence: `indexed_matching_equals_reference_across_generated_routes_and_listeners`
+compares the index with the original linear predicate over generated route
+sets (host-specific, wildcard and host-less routes; method filters; disabled
+routes; repeated and non-ASCII segments; both listener partitions; a 2,000
+segment path). `prefix_candidates` (CLI explain / why-not) still scans
+linearly, so its diagnostics are unchanged.

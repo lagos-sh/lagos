@@ -1,6 +1,7 @@
 //! Route table: the allowlist, the deny-list, and how a request finds an upstream.
 
 pub mod file;
+mod index;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -521,6 +522,7 @@ pub struct RouteTable {
     deny_prefixes: Vec<String>,
     /// Sorted by prefix length descending so the most specific route wins.
     routes: Vec<RouteConfig>,
+    lookup: Option<index::PrefixIndex>,
     /// Specs that did not parse. Building stays infallible so the matcher has
     /// one shape; validation turns these into a startup failure.
     errors: Vec<String>,
@@ -783,6 +785,7 @@ impl RouteTable {
         Self {
             cache_namespace: uuid::Uuid::new_v4(),
             deny_prefixes,
+            lookup: index::PrefixIndex::build(&routes),
             routes,
             errors,
         }
@@ -830,6 +833,9 @@ impl RouteTable {
         let m = method.to_ascii_uppercase();
         let h = host.map(|h| normalize_host(h).to_ascii_lowercase());
 
+        if let Some(index) = &self.lookup {
+            return index.find(&self.routes, p, &m, h.as_deref());
+        }
         self.routes.iter().find(|r| {
             under_prefix(p, &r.prefix) && r.matches_method(&m) && r.matches_host(h.as_deref())
         })
@@ -889,6 +895,7 @@ impl RouteTable {
             RouteTable {
                 cache_namespace: self.cache_namespace,
                 deny_prefixes: self.deny_prefixes.clone(),
+                lookup: index::PrefixIndex::build(&public),
                 routes: public,
                 errors: self.errors.clone(),
             },
@@ -897,6 +904,7 @@ impl RouteTable {
             RouteTable {
                 cache_namespace: self.cache_namespace,
                 deny_prefixes: Vec::new(),
+                lookup: index::PrefixIndex::build(&machine),
                 routes: machine,
                 errors: self.errors,
             },
@@ -1051,6 +1059,89 @@ mod tests {
                 .check("r|")
                 .allowed
         );
+    }
+
+    fn reference_match<'a>(
+        table: &'a RouteTable,
+        host: Option<&str>,
+        path: &str,
+        method: &str,
+    ) -> Option<&'a RouteConfig> {
+        let path = normalize_proxy_path(path);
+        let method = method.to_ascii_uppercase();
+        let host = host.map(|h| normalize_host(h).to_ascii_lowercase());
+        table.routes.iter().find(|r| {
+            under_prefix(path, &r.prefix)
+                && r.matches_method(&method)
+                && r.matches_host(host.as_deref())
+        })
+    }
+
+    #[test]
+    fn indexed_matching_equals_reference_across_generated_routes_and_listeners() {
+        for seed in 0..12 {
+            let mut groups = RouteGroups::default();
+            for i in 0..160 {
+                let route: RouteConfig = serde_json::from_value(serde_json::json!({
+                    "id": format!("r-{seed}-{i}"), "prefix": match i % 5 {
+                        0 => format!("/api/{}/items", (i * 7 + seed) % 11),
+                        1 => format!("/api/{}", (i + seed) % 11),
+                        2 => "/api/café".to_string(),
+                        3 => "/api//double".to_string(),
+                        _ => "/api".to_string(),
+                    }, "upstream": "u", "host": match (i + seed) % 4 {
+                        0 => vec!["api.example.test"], 1 => vec!["*.example.test"], _ => Vec::new(),
+                    }, "methods": match i % 3 { 0 => vec!["GET"], 1 => vec!["POST", "PATCH"], _ => Vec::new() },
+                    "enabled": i % 13 != 0,
+                })).unwrap();
+                match i % 4 {
+                    0 => groups.public.push(route),
+                    1 => groups.optional.push(route),
+                    2 => groups.authenticated.push(route),
+                    _ => groups.machine.push(route),
+                }
+            }
+            let all = RouteTable::build(groups);
+            let mut paths: Vec<String> = (0..15)
+                .flat_map(|i| {
+                    [
+                        format!("api/{i}"),
+                        format!("api/{i}/items/42"),
+                        format!("api/{i}-admin"),
+                    ]
+                })
+                .collect();
+            paths.extend([
+                "".into(),
+                "api".into(),
+                "/api/café/42/".into(),
+                "api//double/x".into(),
+                "apix".into(),
+                format!("api/{}", "deep/".repeat(2000)),
+            ]);
+            let (public, machine) = all.partition_by_listener();
+            for table in [&public, &machine] {
+                for host in [
+                    None,
+                    Some("API.EXAMPLE.TEST:8443"),
+                    Some("other.example.test"),
+                    Some("example.test"),
+                    Some("host.invalid"),
+                ] {
+                    for method in ["GET", "post", "PATCH", "DELETE"] {
+                        for path in &paths {
+                            assert_eq!(
+                                table
+                                    .match_request(host, path, method)
+                                    .map(|r| r.id.as_str()),
+                                reference_match(table, host, path, method).map(|r| r.id.as_str()),
+                                "seed={seed} host={host:?} path={path} method={method}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
