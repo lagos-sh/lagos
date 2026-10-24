@@ -16,7 +16,7 @@ jobs:
     name: Docker starters
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Before the next tag exists, test the starter against the last published
       # image. The release workflow tests it again against the new image.
       - run: docker build --pull --build-arg LAGOS_IMAGE=ghcr.io/lagos-sh/lagos:0.1.3 -t lagos-starter:ci examples/minimal
@@ -38,7 +38,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.98.0
