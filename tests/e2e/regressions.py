@@ -531,6 +531,8 @@ def run_defaults(binary, work):
                                    "defaults route reload")
                         checks.check(request("/fresh") == 200 and request("/fresh") == 429,
                                      "reload retains captured startup defaults despite main-file edits")
+                        checks.check(request("/inherit") == 429,
+                                     "unchanged effective limiter keeps spent quota across reload")
                         groups["public"][0].update(methods=["POST"], rate_limit=None, retry=None)
                         publish(groups)
                         wait_until(lambda: request("/inherit", "POST") == 200, "explicit policy reload")

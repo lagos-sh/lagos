@@ -5,6 +5,10 @@ Behaviour changes and the config needed to preserve existing behaviour are in
 
 ## Unreleased
 
+- Unchanged effective limiter state survives route reloads. Reloads reject
+  missing extensions before publication, and an initial validated reload
+  closes the startup-to-watcher update gap. Cache namespaces still rotate.
+
 - JWKS refresh leadership is cancellation safe. JWT/Firebase issuers may opt
   into fixed `stale_if_error` intervals; default remains fail closed. New
   bounded outcome metrics report failed refreshes, stale use and exhaustion.

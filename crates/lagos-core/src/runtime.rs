@@ -99,16 +99,7 @@ impl Runtime {
             boot.block_on(verify_shared_counters(factory, &table))?;
         }
 
-        let referenced: Vec<String> = table.extension_names().map(String::from).collect();
-        let missing = self
-            .extensions
-            .missing(referenced.iter().map(String::as_str));
-        if !missing.is_empty() {
-            anyhow::bail!(
-                "routes reference extensions that are not registered: {}",
-                missing.join(", ")
-            );
-        }
+        self.extensions.validate(&table)?;
 
         tracing::info!(
             routes = table.len(),
@@ -272,6 +263,7 @@ impl Runtime {
                 RouteReloader {
                     provider,
                     config: cfg.clone(),
+                    extensions: self.extensions.clone(),
                     shared: shared_counters.clone(),
                     public: routes.clone(),
                     machine: cfg
@@ -422,6 +414,7 @@ struct RouteReloader {
     /// Kept so a reload is validated against the same upstreams and listeners
     /// the running gateway was booted with.
     config: Arc<ResolvedConfig>,
+    extensions: ExtensionRegistry,
     shared: Option<crate::ratelimit::SharedCounterFactory>,
     public: SharedRoutes,
     machine: Option<SharedRoutes>,
@@ -432,6 +425,7 @@ struct RouteReloader {
 impl RouteReloader {
     async fn publish(&self, table: crate::routes::RouteTable) -> anyhow::Result<usize> {
         self.config.validate_table(&table)?;
+        self.extensions.validate(&table)?;
         if let Some(factory) = &self.shared {
             verify_shared_counters(factory, &table).await?;
         }
@@ -448,7 +442,9 @@ impl RouteReloader {
 #[async_trait::async_trait]
 impl BackgroundService for RouteReloader {
     async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
-        let mut last = self.mtime();
+        // Force a validated first load: a change between startup loading and
+        // this background task must not become an unobserved baseline.
+        let mut last = None;
         let mut ticker = tokio::time::interval(self.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -779,6 +775,7 @@ mod shared_limit_tests {
         RouteReloader {
             provider: Arc::new(InlineRouteProvider::new(config.raw.routes.groups())),
             config,
+            extensions: ExtensionRegistry::new(),
             shared: Some(factory),
             public: SharedRoutes::new(table),
             machine: None,
@@ -794,6 +791,30 @@ mod shared_limit_tests {
             &cfg.raw.defaults,
             reloader.shared.as_ref(),
         )
+    }
+
+    #[tokio::test]
+    async fn missing_extension_reload_keeps_last_valid_table() {
+        let reloader = reloader(Arc::new(Store::default()));
+        let original = reloader.public.load();
+        let groups = serde_yaml_ng::from_str(
+            "public: [{prefix: /users, upstream: users, extensions: [unregistered]}]",
+        )
+        .unwrap();
+        let table = crate::routes::RouteTable::build(groups);
+        assert!(
+            reloader
+                .publish(table)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unregistered")
+        );
+        assert!(Arc::ptr_eq(&original, &reloader.public.load()));
+        assert_eq!(
+            original.cache_namespace(),
+            reloader.public.load().cache_namespace()
+        );
     }
 
     #[tokio::test]

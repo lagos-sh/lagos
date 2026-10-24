@@ -377,3 +377,11 @@ JWT and Firebase config structs add `stale_if_error: Duration` (default zero).
 Existing constructors preserve zero; builder methods opt in without changing
 constructor signatures. See [JWKS resilience](docs/jwks-resilience.md) for the
 emergency-revocation tradeoff.
+
+Reloads now preserve limiter state for unchanged effective policy and route
+identity (including listener, prefix, host, methods, upstream, binding and
+extension scope). Changing any limiter setting creates a new bounded quota.
+Invalid extension references reject the reload while the last valid table
+continues serving. Concurrency remains owned by the gateway across reloads.
+Cache namespaces still rotate on every publication: conservative invalidation
+is retained until effective cache-policy fingerprints are independently proven.

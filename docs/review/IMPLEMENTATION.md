@@ -100,3 +100,18 @@ signature tokens remain rejected during stale-key operation. Initial attempt
 against an old binary failed config loading; rebuilt binary passed. Clippy and
 schema tests passed before adding the final rotation/outage fixtures; final
 workspace checks will cover the complete patch.
+
+## B2 — reload state and validation
+
+Compatible effective limiter policies reuse their synchronized Arc, including
+requests in old snapshots. Equality includes every limiter setting and route
+identity/scope; changed settings receive a new limiter. Inheritance provenance
+alone does not reset state. Cache generations still rotate conservatively.
+Startup and reload now share registry validation; a missing extension leaves
+the exact prior table and namespace intact. A forced initial validated watcher
+load closes the startup-to-watcher mtime race. Same-mtime rewrites remain an
+operator/filesystem limitation of polling.
+
+`cargo test --offline -p lagos-core --features shared-limits reload --lib`:
+6 passed. Additional unchanged-inheritance test is included in final workspace
+execution. E2E now asserts spent quota survives an unrelated reload.

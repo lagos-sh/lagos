@@ -951,6 +951,24 @@ impl SharedRoutes {
     }
 
     pub fn store(&self, mut table: RouteTable) {
+        let previous = self.0.load_full();
+        let by_id: BTreeMap<_, _> = previous.routes.iter().map(|r| (r.id.as_str(), r)).collect();
+        for route in &mut table.routes {
+            if let Some(old) = by_id.get(route.id.as_str())
+                && old.auth == route.auth
+                && old.prefix == route.prefix
+                && old.hosts == route.hosts
+                && old.methods == route.methods
+                && old.upstream == route.upstream
+                && old.bind == route.bind
+                && old.extensions == route.extensions
+                && old.rate_limit == route.rate_limit
+            {
+                // Share the synchronized counter, never mutate the old policy.
+                // Readers holding an old table keep counting in the same window.
+                route.limiter = old.limiter.clone();
+            }
+        }
         table.cache_namespace = uuid::Uuid::new_v4();
         self.0.store(Arc::new(table));
     }
@@ -974,6 +992,60 @@ mod tests {
 
     fn groups(yaml: &str) -> RouteGroups {
         serde_yaml_ng::from_str(yaml).expect("test fixture should parse")
+    }
+
+    #[test]
+    fn unchanged_policy_reloads_keep_spent_quota_and_old_snapshots_consistent() {
+        let source = "public:\n  - id: r\n    prefix: /r\n    upstream: u\n    rate_limit: {requests: 2, key: route}\n";
+        let shared = SharedRoutes::new(RouteTable::build(groups(source)));
+        let old = shared.load();
+        let old_limiter = old.routes()[0].limiter.as_ref().unwrap();
+        assert!(old_limiter.check("r|").allowed);
+        shared.store(RouteTable::build(groups(source)));
+        let current = shared.load();
+        let new_limiter = current.routes()[0].limiter.as_ref().unwrap();
+        assert!(Arc::ptr_eq(old_limiter, new_limiter));
+        assert!(new_limiter.check("r|").allowed);
+        assert!(!old_limiter.check("r|").allowed);
+        assert_ne!(old.cache_namespace(), current.cache_namespace());
+        for replacement in [
+            source.replace("requests: 2", "requests: 1"),
+            source.replace("prefix: /r", "prefix: /other"),
+            source.replace("public:", "authenticated:"),
+        ] {
+            shared.store(RouteTable::build(groups(&replacement)));
+            assert!(!Arc::ptr_eq(
+                old_limiter,
+                shared.load().routes()[0].limiter.as_ref().unwrap()
+            ));
+        }
+    }
+
+    #[test]
+    fn inheritance_origin_changes_do_not_reset_an_identical_effective_limit() {
+        let defaults: crate::config::RouteDefaults =
+            serde_yaml_ng::from_str("rate_limit: {requests: 1, key: route}").unwrap();
+        let plain = groups("public: [{id: r, prefix: /r, upstream: u}]");
+        let shared = SharedRoutes::new(RouteTable::build_with_defaults(plain, &defaults));
+        assert!(
+            shared.load().routes()[0]
+                .limiter
+                .as_ref()
+                .unwrap()
+                .check("r|")
+                .allowed
+        );
+        shared.store(RouteTable::build(groups(
+            "public: [{id: r, prefix: /r, upstream: u, rate_limit: {requests: 1, key: route}}]",
+        )));
+        assert!(
+            !shared.load().routes()[0]
+                .limiter
+                .as_ref()
+                .unwrap()
+                .check("r|")
+                .allowed
+        );
     }
 
     #[test]

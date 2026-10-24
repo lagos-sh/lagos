@@ -85,6 +85,18 @@ impl ExtensionRegistry {
         self.by_name.get(name)
     }
 
+    /// Startup and reload share one registry check before publication.
+    pub fn validate(&self, table: &crate::routes::RouteTable) -> anyhow::Result<()> {
+        let missing = self.missing(table.extension_names());
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "routes reference extensions that are not registered: {}",
+                missing.join(", ")
+            );
+        }
+        Ok(())
+    }
+
     /// Names referenced by routes but never registered. Checked at startup so a
     /// typo fails the boot instead of silently skipping a security control.
     pub fn missing<'a>(&self, referenced: impl Iterator<Item = &'a str>) -> Vec<String> {
