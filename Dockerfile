@@ -12,11 +12,17 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/lagos-core/Cargo.toml crates/lagos-core/
 COPY crates/lagos/Cargo.toml      crates/lagos/
+# Cargo refuses a manifest whose [[bench]] targets have no file, so each
+# declared bench gets a stub too.
 RUN mkdir -p crates/lagos-core/src crates/lagos/src \
     && echo ''            > crates/lagos-core/src/lib.rs \
     && echo 'fn main(){}' > crates/lagos/src/main.rs \
+    && mkdir -p crates/lagos-core/benches \
+    && for bench in $(awk '/^\[\[bench\]\]/ {b = 1; next} b && $1 == "name" {gsub(/"/, "", $3); print $3; b = 0}' crates/lagos-core/Cargo.toml); do \
+         echo 'fn main(){}' > "crates/lagos-core/benches/$bench.rs"; \
+       done \
     && cargo build --release --locked --bin lagos \
-    && rm -rf crates/lagos-core/src crates/lagos/src
+    && rm -rf crates/lagos-core/src crates/lagos-core/benches crates/lagos/src
 
 # Set only by the version-tag release workflow, after schema verification.
 # Local builds have no remote schema link in init output.
