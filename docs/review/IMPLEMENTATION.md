@@ -216,6 +216,27 @@ Final checks at the branch tip (this session): `cargo fmt --check`, `cargo clipp
 (shared-limits, cache, otel), `cargo deny check` (online), `tests/e2e/run.sh`
 (218 passed, 0 failed).
 
-Still pending: 9 (multi-replica guarantees doc pass), 12 beyond matcher
-(profiling-driven), 14 (cache benchmarks), 15/16 review, 18 (branch protection:
-read-only inspection and manual steps), 20 (SECURITY/ROADMAP sync).
+Items 9, 12, 14, 16, 18 and 20 were then completed in the session below.
+
+## F — remaining items (second pass)
+
+| Item | Outcome |
+| --- | --- |
+| 18. Branch protection | Read-only API check: no protection or rulesets on `main`, `v*` tags unprotected, no release environment, secret scanning off. Nothing changed; exact `gh api` steps in docs/repository-protection.md. |
+| 9. Replicas | docs/deploying.md "Running several replicas" table: what is per process (caps, breakers, cache, keys, pool health, accept limits, reloads) and the shared-counter modes. |
+| 20. Docs | SECURITY known gaps corrected (deadline, CSRF, JWKS stale were listed as missing); ROADMAP "Next" replaced with open items; README links the new controls and fixes its "no CSRF check" claim. |
+| 16. Errors | Confirmed: JWKS `max-age` was uncapped (revoked keys trusted and rotated keys refused for as long as advertised; `u64::MAX` overflowed into refetch-per-request) — capped at 24h. Token `kid`/`iss` were logged verbatim (log-line forging in text format) — escaped and truncated. `connect * 2` per request — saturating. Metric labels were already normalized. |
+| 14. Cache | Confirmed: concurrent fills on distinct keys buffered outside `max_size` — new `cache.max_inflight_fill` (64 MiB). Cache bench added; binary-hash keys cut miss lookups 578 -> 256 ns. |
+| Shutdown | Found while benchmarking, confirmed by timing: SIGTERM waited Pingora's 300s default and `graceful_shutdown` never drained (tokio cancels async tasks at runtime shutdown). Fixed; e2e `shutdown.py` fails on the old build. |
+| 12. Hot path | Whole-gateway harness (benches/http). No Lagos function above 2.5% of CPU; levers are RSA verification (27% on JWT traffic), the allocator (17–22%) and logging. jemalloc A/B: +5 to +15% throughput, -6% RSS — measured, not adopted (C dependency in release builds). |
+| 15. Architecture | Not refactored. `request_filter` (685 lines) is the single authorization boundary in labelled sequential phases; splitting it into phase methods is a reasonable follow-up PR on its own, not part of security fixes. |
+
+Final checks at the branch tip: `cargo fmt --check`; clippy (workspace and
+lean, `-D warnings`); `cargo test --locked --workspace` 467 passed; lean lib
+411 passed; shared-limits/cache/otel checks; `cargo deny check` online clean;
+`tests/e2e/run.sh` 219 passed, 0 failed.
+
+Recommended follow-ups, each its own PR: jemalloc (with release-build
+verification on musl/arm64), verified-token cache design, `request_filter`
+phase extraction, applying docs/repository-protection.md, and
+`CacheMeta` reuse if pingora-cache makes it `Clone`.
