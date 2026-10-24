@@ -1,6 +1,7 @@
 //! Route table: the allowlist, the deny-list, and how a request finds an upstream.
 
 pub mod file;
+mod index;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -521,6 +522,7 @@ pub struct RouteTable {
     deny_prefixes: Vec<String>,
     /// Sorted by prefix length descending so the most specific route wins.
     routes: Vec<RouteConfig>,
+    lookup: Option<index::PrefixIndex>,
     /// Specs that did not parse. Building stays infallible so the matcher has
     /// one shape; validation turns these into a startup failure.
     errors: Vec<String>,
@@ -547,6 +549,19 @@ pub(crate) fn under_prefix(path: &str, prefix: &str) -> bool {
     // surprise.
     path.strip_prefix(prefix)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// `raw` unchanged if no byte needs folding, otherwise `fold(raw)`.
+fn ascii_cased<'a>(
+    raw: &'a str,
+    needs_fold: fn(&u8) -> bool,
+    fold: fn(&str) -> String,
+) -> std::borrow::Cow<'a, str> {
+    if raw.bytes().any(|b| needs_fold(&b)) {
+        std::borrow::Cow::Owned(fold(raw))
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    }
 }
 
 /// [`under_prefix`], ignoring case the way case-insensitive upstreams do.
@@ -783,6 +798,7 @@ impl RouteTable {
         Self {
             cache_namespace: uuid::Uuid::new_v4(),
             deny_prefixes,
+            lookup: index::PrefixIndex::build(&routes),
             routes,
             errors,
         }
@@ -827,9 +843,20 @@ impl RouteTable {
         method: &str,
     ) -> Option<&RouteConfig> {
         let p = normalize_proxy_path(path);
-        let m = method.to_ascii_uppercase();
-        let h = host.map(|h| normalize_host(h).to_ascii_lowercase());
+        // Clients almost always send an upper-case method and a lower-case
+        // host already; only allocate for the ones that do not.
+        let m = ascii_cased(method, u8::is_ascii_lowercase, str::to_ascii_uppercase);
+        let h = host.map(|h| {
+            ascii_cased(
+                normalize_host(h),
+                u8::is_ascii_uppercase,
+                str::to_ascii_lowercase,
+            )
+        });
 
+        if let Some(index) = &self.lookup {
+            return index.find(&self.routes, p, &m, h.as_deref());
+        }
         self.routes.iter().find(|r| {
             under_prefix(p, &r.prefix) && r.matches_method(&m) && r.matches_host(h.as_deref())
         })
@@ -889,6 +916,7 @@ impl RouteTable {
             RouteTable {
                 cache_namespace: self.cache_namespace,
                 deny_prefixes: self.deny_prefixes.clone(),
+                lookup: index::PrefixIndex::build(&public),
                 routes: public,
                 errors: self.errors.clone(),
             },
@@ -897,6 +925,7 @@ impl RouteTable {
             RouteTable {
                 cache_namespace: self.cache_namespace,
                 deny_prefixes: Vec::new(),
+                lookup: index::PrefixIndex::build(&machine),
                 routes: machine,
                 errors: self.errors,
             },
@@ -951,6 +980,29 @@ impl SharedRoutes {
     }
 
     pub fn store(&self, mut table: RouteTable) {
+        let previous = self.0.load_full();
+        let by_id: BTreeMap<_, _> = previous.routes.iter().map(|r| (r.id.as_str(), r)).collect();
+        for route in &mut table.routes {
+            if let Some(old) = by_id.get(route.id.as_str())
+                && old.auth == route.auth
+                && old.prefix == route.prefix
+                && old.hosts == route.hosts
+                && old.methods == route.methods
+                && old.upstream == route.upstream
+                && old.bind == route.bind
+                && old.extensions == route.extensions
+                && old.rate_limit == route.rate_limit
+                && old
+                    .limiter
+                    .as_ref()
+                    .zip(route.limiter.as_ref())
+                    .is_some_and(|(a, b)| a.same_backend(b))
+            {
+                // Share the synchronized counter, never mutate the old policy.
+                // Readers holding an old table keep counting in the same window.
+                route.limiter = old.limiter.clone();
+            }
+        }
         table.cache_namespace = uuid::Uuid::new_v4();
         self.0.store(Arc::new(table));
     }
@@ -974,6 +1026,143 @@ mod tests {
 
     fn groups(yaml: &str) -> RouteGroups {
         serde_yaml_ng::from_str(yaml).expect("test fixture should parse")
+    }
+
+    #[test]
+    fn unchanged_policy_reloads_keep_spent_quota_and_old_snapshots_consistent() {
+        let source = "public:\n  - id: r\n    prefix: /r\n    upstream: u\n    rate_limit: {requests: 2, key: route}\n";
+        let shared = SharedRoutes::new(RouteTable::build(groups(source)));
+        let old = shared.load();
+        let old_limiter = old.routes()[0].limiter.as_ref().unwrap();
+        assert!(old_limiter.check("r|").allowed);
+        shared.store(RouteTable::build(groups(source)));
+        let current = shared.load();
+        let new_limiter = current.routes()[0].limiter.as_ref().unwrap();
+        assert!(Arc::ptr_eq(old_limiter, new_limiter));
+        assert!(new_limiter.check("r|").allowed);
+        assert!(!old_limiter.check("r|").allowed);
+        assert_ne!(old.cache_namespace(), current.cache_namespace());
+        for replacement in [
+            source.replace("requests: 2", "requests: 1"),
+            source.replace("prefix: /r", "prefix: /other"),
+            source.replace("public:", "authenticated:"),
+        ] {
+            shared.store(RouteTable::build(groups(&replacement)));
+            assert!(!Arc::ptr_eq(
+                old_limiter,
+                shared.load().routes()[0].limiter.as_ref().unwrap()
+            ));
+        }
+    }
+
+    #[test]
+    fn inheritance_origin_changes_do_not_reset_an_identical_effective_limit() {
+        let defaults: crate::config::RouteDefaults =
+            serde_yaml_ng::from_str("rate_limit: {requests: 1, key: route}").unwrap();
+        let plain = groups("public: [{id: r, prefix: /r, upstream: u}]");
+        let shared = SharedRoutes::new(RouteTable::build_with_defaults(plain, &defaults));
+        assert!(
+            shared.load().routes()[0]
+                .limiter
+                .as_ref()
+                .unwrap()
+                .check("r|")
+                .allowed
+        );
+        shared.store(RouteTable::build(groups(
+            "public: [{id: r, prefix: /r, upstream: u, rate_limit: {requests: 1, key: route}}]",
+        )));
+        assert!(
+            !shared.load().routes()[0]
+                .limiter
+                .as_ref()
+                .unwrap()
+                .check("r|")
+                .allowed
+        );
+    }
+
+    fn reference_match<'a>(
+        table: &'a RouteTable,
+        host: Option<&str>,
+        path: &str,
+        method: &str,
+    ) -> Option<&'a RouteConfig> {
+        let path = normalize_proxy_path(path);
+        let method = method.to_ascii_uppercase();
+        let host = host.map(|h| normalize_host(h).to_ascii_lowercase());
+        table.routes.iter().find(|r| {
+            under_prefix(path, &r.prefix)
+                && r.matches_method(&method)
+                && r.matches_host(host.as_deref())
+        })
+    }
+
+    #[test]
+    fn indexed_matching_equals_reference_across_generated_routes_and_listeners() {
+        for seed in 0..12 {
+            let mut groups = RouteGroups::default();
+            for i in 0..160 {
+                let route: RouteConfig = serde_json::from_value(serde_json::json!({
+                    "id": format!("r-{seed}-{i}"), "prefix": match i % 5 {
+                        0 => format!("/api/{}/items", (i * 7 + seed) % 11),
+                        1 => format!("/api/{}", (i + seed) % 11),
+                        2 => "/api/café".to_string(),
+                        3 => "/api//double".to_string(),
+                        _ => "/api".to_string(),
+                    }, "upstream": "u", "host": match (i + seed) % 4 {
+                        0 => vec!["api.example.test"], 1 => vec!["*.example.test"], _ => Vec::new(),
+                    }, "methods": match i % 3 { 0 => vec!["GET"], 1 => vec!["POST", "PATCH"], _ => Vec::new() },
+                    "enabled": i % 13 != 0,
+                })).unwrap();
+                match i % 4 {
+                    0 => groups.public.push(route),
+                    1 => groups.optional.push(route),
+                    2 => groups.authenticated.push(route),
+                    _ => groups.machine.push(route),
+                }
+            }
+            let all = RouteTable::build(groups);
+            let mut paths: Vec<String> = (0..15)
+                .flat_map(|i| {
+                    [
+                        format!("api/{i}"),
+                        format!("api/{i}/items/42"),
+                        format!("api/{i}-admin"),
+                    ]
+                })
+                .collect();
+            paths.extend([
+                "".into(),
+                "api".into(),
+                "/api/café/42/".into(),
+                "api//double/x".into(),
+                "apix".into(),
+                format!("api/{}", "deep/".repeat(2000)),
+            ]);
+            let (public, machine) = all.partition_by_listener();
+            for table in [&public, &machine] {
+                for host in [
+                    None,
+                    Some("API.EXAMPLE.TEST:8443"),
+                    Some("other.example.test"),
+                    Some("example.test"),
+                    Some("host.invalid"),
+                ] {
+                    for method in ["GET", "post", "PATCH", "DELETE"] {
+                        for path in &paths {
+                            assert_eq!(
+                                table
+                                    .match_request(host, path, method)
+                                    .map(|r| r.id.as_str()),
+                                reference_match(table, host, path, method).map(|r| r.id.as_str()),
+                                "seed={seed} host={host:?} path={path} method={method}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

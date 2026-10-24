@@ -1,0 +1,26 @@
+name: Policy benchmarks
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Record environment and policy samples
+        run: |
+          mkdir benchmark-results
+          rustc --version > benchmark-results/environment.txt
+          uname -srm >> benchmark-results/environment.txt
+          lscpu >> benchmark-results/environment.txt
+          cargo bench --locked -p lagos-core --no-default-features --bench policy > benchmark-results/policy.csv
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: policy-benchmarks
+          path: benchmark-results/
+          if-no-files-found: error

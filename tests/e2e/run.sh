@@ -529,6 +529,11 @@ curl -s -m 5 -H "Cookie: access_token=$TOK" "$G/bff/v1/loyalty/settings" > "$WOR
 python3 "$E2E/assert_header.py" "$WORK/ck.json" x-auth-subject 4821 \
   && ok "identity injected from a cookie token" || bad "cookie token identity not injected"
 expect "expired"                            401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py expired)"  "$G/bff/v1/loyalty/settings"
+for claim in iat auth_time; do
+  for variant in missing null string negative fraction future; do
+    expect "Firebase $claim $variant" 401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py "$claim-$variant")" "$G/bff/v1/loyalty/settings"
+  done
+done
 expect "wrong audience"                     401 -H "Authorization: Bearer $(cd "$WORK" && python3 mint.py wrongaud)" "$G/bff/v1/loyalty/settings"
 expect "tampered signature"                 401 -H "Authorization: Bearer ${TOK%?}X" "$G/bff/v1/loyalty/settings"
 FORGED=$(python3 -c "
@@ -1056,7 +1061,7 @@ routes:
       prefix: quota
       upstream: echo
       methods: [GET]
-      rate_limit: { requests: 2, interval: 1m, key: identity }
+      rate_limit: { requests: 2, interval: 1m, key: identity, missing_key: skip }
   machine:
     - { id: jobs, prefix: jobs, upstream: echo, methods: [GET] }
 EOF
@@ -1134,6 +1139,20 @@ if python3 "$E2E/regressions.py" "$BIN/lagos"; then
   ok "filter interaction regression suite"
 else
   bad "filter interaction regression suite"
+fi
+
+say "absolute exchange deadlines"
+if python3 "$E2E/deadlines.py" "$BIN/lagos"; then
+  ok "absolute deadline regression suite"
+else
+  bad "absolute deadline regression suite"
+fi
+
+say "graceful shutdown"
+if python3 "$E2E/shutdown.py" "$BIN/lagos"; then
+  ok "shutdown regression suite"
+else
+  bad "shutdown regression suite"
 fi
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"

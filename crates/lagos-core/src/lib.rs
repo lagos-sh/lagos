@@ -28,6 +28,7 @@ pub mod cli;
 pub mod concurrency;
 pub mod config;
 pub mod cors;
+pub mod csrf;
 pub mod dns;
 pub mod downstream;
 pub mod error;

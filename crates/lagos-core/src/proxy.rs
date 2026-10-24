@@ -405,7 +405,7 @@ impl Gateway {
             let target = self
                 .upstreams
                 .get(&ctx.upstream_name)
-                .and_then(|u| u.select(b"").map(|t| t.addr.clone()))
+                .and_then(|u| u.select(b"").map(|s| s.target.addr.clone()))
                 .unwrap_or_else(|| "?".to_string());
             let _ = writeln!(
                 out,
@@ -558,14 +558,17 @@ impl Gateway {
         let key = self.limit_key(
             session,
             &cfg.key,
+            cfg.missing_key,
             cfg.trusted_proxies,
             &route.id,
             subject,
             peer_ip,
         );
 
-        let Some(key) = key else {
-            return Ok(false);
+        let key = match key {
+            Ok(Some(key)) => key,
+            Ok(None) => return Ok(false),
+            Err(error) => return self.reject(session, ctx, Rejection::limit_key(error)).await,
         };
         // Awaits only where the route asked for a per-request round trip
         // (`counter: shared` with `mode: exact`); every other configuration
@@ -584,16 +587,18 @@ impl Gateway {
     }
 
     /// The key a rate limit or concurrency cap counts this request under, or
-    /// `None` when the configured key is absent from the request.
+    /// `None` only when skipping an absent key was explicitly configured.
+    #[allow(clippy::too_many_arguments)]
     fn limit_key(
         &self,
         session: &Session,
         key: &crate::config::RateLimitKey,
+        missing: crate::config::MissingKey,
         trusted_proxies: usize,
         route_id: &str,
         subject: Option<&str>,
         peer_ip: Option<&str>,
-    ) -> Option<String> {
+    ) -> std::result::Result<Option<String>, crate::ratelimit::KeyError> {
         let headers = &session.req_header().headers;
         let trusted = self.cfg.trusted_proxy_depth(peer_ip, trusted_proxies);
         let forwarded = if trusted > 0 {
@@ -601,19 +606,15 @@ impl Gateway {
         } else {
             None
         };
-        crate::ratelimit::key_for(
+        crate::ratelimit::admission_key(
             key,
+            missing,
             trusted_proxies,
             route_id,
             subject,
             forwarded.as_deref(),
             peer_ip,
-            |name| {
-                headers
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
-            },
+            headers,
         )
     }
 
@@ -1118,8 +1119,38 @@ impl ProxyHttp for Gateway {
         if route.auth.verifies() {
             // The header first: a client that sets one means it. A token
             // cookie is read only when there is no bearer header at all.
+            if session
+                .req_header()
+                .headers
+                .get_all(http::header::AUTHORIZATION)
+                .iter()
+                .nth(1)
+                .is_some()
+            {
+                return self
+                    .reject(
+                        session,
+                        ctx,
+                        Rejection::invalid_token("ambiguous_authorization"),
+                    )
+                    .await;
+            }
             let from_header = authorization.as_deref().and_then(crate::auth::bearer_token);
             let bearer = from_header.or(cookie_token.as_deref());
+            if from_header.is_none()
+                && cookie_token.is_some()
+                && let Some(policy) = &self.cfg.cookie_protection
+                && let Err(reason) =
+                    policy.check(&session.req_header().headers, &session.req_header().method)
+            {
+                return self
+                    .reject(
+                        session,
+                        ctx,
+                        Rejection::forbidden("Cookie request origin is not permitted", reason),
+                    )
+                    .await;
+            }
             if bearer.is_some() {
                 ctx.credential = Some(if from_header.is_some() {
                     "header"
@@ -1173,7 +1204,10 @@ impl ProxyHttp for Gateway {
                                     ctx,
                                     Rejection::unavailable(
                                         "Token issuer is not configured on this gateway",
-                                        format!("unknown_issuer_{project}"),
+                                        format!(
+                                            "unknown_issuer_{}",
+                                            crate::auth::untrusted(&project)
+                                        ),
                                     ),
                                 )
                                 .await;
@@ -1357,33 +1391,27 @@ impl ProxyHttp for Gateway {
             }
         }
 
-        for name in &route.extensions {
-            let Some(ext) = self.extensions.get(name) else {
-                // Startup validation should make this unreachable; failing
-                // closed here means a missing policy hook can never be skipped.
-                return self
-                    .reject(
-                        session,
-                        ctx,
-                        Rejection::unavailable(
-                            "Gateway misconfigured",
-                            format!("missing_extension_{name}"),
-                        ),
-                    )
-                    .await;
-            };
-            let mut cx = ExtensionContext {
-                path: &ctx.path,
-                method: &method,
-                query: ctx.query.as_deref(),
-                route,
-                identity: identity.as_ref(),
-                client_headers: &session.req_header().headers,
-                plan: &mut plan,
-            };
-            if let Err(rej) = ext.on_request(&mut cx).await {
-                return self.reject(session, ctx, rej).await;
-            }
+        let mut cx = ExtensionContext {
+            path: &ctx.path,
+            method: &method,
+            query: ctx.query.as_deref(),
+            route,
+            identity: identity.as_ref(),
+            client_headers: &session.req_header().headers,
+            plan: &mut plan,
+        };
+        if let Err(rejection) = self
+            .extensions
+            .run_chain(
+                &mut cx,
+                self.cfg.raw.timeouts.extension,
+                self.cfg.raw.timeouts.extension_chain,
+                self.cfg.raw.limits.extension_inflight,
+            )
+            .await
+        {
+            // Runner and its permit have dropped before rejection response I/O.
+            return self.reject(session, ctx, rejection).await;
         }
 
         ctx.plan = plan;
@@ -1391,20 +1419,26 @@ impl ProxyHttp for Gateway {
         // is taken only once the request is about to go upstream, so a cache
         // hit never holds one.
         if let Some(cap) = &route.concurrency {
-            ctx.concurrency = self
-                .limit_key(
-                    session,
-                    cap.key(),
-                    cap.trusted_proxies,
-                    &route.id,
-                    identity.as_ref().map(|i| i.subject.as_str()),
-                    peer_ip_for_limit.as_deref(),
-                )
-                .map(|key| PendingSlot {
+            let key = match self.limit_key(
+                session,
+                cap.key(),
+                cap.missing_key,
+                cap.trusted_proxies,
+                &route.id,
+                identity.as_ref().map(|i| i.subject.as_str()),
+                peer_ip_for_limit.as_deref(),
+            ) {
+                Ok(key) => key,
+                Err(error) => return self.reject(session, ctx, Rejection::limit_key(error)).await,
+            };
+            ctx.concurrency = key.map(|key| {
+                let per_caller = cap.per_caller() && key.strip_prefix(&route.id) != Some("|");
+                PendingSlot {
                     key,
                     max: cap.max,
-                    per_caller: cap.per_caller(),
-                });
+                    per_caller,
+                }
+            });
         }
         // Consistent hashing uses the subject in production too.
         ctx.subject = identity.as_ref().map(|i| i.subject.clone());
@@ -1520,16 +1554,14 @@ impl ProxyHttp for Gateway {
         // the Host header from the same backend, and a second selection could
         // name a different one.
         let key = self.hash_key(session, ctx);
-        let target = upstream
-            .select(key.as_bytes())
-            .ok_or_else(|| {
-                pingora::Error::explain(
-                    pingora::ErrorType::ConnectError,
-                    "every backend in the pool is unhealthy",
-                )
-                .into_up()
-            })?
-            .clone();
+        let selected = upstream.select(key.as_bytes()).ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::ConnectError,
+                "every backend in the pool is unhealthy",
+            )
+            .into_up()
+        })?;
+        let target = selected.target.clone();
 
         // Resolved here rather than inside `HttpPeer::new`, which takes anything
         // `ToInetSocketAddrs` and unwraps it (pingora-core 0.9
@@ -1542,7 +1574,13 @@ impl ProxyHttp for Gateway {
         // blocking `getaddrinfo` off this worker thread: it is one of two, and
         // a slow resolver holding both is a gateway outage rather than a
         // gateway slowdown.
-        let addrs = self.resolver.addresses(&target.addr).await?;
+        let addrs = match selected.addr {
+            // A pool member is the address the balancer chose. Resolving the
+            // target's name again could pick another member, or one that
+            // health checks have taken out of rotation.
+            Some(addr) => Arc::new(vec![addr]),
+            None => self.resolver.addresses(&target.addr).await?,
+        };
         let start = *ctx
             .dns_start
             .get_or_insert_with(|| self.dns_next.fetch_add(1, Ordering::Relaxed));
@@ -1556,7 +1594,8 @@ impl ProxyHttp for Gateway {
         })?;
         let mut peer = HttpPeer::new(addr, target.tls, target.sni.clone());
         peer.options.connection_timeout = Some(self.cfg.raw.timeouts.connect);
-        peer.options.total_connection_timeout = Some(self.cfg.raw.timeouts.connect * 2);
+        peer.options.total_connection_timeout =
+            Some(self.cfg.raw.timeouts.connect.saturating_mul(2));
         peer.options.read_timeout = Some(ctx.timeout);
         peer.options.write_timeout = Some(ctx.timeout);
         peer.options.idle_timeout = Some(self.cfg.raw.timeouts.upstream_idle);
@@ -1812,6 +1851,9 @@ impl ProxyHttp for Gateway {
             session.req_header().method,
             http::Method::GET | http::Method::HEAD
         ) || ctx.sse
+            // Any application cookie can select session state. A gateway
+            // cannot infer harmless cookies or safely reuse anonymous entries.
+            || session.req_header().headers.contains_key(http::header::COOKIE)
         {
             return Ok(());
         }

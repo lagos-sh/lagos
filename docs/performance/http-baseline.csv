@@ -1,0 +1,5 @@
+workload,concurrency,requests,rps,p50_ms,p95_ms,p99_ms,failed,non_2xx,gateway_cpu_pct,gateway_peak_rss_kib
+proxy,32,100000,27214.86,1,2,2,0,,172,19932
+cache_hit,32,100000,40730.51,1,1,1,0,,177,21528
+jwt_proxy,32,100000,17535.03,2,2,3,0,,182,22384
+refused_404,32,100000,63358.15,0,1,1,0,100000,170,22828

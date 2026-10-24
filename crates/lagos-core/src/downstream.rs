@@ -31,6 +31,7 @@ pub fn header_parsed() {
 pub struct DeadlineProxy {
     inner: Arc<HttpProxy<Gateway>>,
     header_timeout: Duration,
+    request_total: Option<Duration>,
 }
 
 impl DeadlineProxy {
@@ -38,7 +39,13 @@ impl DeadlineProxy {
         Self {
             inner: Arc::new(inner),
             header_timeout,
+            request_total: None,
         }
+    }
+    /// Apply one absolute exchange lifetime. None preserves long-lived streams.
+    pub fn with_request_deadline(mut self, deadline: Option<Duration>) -> Self {
+        self.request_total = deadline;
+        self
     }
 }
 
@@ -56,6 +63,28 @@ where
     }
 }
 
+async fn request_budget<F, T>(future: F, total: Option<Duration>) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    let Some(total) = total else {
+        return Some(future.await);
+    };
+    if let Some(deadline) = tokio::time::Instant::now().checked_add(total)
+        && let Ok(result) = tokio::time::timeout_at(deadline, future).await
+    {
+        return Some(result);
+    }
+    if let Some(metrics) = crate::metrics::metrics() {
+        metrics.record_request_deadline();
+    }
+    tracing::warn!(
+        event = "gateway.request.deadline",
+        "absolute exchange deadline expired; closing downstream"
+    );
+    None
+}
+
 #[async_trait::async_trait]
 impl HttpServerApp for DeadlineProxy {
     async fn process_new_http(
@@ -63,13 +92,13 @@ impl HttpServerApp for DeadlineProxy {
         session: ServerSession,
         shutdown: &ShutdownWatch,
     ) -> Option<ReusedHttpStream> {
-        wait_for_header(
+        let exchange = wait_for_header(
             self.inner.process_new_http(session, shutdown),
             Arc::new(Notify::new()),
             self.header_timeout,
-        )
-        .await
-        .flatten()
+        );
+        let result = request_budget(exchange, self.request_total).await?;
+        result.flatten()
     }
 
     fn server_options(&self) -> Option<&HttpServerOptions> {
@@ -99,6 +128,26 @@ impl HttpServerApp for DeadlineProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn total_budget_bounds_progress_after_header_parsing() {
+        let exchange = wait_for_header(
+            async {
+                header_parsed();
+                loop {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            },
+            Arc::new(Notify::new()),
+            Duration::from_secs(1),
+        );
+        assert!(
+            request_budget(exchange, Some(Duration::from_millis(10)))
+                .await
+                .is_none()
+        );
+        assert_eq!(request_budget(async { 42 }, None).await, Some(42));
+    }
 
     #[tokio::test]
     async fn incomplete_header_is_cut_off_at_absolute_deadline() {

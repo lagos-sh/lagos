@@ -12,16 +12,17 @@ gaps are in [SECURITY.md](SECURITY.md).
 
 ## Next
 
-Ordered roughly by how often the absence bites.
+Ordered roughly by how often the absence bites. Shared rate-limit counters
+(0.1.8), bounded JWKS stale-while-error, an absolute request deadline,
+extension execution budgets and pool DNS discovery (0.1.9) have moved to
+[CHANGELOG.md](CHANGELOG.md).
 
 | | Why |
 |---|---|
-| **Distributed rate limiting** | Counters are per process today: 100/min across three replicas admits 300/min. Fits behind the existing `Limiter` interface |
-| **Stale-while-error on JWKS** | An identity provider outage currently stops authenticated traffic, even though the cached keys were almost certainly still valid |
-| **Total request deadline** | Timeouts are per read, per write and per connect. A client making slow but steady progress stays inside all of them indefinitely |
-| **Extension execution budgets** | Lagos must bound each request hook and the complete extension chain, reject on timeout, and report which policy exceeded its budget. Native hooks remain trusted code; asynchronous timeouts cannot preempt blocking code. See the [extension proposal](docs/extension-hardening.md) |
-| **Shared in-flight and concurrency state** | The counters are shared now; a concurrency cap and a circuit breaker are still per replica |
-| **Request header size limit** | Whatever Pingora's parser accepts, the gateway accepts. Should be ours to bound |
+| **Shared in-flight and concurrency state** | Rate-limit counters can be shared; a concurrency cap and a circuit breaker are still per replica, so a cap of 20 across three replicas admits 60. See [running several replicas](docs/deploying.md#running-several-replicas) |
+| **Request header size limit** | Whatever Pingora's parser accepts (256 fields, roughly 1 MiB), the gateway accepts. Bounding it ourselves needs a parser-stage hook; a check after parsing would not bound memory |
+| **Live connection ceiling** | `connections_per_ip` bounds the accept rate, but Pingora's accept hook is not told about closes, so a concurrent-connection count cannot be kept honestly there yet |
+| **Cache reuse across unchanged reloads** | Every route publication rotates the cache namespace. Keeping entries needs a proven fingerprint of everything that affects a cached response |
 
 ---
 

@@ -32,7 +32,7 @@ fn vary_fields(resp: &ResponseHeader) -> Option<BTreeSet<String>> {
 }
 
 pub fn eligible(resp: &ResponseHeader, authorized: bool) -> bool {
-    if vary_fields(resp).is_none() {
+    if resp.headers.contains_key(http::header::SET_COOKIE) || vary_fields(resp).is_none() {
         return false;
     }
     let cc = CacheControl::from_resp_headers(resp);
@@ -93,6 +93,17 @@ mod tests {
         resp.insert_header("vary", vary).unwrap();
         resp.insert_header("cache-control", cc).unwrap();
         resp
+    }
+
+    #[test]
+    fn cookie_setting_responses_are_never_shared_even_if_public() {
+        for cc in ["public, max-age=60", "s-maxage=60", "max-age=60", ""] {
+            let mut resp = response("", cc);
+            resp.append_header("set-cookie", "session=alice; HttpOnly")
+                .unwrap();
+            assert!(!eligible(&resp, false));
+            assert!(!eligible(&resp, true));
+        }
     }
 
     #[test]

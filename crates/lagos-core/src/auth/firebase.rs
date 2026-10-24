@@ -38,6 +38,12 @@ impl FirebaseVerifier {
         }
     }
 
+    /// Allow previously fetched keys for a fixed interval after expiry when refresh fails.
+    pub fn with_stale_if_error(mut self, maximum: Duration) -> Self {
+        self.certs = self.certs.with_stale_if_error(maximum);
+        self
+    }
+
     /// Issuer URLs this verifier accepts, one per configured project.
     pub fn issuers(&self) -> Vec<String> {
         self.project_ids
@@ -66,12 +72,36 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+// jsonwebtoken does not implement required-claim checks for these names.
+// Call only after the signature, issuer, audience and expiry are verified.
+fn validate_timestamps(
+    claims: &Map<String, Value>,
+    now: u64,
+    skew: Duration,
+) -> Result<(), AuthError> {
+    for name in ["iat", "auth_time"] {
+        let timestamp = claims
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| AuthError::Invalid(format!("`{name}` must be an unsigned timestamp")))?;
+        if timestamp > now.saturating_add(skew.as_secs()) {
+            return Err(AuthError::Invalid(format!("`{name}` is in the future")));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl TokenVerifier for FirebaseVerifier {
     async fn verify(&self, token: &str) -> Result<Identity, AuthError> {
         let iss = unverified_issuer(token)?;
         let project_id = project_id_from_issuer(&iss)
-            .ok_or_else(|| AuthError::Invalid(format!("issuer `{iss}` is not a Firebase issuer")))?
+            .ok_or_else(|| {
+                AuthError::Invalid(format!(
+                    "issuer `{}` is not a Firebase issuer",
+                    super::untrusted(&iss)
+                ))
+            })?
             .to_string();
 
         if !self.project_ids.contains(&project_id) {
@@ -113,14 +143,7 @@ impl TokenVerifier for FirebaseVerifier {
             .ok_or_else(|| AuthError::Invalid("`sub` claim is empty".into()))?
             .to_string();
 
-        // `auth_time` in the future means the token describes a sign-in that has
-        // not happened. The Admin SDK rejects these; jsonwebtoken does not know
-        // the claim, so check it here.
-        if let Some(auth_time) = claims.get("auth_time").and_then(Value::as_u64)
-            && auth_time > now_secs().saturating_add(self.clock_skew.as_secs())
-        {
-            return Err(AuthError::Invalid("`auth_time` is in the future".into()));
-        }
+        validate_timestamps(&claims, now_secs(), self.clock_skew)?;
 
         Ok(Identity {
             subject,
@@ -144,6 +167,34 @@ mod tests {
             b64.encode(json.as_bytes()),
             "sig"
         )
+    }
+
+    #[test]
+    fn timestamps_are_required_unsigned_and_not_in_the_future() {
+        let now = 1000;
+        for name in ["iat", "auth_time"] {
+            for invalid in [
+                Value::Null,
+                Value::String("900".into()),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!(1100),
+            ] {
+                let mut claims = serde_json::json!({"iat": 900, "auth_time": 900})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+                claims.insert(name.into(), invalid);
+                assert!(validate_timestamps(&claims, now, Duration::ZERO).is_err());
+                claims.remove(name);
+                assert!(validate_timestamps(&claims, now, Duration::ZERO).is_err());
+            }
+        }
+        let claims = serde_json::json!({"iat": 1005, "auth_time": 900})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(validate_timestamps(&claims, now, Duration::from_secs(5)).is_ok());
     }
 
     #[test]
