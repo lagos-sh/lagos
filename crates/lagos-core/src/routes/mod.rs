@@ -551,6 +551,19 @@ pub(crate) fn under_prefix(path: &str, prefix: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+/// `raw` unchanged if no byte needs folding, otherwise `fold(raw)`.
+fn ascii_cased<'a>(
+    raw: &'a str,
+    needs_fold: fn(&u8) -> bool,
+    fold: fn(&str) -> String,
+) -> std::borrow::Cow<'a, str> {
+    if raw.bytes().any(|b| needs_fold(&b)) {
+        std::borrow::Cow::Owned(fold(raw))
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    }
+}
+
 /// [`under_prefix`], ignoring case the way case-insensitive upstreams do.
 ///
 /// ASCII letters fold to lower case. So do four non-ASCII letters that some
@@ -830,8 +843,12 @@ impl RouteTable {
         method: &str,
     ) -> Option<&RouteConfig> {
         let p = normalize_proxy_path(path);
-        let m = method.to_ascii_uppercase();
-        let h = host.map(|h| normalize_host(h).to_ascii_lowercase());
+        // Clients almost always send an upper-case method and a lower-case
+        // host already; only allocate for the ones that do not.
+        let m = ascii_cased(method, u8::is_ascii_lowercase, str::to_ascii_uppercase);
+        let h = host.map(|h| {
+            ascii_cased(normalize_host(h), u8::is_ascii_uppercase, str::to_ascii_lowercase)
+        });
 
         if let Some(index) = &self.lookup {
             return index.find(&self.routes, p, &m, h.as_deref());
