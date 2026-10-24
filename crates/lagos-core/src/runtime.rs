@@ -415,32 +415,6 @@ fn server_conf(cfg: &ResolvedConfig) -> pingora::server::configuration::ServerCo
     }
 }
 
-#[cfg(test)]
-mod server_conf_tests {
-    use super::*;
-
-    fn resolved(server: &str) -> ResolvedConfig {
-        let text = format!(
-            "server: {server}\nupstreams: {{u: http://u:1}}\nroutes:\n  public: [{{prefix: /p, upstream: u}}]\n"
-        );
-        let (raw, expanded) = GatewayConfig::parse("test.yml", &text).unwrap();
-        raw.resolve(&expanded).unwrap()
-    }
-
-    #[test]
-    fn the_drain_is_pingoras_grace_period_never_its_five_minute_default() {
-        let conf = server_conf(&resolved("{}"));
-        assert_eq!(conf.grace_period_seconds, Some(25));
-        assert_eq!(
-            conf.graceful_shutdown_timeout_seconds,
-            Some(RUNTIME_SHUTDOWN_SECS)
-        );
-
-        let conf = server_conf(&resolved("{shutdown_grace: 5s, graceful_shutdown: 20s}"));
-        assert_eq!(conf.grace_period_seconds, Some(25));
-    }
-}
-
 fn downstream_server_options(cfg: &ResolvedConfig) -> pingora::apps::HttpServerOptions {
     let mut opts = pingora::apps::HttpServerOptions::default();
     opts.keepalive_request_limit = match cfg.raw.limits.keepalive_requests {
@@ -917,5 +891,31 @@ mod shared_limit_tests {
         );
         assert_eq!(reloader.publish(local).await.unwrap(), 1);
         assert_eq!(backend.probes.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod server_conf_tests {
+    use super::*;
+
+    fn resolved(server: &str) -> ResolvedConfig {
+        let text = format!(
+            "server: {server}\nupstreams: {{u: http://u:1}}\nroutes:\n  public: [{{prefix: /p, upstream: u}}]\n"
+        );
+        let (raw, expanded) = GatewayConfig::parse("test.yml", &text).unwrap();
+        raw.resolve(&expanded).unwrap()
+    }
+
+    #[test]
+    fn the_drain_is_pingoras_grace_period_never_its_five_minute_default() {
+        let conf = server_conf(&resolved("{}"));
+        assert_eq!(conf.grace_period_seconds, Some(25));
+        assert_eq!(
+            conf.graceful_shutdown_timeout_seconds,
+            Some(RUNTIME_SHUTDOWN_SECS)
+        );
+
+        let conf = server_conf(&resolved("{shutdown_grace: 5s, graceful_shutdown: 20s}"));
+        assert_eq!(conf.grace_period_seconds, Some(25));
     }
 }

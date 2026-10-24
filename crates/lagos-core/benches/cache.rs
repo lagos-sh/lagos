@@ -1,7 +1,8 @@
 //! Reproducible, dependency-free microbenchmarks for the response-cache
 //! storage. Samples are batch means, not HTTP latency distributions. Run with
 //! `cargo bench --bench cache` (needs the default `cache` feature).
-#![allow(clippy::expect_used)] // Constant local benchmark fixtures only.
+// Constant local benchmark fixtures only; indices are always `% KEYS`.
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
 
 use std::hint::black_box;
 use std::time::{Duration, Instant, SystemTime};
