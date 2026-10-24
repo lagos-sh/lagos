@@ -27,6 +27,23 @@ use super::AuthError;
 /// compromised key endpoint can make the gateway allocate.
 const MAX_KEY_SET_BYTES: u64 = 1024 * 1024;
 
+/// Longest a fetched key set is trusted, whatever `max-age` the endpoint sends.
+///
+/// Rotation is picked up only by expiry (an unknown `kid` on a fresh cache is
+/// refused, not refetched), so an endpoint advertising a year would refuse
+/// every token signed by a new key for that year and keep a revoked key valid
+/// as long. Real endpoints send hours. A configured minimum above this wins.
+const MAX_KEY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long to cache a key set: the endpoint's `max-age`, at least `min_ttl`,
+/// and at most [`MAX_KEY_TTL`] unless the operator's minimum is higher.
+fn key_set_ttl(max_age: Option<Duration>, min_ttl: Duration) -> Duration {
+    max_age
+        .unwrap_or(min_ttl)
+        .min(MAX_KEY_TTL.max(min_ttl))
+        .max(min_ttl)
+}
+
 struct Cached {
     keys: HashMap<String, DecodingKey>,
     expires_at: Instant,
@@ -253,9 +270,7 @@ impl CertCache {
             )));
         }
 
-        let ttl = max_age(resp.headers())
-            .unwrap_or(self.min_ttl)
-            .max(self.min_ttl);
+        let ttl = key_set_ttl(max_age(resp.headers()), self.min_ttl);
 
         // Read in chunks rather than `bytes()`, which buffers whatever arrives.
         // The endpoint is operator configuration, not caller input, but it is
@@ -408,6 +423,29 @@ pub fn decoding_key_from_x509_pem(pem: &str) -> Result<DecodingKey, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_advertised_key_lifetime_is_capped_but_the_operator_minimum_wins() {
+        let min = Duration::from_secs(60);
+        let hour = Duration::from_secs(3600);
+        assert_eq!(key_set_ttl(Some(hour), min), hour);
+        assert_eq!(key_set_ttl(None, min), min);
+        assert_eq!(key_set_ttl(Some(Duration::from_secs(1)), min), min);
+        assert_eq!(
+            key_set_ttl(Some(Duration::from_secs(365 * 86_400)), min),
+            MAX_KEY_TTL
+        );
+        // `max-age=18446744073709551615` used to overflow the expiry and make
+        // every verification refetch.
+        let huge = key_set_ttl(Some(Duration::from_secs(u64::MAX)), min);
+        assert_eq!(huge, MAX_KEY_TTL);
+        assert!(Instant::now().checked_add(huge).is_some());
+        let long_min = Duration::from_secs(2 * 86_400);
+        assert_eq!(
+            key_set_ttl(Some(Duration::from_secs(u64::MAX)), long_min),
+            long_min
+        );
+    }
     use reqwest::header::{CACHE_CONTROL, HeaderMap, HeaderValue};
     use std::io::{Read, Write};
     use std::net::TcpListener;

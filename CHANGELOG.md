@@ -13,6 +13,10 @@ Behaviour changes and the config needed to preserve existing behaviour are in
   `discovery: {interval, max_members}` re-resolves in the background with
   atomic replacement; failed, empty, oversized or ambiguous refreshes keep the
   last good members and are counted in `gateway_upstream_discovery_total`.
+- Fetched signing keys are cached for at most 24 hours (or the configured
+  minimum, if higher), whatever `max-age` the endpoint sends. An uncapped
+  lifetime kept revoked keys valid and refused newly rotated keys for as long
+  as advertised, and `max-age` near `u64::MAX` made every verification refetch.
 - Route tables above 32 routes match through a segment index; at 10,000 routes
   a lookup measured about 0.46 us instead of 35.5 us (hit). Matching semantics
   are unchanged and covered by an equivalence test against the linear matcher.

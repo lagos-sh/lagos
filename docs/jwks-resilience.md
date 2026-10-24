@@ -30,3 +30,12 @@ refresh fails. This is public key caching, not token/revocation caching.
 `stale_exhausted` without user IDs, key IDs or issuer URLs as metric labels.
 Cancellation releases refresh leadership and wakes waiters; it cannot leave
 later token verification waiting forever on an orphaned refresh.
+
+## How long keys are cached
+
+A fetched key set is cached for the endpoint's `Cache-Control: max-age`, never
+less than the issuer's minimum TTL and never more than 24 hours unless that
+configured minimum is higher. Rotation is picked up only when the cache
+expires (an unknown `kid` on a fresh cache is refused without refetching), so
+the cap bounds how long a removed key stays trusted and how long a newly
+rotated key can be refused.
