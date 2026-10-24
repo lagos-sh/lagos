@@ -76,3 +76,29 @@ If a route needs application-specific code or a live authorization lookup,
 use the optional [`ext/` convention](extensions.md). Its builder image compiles
 the extension into the gateway binary; the two-file stock image cannot load
 Rust source at runtime.
+
+## Running several replicas
+
+Replicas share nothing unless you configure it. Lagos needs no database,
+cache or control plane, so every piece of runtime state below lives in one
+process unless the table says otherwise. Size limits with the replica count in
+mind.
+
+| State | Scope | With N replicas |
+| --- | --- | --- |
+| Rate limits, `counter: local` (default) | Per process | A limit admits up to N x the configured rate |
+| Rate limits, `counter: shared`, `mode: approximate` | Cluster, reconciled every `sync` | Overshoot of roughly `replicas x arrival rate x reconciliation period`; per-process if the store is unreachable |
+| Rate limits, `counter: shared`, `mode: exact` | Cluster, one store round trip per decision | Exact while the store answers; a failed check answers from the local window; boot and route reloads refuse a store that cannot do `RLCHECK` |
+| Concurrency caps | Per process | A cap of 20 admits up to N x 20 in flight |
+| Circuit breakers | Per process | Each replica opens and closes its own circuit from its own traffic |
+| Pool health and `discovery` | Per process | Each replica probes and resolves on its own schedule, so membership can differ briefly |
+| Response cache | Per process | Each replica fills its own cache, and a reload rotates only that replica's namespace |
+| JWKS / Firebase keys | Per process | Each replica fetches keys, and `stale_if_error` windows run independently |
+| Accept-time `connections_per_ip` | Per process | A load balancer spreading one address across replicas multiplies its allowance |
+| Route file reloads | Per process | Each replica polls its own copy; a ConfigMap update reaches replicas at different times |
+
+Alert on `gateway_shared_limit_errors_total` when using shared counters: it is
+the only signal that a cluster-wide limit has degraded to per-process counting
+while traffic continues. For caps and breakers that must hold cluster-wide,
+divide the intended limit by the replica count, or enforce it at a single
+shared component in front of the gateway.
