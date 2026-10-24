@@ -219,6 +219,12 @@ impl std::fmt::Debug for SharedCounters {
 }
 
 impl SharedCounters {
+    pub(super) fn same_backend(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.backend, &other.backend)
+            && self.prefix == other.prefix
+            && self.batch == other.batch
+    }
+
     pub fn new(
         cfg: &crate::config::RateLimitConfig,
         shared: &crate::config::SharedCountersConfig,
@@ -696,6 +702,17 @@ mod tests {
             }
             Ok(("a test double".into(), true))
         }
+    }
+
+    #[test]
+    fn reuse_requires_the_same_backend_and_namespace() {
+        let backend = Arc::new(FakeBackend::default());
+        let old = counters(10, backend.clone());
+        let mut new = counters(10, backend);
+        assert!(old.same_backend(&new));
+        new.prefix = "other:".into();
+        assert!(!old.same_backend(&new));
+        assert!(!old.same_backend(&counters(10, Arc::new(FakeBackend::default()))));
     }
 
     fn counters(requests: u64, backend: Arc<FakeBackend>) -> SharedCounters {

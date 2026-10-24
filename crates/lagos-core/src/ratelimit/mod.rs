@@ -209,6 +209,15 @@ impl std::fmt::Debug for Limiter {
 }
 
 impl Limiter {
+    pub(crate) fn same_backend(&self, other: &Self) -> bool {
+        match (&self.counters, &other.counters) {
+            (Counters::Shared(a), Counters::Shared(b)) => a.same_backend(b),
+            (Counters::Exact(_), Counters::Exact(_))
+            | (Counters::Sketch(_), Counters::Sketch(_)) => true,
+            _ => false,
+        }
+    }
+
     /// A limiter counting in this process only.
     ///
     /// `counter: shared` reaching here means no backend was configured, which

@@ -963,6 +963,11 @@ impl SharedRoutes {
                 && old.bind == route.bind
                 && old.extensions == route.extensions
                 && old.rate_limit == route.rate_limit
+                && old
+                    .limiter
+                    .as_ref()
+                    .zip(route.limiter.as_ref())
+                    .is_some_and(|(a, b)| a.same_backend(b))
             {
                 // Share the synchronized counter, never mutate the old policy.
                 // Readers holding an old table keep counting in the same window.
